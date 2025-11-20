@@ -76,6 +76,7 @@ struct App {
     status: String,                            // Status bar text
     quantizations: Arc<Mutex<Vec<QuantizationInfo>>>, // Quantized versions
     loading_quants: bool,                      // Quantization fetch in progress
+    quant_cache: Arc<Mutex<HashMap<String, Vec<QuantizationInfo>>>>, // Cache by model ID
 }
 ```
 
@@ -194,7 +195,8 @@ async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
 | `App::toggle_focus()` | Switch focus between Models and Quantizations panes |
 | `App::next_quant()` | Navigate to next quantization in list |
 | `App::previous_quant()` | Navigate to previous quantization in list |
-| `App::load_quantizations()` | Fetch quantized file info for selected model |
+| `App::load_quantizations()` | Fetch quantized file info for selected model (with cache check) |
+| `App::start_background_prefetch()` | Spawn async task to prefetch all model quantizations |
 | `App::show_model_details()` | Display full model info in status bar |
 | `App::show_quantization_details()` | Display quantization info in status bar |
 | `fetch_models()` | HTTP request to HuggingFace models API |
@@ -209,12 +211,15 @@ async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
 **Shared State with Arc<Mutex>:**
 ```rust
 models: Arc<Mutex<Vec<ModelInfo>>>
+quant_cache: Arc<Mutex<HashMap<String, Vec<QuantizationInfo>>>>
 ```
 
 Why this approach:
 - Enables async API calls to update model list
 - Allows UI to render while fetching data
 - Thread-safe access from event handlers
+- Cache shared between main app and background tasks
+- Background prefetch runs independently without blocking UI
 
 ### Error Handling Strategy
 
@@ -310,7 +315,16 @@ fn extract_quantization_type(filename: &str) -> Option<String> {
 **When quantizations load:**
 - After search completes (for first result)
 - When navigating with j/k keys
+- Background prefetch for all models starts automatically
 - Async fetch doesn't block UI
+
+**Caching Strategy:**
+- Quantization data cached in-memory by model ID
+- Cache check happens first before API call
+- Background task prefetches all models in result list
+- 100ms delay between prefetch requests (rate limiting)
+- Cache persists for session duration
+- Navigation between cached models is instant
 
 **Empty states:**
 - "Select a model to view" - No model selected
@@ -543,7 +557,14 @@ let response = client
 
 ## Version History
 
-- **v0.3.0** (Current): Added focus system with Tab key navigation
+- **v0.4.0** (Current): Added caching and background prefetching for quantizations
+  - HashMap cache stores quantization data by model ID
+  - Cache check before API calls (instant navigation for cached models)
+  - Background async prefetch automatically loads all models in results
+  - 100ms rate limiting between prefetch requests
+  - Cache persists for session duration
+  
+- **v0.3.0**: Added focus system with Tab key navigation
   - Tab key switches focus between Models and Quantizations lists
   - Yellow border highlights currently focused pane
   - Independent navigation (j/k) in each list
