@@ -8,6 +8,7 @@ A Terminal User Interface (TUI) application for searching and browsing models fr
 - ⌨️ **Vim-like Controls**: Efficient keyboard navigation
 - 📊 **Rich Display**: View model details including downloads, likes, and tags
 - 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, etc.) with file sizes
+- 📥 **Model Downloads**: Download models directly from the TUI with progress tracking
 - ⚡ **Async API**: Non-blocking UI with async API calls
 - 🎨 **Colorful Interface**: Syntax-highlighted results for better readability
 
@@ -31,8 +32,9 @@ cargo run --release
 |-----|--------|
 | `/` | Enter search mode |
 | `Tab` | Switch focus between Models and Quantizations lists |
+| `d` | Download selected quantization (when Quantizations list is focused) |
 | `Enter` | Execute search (in search mode) / Show details (in browse mode) |
-| `Esc` | Return to browse mode from search mode |
+| `Esc` | Return to browse mode from search mode / Cancel popup |
 | `j` or `↓` | Move selection down in focused list |
 | `k` or `↑` | Move selection up in focused list |
 | `q` or `Ctrl+C` | Quit application |
@@ -47,9 +49,15 @@ cargo run --release
 6. **View quantization details** automatically as you select different models
 7. **Press Tab** to switch focus to the Quantizations list (yellow border moves)
 8. **Navigate quantizations** with `j`/`k` or arrow keys
-9. **Press Enter** to see full details of the selected item in the status bar
-10. **Press Tab** again to return focus to the Models list
-11. **Press `/`** to start a new search
+9. **Press `d`** to download the selected quantization:
+   - A popup will appear with the default path `~/models`
+   - Edit the path if needed
+   - Press Enter to confirm and start download
+   - Press Esc to cancel
+   - Download progress will appear in the top right corner
+10. **Press Enter** to see full details of the selected item in the status bar
+11. **Press Tab** again to return focus to the Models list
+12. **Press `/`** to start a new search
 
 The **Quantization Details** section shows all available GGUF quantized versions of the selected model with three columns:
 - **Left**: File size (formatted as GB/MB/KB)

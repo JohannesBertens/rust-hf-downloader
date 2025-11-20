@@ -13,7 +13,7 @@ futures = "0.3.31"
 ratatui = "0.29.0"
 tokio = { version = "1.40.0", features = ["full"] }
 tui-input = "0.10"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 urlencoding = "2.1"

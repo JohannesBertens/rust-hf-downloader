@@ -3,15 +3,16 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use futures::{FutureExt, StreamExt};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Gauge, Clear},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
 
@@ -55,6 +56,21 @@ struct QuantizationInfo {
     size: u64,
 }
 
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct DownloadProgress {
+    model_id: String,
+    filename: String,
+    downloaded: u64,
+    total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PopupMode {
+    None,
+    DownloadPath,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
     Normal,
@@ -83,6 +99,11 @@ pub struct App {
     quantizations: Arc<Mutex<Vec<QuantizationInfo>>>,
     loading_quants: bool,
     quant_cache: Arc<Mutex<HashMap<String, Vec<QuantizationInfo>>>>,
+    popup_mode: PopupMode,
+    download_path_input: Input,
+    download_progress: Arc<Mutex<Option<DownloadProgress>>>,
+    download_tx: mpsc::UnboundedSender<(String, String, PathBuf)>,
+    download_rx: Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf)>>>,
 }
 
 impl Default for App {
@@ -98,6 +119,13 @@ impl App {
         
         let quant_list_state = ListState::default();
         
+        let (download_tx, download_rx) = mpsc::unbounded_channel();
+        
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let default_path = format!("{}/models", home);
+        let mut download_path_input = Input::default();
+        download_path_input = download_path_input.with_value(default_path);
+        
         Self {
             running: false,
             event_stream: EventStream::default(),
@@ -109,15 +137,31 @@ impl App {
             quant_list_state,
             loading: false,
             error: None,
-            status: "Press '/' to search, Tab to switch lists, 'q' to quit".to_string(),
+            status: "Press '/' to search, Tab to switch lists, 'd' to download, 'q' to quit".to_string(),
             quantizations: Arc::new(Mutex::new(Vec::new())),
             loading_quants: false,
             quant_cache: Arc::new(Mutex::new(HashMap::new())),
+            popup_mode: PopupMode::None,
+            download_path_input,
+            download_progress: Arc::new(Mutex::new(None)),
+            download_tx,
+            download_rx: Arc::new(Mutex::new(download_rx)),
         }
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.running = true;
+        
+        // Spawn download manager task
+        let download_rx = self.download_rx.clone();
+        let download_progress = self.download_progress.clone();
+        tokio::spawn(async move {
+            let mut rx = download_rx.lock().await;
+            while let Some((model_id, filename, path)) = rx.recv().await {
+                start_download(model_id, filename, path, download_progress.clone()).await;
+            }
+        });
+        
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_crossterm_events().await?;
@@ -317,25 +361,153 @@ impl App {
             .wrap(Wrap { trim: true });
 
         frame.render_widget(status, chunks[3]);
+        
+        // Render download progress bar in top right corner if download is active
+        let download_progress = futures::executor::block_on(async {
+            self.download_progress.lock().await.clone()
+        });
+        
+        if let Some(progress) = download_progress {
+            let progress_area = Rect {
+                x: frame.area().width.saturating_sub(42),
+                y: 0,
+                width: 42.min(frame.area().width),
+                height: 3,
+            };
+            
+            let percentage = if progress.total > 0 {
+                (progress.downloaded as f64 / progress.total as f64 * 100.0) as u16
+            } else {
+                0
+            };
+            
+            let gauge = Gauge::default()
+                .block(Block::default().borders(Borders::ALL).title("Downloading"))
+                .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+                .percent(percentage);
+            
+            frame.render_widget(gauge, progress_area);
+        }
+        
+        // IMPORTANT: Render popup last so it appears on top of all other widgets
+        if self.popup_mode == PopupMode::DownloadPath {
+            // Calculate centered popup area
+            let popup_width = 60.min(frame.area().width.saturating_sub(4));
+            let popup_height = 7;
+            let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
+            let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
+            
+            let popup_area = Rect {
+                x: popup_x,
+                y: popup_y,
+                width: popup_width,
+                height: popup_height,
+            };
+            
+            // Clear the popup area first to remove any underlying content
+            frame.render_widget(Clear, popup_area);
+            
+            // Render popup background
+            let popup_block = Block::default()
+                .borders(Borders::ALL)
+                .title("Download Model")
+                .style(Style::default().fg(Color::White).bg(Color::Black));
+            
+            frame.render_widget(popup_block, popup_area);
+            
+            // Render input label
+            let label_area = Rect {
+                x: popup_area.x + 2,
+                y: popup_area.y + 1,
+                width: popup_area.width.saturating_sub(4),
+                height: 1,
+            };
+            
+            let label = Paragraph::new("Download path:")
+                .style(Style::default().fg(Color::White));
+            
+            frame.render_widget(label, label_area);
+            
+            // Render input field
+            let input_area = Rect {
+                x: popup_area.x + 2,
+                y: popup_area.y + 2,
+                width: popup_area.width.saturating_sub(4),
+                height: 1,
+            };
+            
+            let width = input_area.width.max(3) as usize;
+            let scroll = self.download_path_input.visual_scroll(width);
+            
+            let input_widget = Paragraph::new(self.download_path_input.value())
+                .style(Style::default().fg(Color::Yellow))
+                .scroll((0, scroll as u16));
+            
+            frame.render_widget(input_widget, input_area);
+            
+            // Set cursor position
+            frame.set_cursor_position((
+                input_area.x + ((self.download_path_input.visual_cursor()).max(scroll) - scroll) as u16,
+                input_area.y,
+            ));
+            
+            // Render instructions
+            let instructions_area = Rect {
+                x: popup_area.x + 2,
+                y: popup_area.y + 4,
+                width: popup_area.width.saturating_sub(4),
+                height: 1,
+            };
+            
+            let instructions = Paragraph::new("Press Enter to confirm, ESC to cancel")
+                .style(Style::default().fg(Color::DarkGray));
+            
+            frame.render_widget(instructions, instructions_area);
+        }
     }
 
     async fn handle_crossterm_events(&mut self) -> Result<()> {
-        let event = self.event_stream.next().fuse().await;
-        match event {
-            Some(Ok(evt)) => {
-                if let Event::Key(key) = evt {
-                    if key.kind == KeyEventKind::Press {
-                        self.on_key_event(key).await;
+        let delay = tokio::time::sleep(tokio::time::Duration::from_millis(100));
+        tokio::select! {
+            maybe_event = self.event_stream.next().fuse() => {
+                match maybe_event {
+                    Some(Ok(evt)) => {
+                        if let Event::Key(key) = evt {
+                            if key.kind == KeyEventKind::Press {
+                                self.on_key_event(key).await;
+                            }
+                        }
                     }
+                    _ => {}
                 }
             }
-            _ => {}
+            _ = delay => {
+                // Timeout - just redraw
+            }
         }
         Ok(())
     }
 
     async fn on_key_event(&mut self, key: KeyEvent) {
         self.error = None;
+
+        // Handle popup input separately
+        if self.popup_mode == PopupMode::DownloadPath {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_download().await;
+                    self.popup_mode = PopupMode::None;
+                }
+                KeyCode::Esc => {
+                    self.popup_mode = PopupMode::None;
+                    self.status = "Download cancelled".to_string();
+                }
+                _ => {
+                    self.download_path_input.handle_event(&Event::Key(key));
+                }
+            }
+            return;
+        }
 
         match self.input_mode {
             InputMode::Normal => match (key.modifiers, key.code) {
@@ -344,6 +516,11 @@ impl App {
                 (_, KeyCode::Char('/')) => {
                     self.input_mode = InputMode::Editing;
                     self.status = "Enter search query, press Enter to search, ESC to cancel".to_string();
+                }
+                (_, KeyCode::Char('d')) => {
+                    if self.focused_pane == FocusedPane::Quantizations {
+                        self.trigger_download();
+                    }
                 }
                 (_, KeyCode::Tab) => {
                     self.toggle_focus();
@@ -390,7 +567,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
-                    self.status = "Press '/' to search, 'q' to quit".to_string();
+                    self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'q' to quit".to_string();
                 }
                 _ => {
                     self.input.handle_event(&Event::Key(key));
@@ -646,6 +823,48 @@ impl App {
     fn quit(&mut self) {
         self.running = false;
     }
+    
+    fn trigger_download(&mut self) {
+        let quantizations = futures::executor::block_on(async {
+            self.quantizations.lock().await.clone()
+        });
+        
+        if let Some(selected) = self.quant_list_state.selected() {
+            if selected < quantizations.len() {
+                self.popup_mode = PopupMode::DownloadPath;
+                self.status = "Enter download path and press Enter".to_string();
+            }
+        }
+    }
+    
+    async fn confirm_download(&mut self) {
+        let models = self.models.lock().await.clone();
+        let quantizations = self.quantizations.lock().await.clone();
+        
+        let model_selected = self.list_state.selected();
+        let quant_selected = self.quant_list_state.selected();
+        
+        if let (Some(model_idx), Some(quant_idx)) = (model_selected, quant_selected) {
+            if model_idx < models.len() && quant_idx < quantizations.len() {
+                let model = &models[model_idx];
+                let quant = &quantizations[quant_idx];
+                
+                let path = self.download_path_input.value().to_string();
+                let path_buf = PathBuf::from(path);
+                
+                // Send download request
+                if self.download_tx.send((
+                    model.id.clone(),
+                    quant.filename.clone(),
+                    path_buf,
+                )).is_ok() {
+                    self.status = format!("Starting download of {} to {}", quant.filename, self.download_path_input.value());
+                } else {
+                    self.error = Some("Failed to start download".to_string());
+                }
+            }
+        }
+    }
 }
 
 async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
@@ -783,6 +1002,104 @@ fn extract_quantization_type(filename: &str) -> Option<String> {
     }
     
     None
+}
+
+async fn start_download(
+    model_id: String,
+    filename: String,
+    base_path: PathBuf,
+    progress: Arc<Mutex<Option<DownloadProgress>>>,
+) {
+    // Create directory if it doesn't exist
+    if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
+        eprintln!("Failed to create directory: {}", e);
+        return;
+    }
+    
+    // Construct full file path
+    let file_path = base_path.join(&filename);
+    
+    // Initialize progress
+    {
+        let mut prog = progress.lock().await;
+        *prog = Some(DownloadProgress {
+            model_id: model_id.clone(),
+            filename: filename.clone(),
+            downloaded: 0,
+            total: 0,
+        });
+    }
+    
+    // Download the file using streaming
+    let url = format!("https://huggingface.co/{}/resolve/main/{}", model_id, filename);
+    
+    let client = reqwest::Client::new();
+    let response = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            eprintln!("Failed to start download: {}", e);
+            let mut prog = progress.lock().await;
+            *prog = None;
+            return;
+        }
+    };
+    
+    let total_size = response.content_length().unwrap_or(0);
+    
+    // Update total size
+    {
+        let mut prog = progress.lock().await;
+        if let Some(p) = prog.as_mut() {
+            p.total = total_size;
+        }
+    }
+    
+    let mut file = match tokio::fs::File::create(&file_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to create file: {}", e);
+            let mut prog = progress.lock().await;
+            *prog = None;
+            return;
+        }
+    };
+    
+    let mut downloaded: u64 = 0;
+    let mut stream = response.bytes_stream();
+    
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    
+    while let Some(item) = stream.next().await {
+        let chunk = match item {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Error while downloading: {}", e);
+                break;
+            }
+        };
+        
+        if let Err(e) = file.write_all(&chunk).await {
+            eprintln!("Error writing to file: {}", e);
+            break;
+        }
+        
+        downloaded += chunk.len() as u64;
+        
+        // Update progress
+        let mut prog = progress.lock().await;
+        if let Some(p) = prog.as_mut() {
+            p.downloaded = downloaded;
+        }
+    }
+    
+    // Flush and sync
+    let _ = file.flush().await;
+    let _ = file.sync_all().await;
+    
+    // Clear progress when done
+    let mut prog = progress.lock().await;
+    *prog = None;
 }
 
 
