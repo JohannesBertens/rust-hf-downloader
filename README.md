@@ -1,14 +1,22 @@
 # hf-search
 
-A Terminal User Interface (TUI) application for searching and browsing models from the HuggingFace model hub.
+A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
 ## Features
 
 - 🔍 **Interactive Search**: Search through thousands of HuggingFace models
 - ⌨️ **Vim-like Controls**: Efficient keyboard navigation
 - 📊 **Rich Display**: View model details including downloads, likes, and tags
-- 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, etc.) with file sizes
-- 📥 **Model Downloads**: Download models directly from the TUI with progress tracking
+- 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, IQ4_XS, MXFP4, etc.) with file sizes
+- 📥 **Smart Downloads**: Download models directly from the TUI with:
+  - Progress tracking with speed indicators
+  - Resume support for interrupted downloads
+  - Multi-part GGUF file handling
+  - Automatic subfolder organization by publisher/model
+  - Download queue with status display
+- ✅ **Download Tracking**: Visual indicators showing already downloaded files
+- 🔄 **Resume on Startup**: Automatically detect and offer to resume incomplete downloads
+- 💾 **Metadata Management**: TOML-based download registry for reliable tracking
 - ⚡ **Async API**: Non-blocking UI with async API calls
 - 🎨 **Colorful Interface**: Syntax-highlighted results for better readability
 
@@ -39,30 +47,57 @@ cargo run --release
 | `k` or `↑` | Move selection up in focused list |
 | `q` or `Ctrl+C` | Quit application |
 
+#### Resume Download Popup (on startup)
+| Key | Action |
+|-----|--------|
+| `Y` | Resume all incomplete downloads |
+| `N` | Skip incomplete downloads |
+| `D` | Delete incomplete files and skip |
+
 ### How to Use
 
-1. **Start the application** - You'll see an empty search interface
+1. **Start the application** - If incomplete downloads exist, you'll see a resume popup first
+   - Press `Y` to resume incomplete downloads
+   - Press `N` to skip and continue
+   - Press `D` to delete incomplete files
+   
 2. **Press `/`** to enter search mode (the search box will be highlighted in yellow)
+
 3. **Type your query** (e.g., "gpt", "llama", "mistral")
+
 4. **Press Enter** to search
+
 5. **Navigate model results** with `j`/`k` or arrow keys (Models list is focused by default, yellow border)
+
 6. **View quantization details** automatically as you select different models
+   - Green `[downloaded]` indicator shows files you already have
+
 7. **Press Tab** to switch focus to the Quantizations list (yellow border moves)
+
 8. **Navigate quantizations** with `j`/`k` or arrow keys
+
 9. **Press `d`** to download the selected quantization:
    - A popup will appear with the default path `~/models`
    - Edit the path if needed
    - Press Enter to confirm and start download
+   - Files are saved to: `{path}/{author}/{model-name}/{filename}`
+   - For multi-part GGUFs, all parts are queued automatically
    - Press Esc to cancel
-   - Download progress will appear in the top right corner
+   - Download progress appears in the top right corner with:
+     - Progress percentage
+     - Download speed (MB/s)
+     - Queue count if multiple downloads pending
+
 10. **Press Enter** to see full details of the selected item in the status bar
+
 11. **Press Tab** again to return focus to the Models list
+
 12. **Press `/`** to start a new search
 
-The **Quantization Details** section shows all available GGUF quantized versions of the selected model with three columns:
-- **Left**: File size (formatted as GB/MB/KB)
-- **Middle**: Quantization type only (Q2_K, Q4_K_M, Q5_0, Q8_0, etc.)
-- **Right**: Full filename for reference
+The **Quantization Details** section shows all available GGUF quantized versions with:
+- **Left**: Combined file size (formatted as GB/MB/KB) - sum of all parts for multi-part files
+- **Middle**: Quantization type (Q2_K, Q4_K_M, Q5_0, Q8_0, IQ4_XS, MXFP4, etc.)
+- **Right**: Filename with green `[downloaded]` indicator if already on disk
 
 ### Example Searches
 
@@ -75,9 +110,15 @@ The **Quantization Details** section shows all available GGUF quantized versions
 ### Architecture
 
 - **TUI Framework**: [ratatui](https://github.com/ratatui/ratatui)
-- **HTTP Client**: reqwest with async support
+- **HTTP Client**: reqwest with async support and streaming downloads
 - **API**: HuggingFace REST API (`https://huggingface.co/api/models`)
 - **Text Input**: tui-input for search box handling
+- **Download Management**: 
+  - TOML-based metadata registry (`~/models/hf-downloads.toml`)
+  - Automatic resume from byte position
+  - Retry logic with exponential backoff
+  - Multi-part file detection and grouping
+  - In-memory tracking of completed downloads
 
 ### API Integration
 
@@ -101,10 +142,14 @@ hf-search/
 - `ratatui`: TUI framework
 - `crossterm`: Terminal manipulation
 - `tokio`: Async runtime
-- `reqwest`: HTTP client
+- `reqwest`: HTTP client with streaming support
 - `serde`: JSON serialization
 - `tui-input`: Text input widget
 - `color-eyre`: Error handling
+- `toml`: TOML serialization for download metadata
+- `regex`: Multi-part filename pattern matching
+- `urlencoding`: URL-safe query encoding
+- `futures`: Async stream utilities
 
 ## License
 

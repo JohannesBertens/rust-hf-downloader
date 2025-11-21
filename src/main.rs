@@ -163,14 +163,14 @@ impl App {
             running: false,
             event_stream: EventStream::default(),
             input: Input::default(),
-            input_mode: InputMode::Normal,
+            input_mode: InputMode::Editing,  // Start in editing mode for immediate search
             focused_pane: FocusedPane::Models,
             models: Arc::new(Mutex::new(Vec::new())),
             list_state,
             quant_list_state,
             loading: false,
             error: None,
-            status: "Press '/' to search, Tab to switch lists, 'd' to download, 'q' to quit".to_string(),
+            status: "Enter search query, press Enter to search, ESC to browse, 'q' to quit".to_string(),
             quantizations: Arc::new(Mutex::new(Vec::new())),
             loading_quants: false,
             quant_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -834,6 +834,8 @@ impl App {
                 (_, KeyCode::Enter) => {
                     match self.focused_pane {
                         FocusedPane::Models => {
+                            // Switch focus to Quantizations list
+                            self.toggle_focus();
                             self.show_model_details().await;
                         }
                         FocusedPane::Quantizations => {
@@ -1870,5 +1872,3 @@ async fn download_with_resume(
     
     Ok((downloaded, total_size))
 }
-
-

@@ -4,27 +4,35 @@ This document provides AI agents with a comprehensive understanding of the hf-se
 
 ## Project Overview
 
-**hf-search** is a Terminal User Interface (TUI) application written in Rust that allows users to search and browse models from the HuggingFace model hub. It provides an interactive, keyboard-driven interface with vim-like controls.
+**hf-search** is a Terminal User Interface (TUI) application written in Rust that allows users to search, browse, and download models from the HuggingFace model hub. It provides an interactive, keyboard-driven interface with vim-like controls and comprehensive download management.
 
 ### Purpose
-Enable users to discover and explore HuggingFace models directly from the terminal without needing a web browser.
+Enable users to discover, explore, and download HuggingFace models directly from the terminal with:
+- Reliable download management with resume support
+- Multi-part GGUF file handling
+- Organized folder structure by publisher and model
+- Visual tracking of completed downloads
 
 ### Key Technologies
 - **Language**: Rust (Edition 2024)
 - **UI Framework**: ratatui 0.29.0
-- **Async Runtime**: tokio 1.40.0
-- **HTTP Client**: reqwest 0.12 (with JSON support)
-- **Terminal Backend**: crossterm 0.28.1
+- **Async Runtime**: tokio 1.40.0 (with full feature set)
+- **HTTP Client**: reqwest 0.12 (with JSON and streaming support)
+- **Terminal Backend**: crossterm 0.28.1 (with event-stream)
+- **Metadata Format**: TOML 0.8 (for download registry)
+- **Pattern Matching**: regex 1.10 (for multi-part file detection)
 
 ## Architecture
 
 ### Single-File Design
-The entire application is contained in a single file: `src/main.rs` (~400 lines)
+The entire application is contained in a single file: `src/main.rs` (~1870 lines)
 
 This monolithic approach simplifies:
 - Understanding the complete flow
 - Debugging
 - Making changes to any component
+
+Despite growing feature complexity (downloads, resume, multi-part handling, metadata), keeping everything in one file maintains clarity of the full system behavior.
 
 ### Core Components
 
@@ -355,6 +363,80 @@ fn extract_quantization_type(filename: &str) -> Option<String> {
 
 The app automatically detects and handles both patterns, summing split files in directories.
 
+### Download Management System (v0.5.0)
+
+**Purpose**: Enable reliable downloading of GGUF models with resume support and proper organization
+
+**Key Components:**
+
+1. **Metadata Registry (`~/models/hf-downloads.toml`)**
+   - TOML-based persistent storage of download state
+   - Tracks: model_id, filename, url, local_path, total_size, downloaded_size, status
+   - Status enum: `Incomplete` or `Complete`
+   - Enables resume across application restarts
+
+2. **Download Flow:**
+   ```
+   User presses 'd' → Download path popup → Enter confirms
+   ↓
+   Create metadata entries (status: Incomplete) → Save registry
+   ↓
+   Queue downloads to async download manager
+   ↓
+   Download starts → Update metadata with total_size → Progress updates
+   ↓
+   Download completes → Verify size → Mark Complete → Update UI
+   ```
+
+3. **Multi-Part File Handling:**
+   - Two formats supported:
+     - `model-Q4_K-00001-of-00005.gguf` (5-digit format)
+     - `model.Q4_K.gguf.part1of5` (partNofM format)
+   - Automatic detection via regex patterns
+   - All parts grouped and shown as single entry with combined size
+   - When downloading, all parts automatically queued
+
+4. **Resume Support:**
+   - On startup: scan registry for `Incomplete` entries
+   - Show popup with list of incomplete downloads (up to 5 shown, "X more" if > 5)
+   - User options: Y (resume), N (skip), D (delete .incomplete files + remove from registry)
+   - Resume uses HTTP Range header: `bytes={downloaded}-`
+   - Progress tracking updates registry periodically
+
+5. **File Organization:**
+   - Structure: `{base_path}/{author}/{model_name}/{filename}`
+   - Example: `~/models/unsloth/Qwen3-VL-4B-Thinking-GGUF/Qwen3-VL-4B-Thinking-Q6_K.gguf`
+   - Author and model extracted from model ID (format: `author/model-name`)
+   - All quantizations for a model stored together
+
+6. **Progress Tracking:**
+   - Top-right gauge shows: percentage, speed (MB/s), queue count
+   - Status bar shows: current operation, errors, completion messages
+   - In-memory: `complete_downloads` HashMap for instant UI updates
+   - Persistent: TOML registry for cross-session tracking
+
+7. **Visual Indicators:**
+   - Green `[downloaded]` suffix on filenames in quantization list
+   - Checked against in-memory HashMap (O(1) lookup)
+   - Updated immediately when download completes
+
+8. **Error Handling:**
+   - Transient errors (timeout, connection): automatic retry up to 5 times
+   - Permanent errors: show in status bar, mark incomplete in registry
+   - All console output (`eprintln!`) replaced with status messages
+   - Status updates via async channel from download task to UI
+
+9. **Key Functions:**
+   - `confirm_download()`: Create metadata, queue downloads
+   - `start_download()`: Main download orchestrator with retry logic
+   - `download_with_resume()`: Streaming download with Range header support
+   - `scan_incomplete_downloads()`: Load registry, populate incomplete list, show popup
+   - `resume_incomplete_downloads()`: Queue incomplete downloads
+   - `delete_incomplete_downloads()`: Remove .incomplete files and registry entries
+   - `parse_multipart_filename()`: Detect both multi-part formats
+   - `get_multipart_base_name()`: Extract base name without part suffix
+   - `extract_quantization_type()`: Parse quant type, handling multi-part and special formats
+
 ## Development Guide
 
 ### Building the Project
@@ -557,7 +639,20 @@ let response = client
 
 ## Version History
 
-- **v0.4.0** (Current): Added caching and background prefetching for quantizations
+- **v0.5.0** (Current): Complete download management system
+  - **Download functionality**: Stream downloads with progress tracking and speed indicators
+  - **Resume support**: Automatic detection and resumption of interrupted downloads
+  - **Multi-part GGUF handling**: Two filename formats supported (`-00001-of-00005` and `.part1of5`)
+  - **Metadata registry**: TOML-based tracking in `~/models/hf-downloads.toml`
+  - **Organized storage**: Files saved to `{base}/{author}/{model}/` structure
+  - **Visual indicators**: Green `[downloaded]` labels in quantization list
+  - **Startup resume popup**: Detect incomplete downloads and offer Y/N/D options
+  - **Download queue**: Multiple downloads queued with status display
+  - **Smart quantization parsing**: Handles IQ4_XS, MXFP4, BF16, and multi-part suffixes
+  - **Error reporting**: All errors and debug info shown in status bar
+  - **Retry logic**: Automatic retry with backoff for transient network errors
+  
+- **v0.4.0**: Added caching and background prefetching for quantizations
   - HashMap cache stores quantization data by model ID
   - Cache check before API calls (instant navigation for cached models)
   - Background async prefetch automatically loads all models in results
@@ -593,5 +688,6 @@ When modifying this codebase:
 
 ---
 
-**Last Updated**: 2025-11-20  
+**Last Updated**: 2025-11-21  
+**Version**: 0.5.0  
 **Maintainer**: Johannes Bertens <>
