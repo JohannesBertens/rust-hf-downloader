@@ -1,6 +1,6 @@
 [package]
 name = "rust-hf-downloader"
-version = "0.6.2"
+version = "0.6.3"
 description = "TUI for searching and downloading HuggingFace models"
 authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
@@ -16,9 +16,13 @@ futures = "0.3.31"
 ratatui = "0.29.0"
 tokio = { version = "1.40.0", features = ["full"] }
 tui-input = "0.10"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 urlencoding = "2.1"
 regex = "1.10"
 toml = "0.8"
+
+# Pin dependencies for Rust 1.75.0 compatibility (Ubuntu 22.04)
+url = "=2.4.1"
+idna = "=0.5.0"
