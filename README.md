@@ -22,6 +22,11 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - ⚡ **Async API**: Non-blocking UI with async API calls
 - 🎨 **Colorful Interface**: Syntax-highlighted results for better readability
 
+## Requirements
+
+- **Rust**: 1.75.0 or newer (compatible with Ubuntu 22.04 LTS default compiler)
+- **Cargo**: Latest stable version
+
 ## Installation
 
 ```bash
@@ -112,8 +117,10 @@ The **Quantization Details** section shows all available GGUF quantized versions
 ### Architecture
 
 - **Rust Edition**: 2021
+- **Minimum Rust Version**: 1.75.0+ (Ubuntu 22.04 compatible)
 - **TUI Framework**: [ratatui](https://github.com/ratatui/ratatui)
 - **HTTP Client**: reqwest with async support and streaming downloads
+- **TLS Backend**: rustls (pure Rust TLS implementation)
 - **API**: HuggingFace REST API (`https://huggingface.co/api/models`)
 - **Text Input**: tui-input for search box handling
 - **Download Management**: 
@@ -164,6 +171,10 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 0.6.2 (2025-11-21)
+- Switched from native-tls to rustls for TLS implementation
+- Added support for Rust 1.75.0+ (Ubuntu 22.04 compatibility)
 
 ### Version 0.6.1 (2025-11-21)
 - Changed Rust edition from 2024 to 2021 in Cargo.toml
