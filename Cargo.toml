@@ -6,7 +6,7 @@ authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
 edition = "2024"
 documentation = "https://github.com/JohannesBertens/rust-hf-downloader"
-homepage = "jreb.nl"
+homepage = "https://jreb.nl"
 repository = "https://github.com/JohannesBertens/rust-hf-downloader"
 
 [dependencies]
