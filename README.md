@@ -141,11 +141,27 @@ The application queries the HuggingFace API with the following parameters:
 
 ```
 rust-hf-downloader/
-├── Cargo.toml          # Dependencies and project metadata
-├── README.md           # This file
+├── Cargo.toml              # Dependencies and project metadata
+├── README.md               # This file
+├── changelog/              # Release notes for all versions
 └── src/
-    └── main.rs         # Main application code
+    ├── main.rs             # Entry point
+    ├── models.rs           # Data structures & types
+    ├── utils.rs            # Formatting utilities
+    ├── api.rs              # HuggingFace API client
+    ├── registry.rs         # Download registry persistence
+    ├── download.rs         # Download manager & security
+    └── ui/
+        ├── mod.rs          # UI module declaration
+        ├── app.rs          # App state & event handling
+        └── render.rs       # TUI rendering logic
 ```
+
+**Version 0.7.0** introduces a modular architecture with clear separation of concerns:
+- **6 top-level modules** for business logic
+- **2 UI submodules** for presentation layer
+- **~240 lines average** per file (previously 2,074 in one file)
+- **Improved maintainability, testability, and readability**
 
 ## Dependencies
 
@@ -172,6 +188,16 @@ Key security features in v0.6.0:
 
 ## Changelog
 
+### Version 0.7.0 (2025-11-21)
+- **Major Refactoring**: Complete modular architecture overhaul
+- Split monolithic 2,074-line `main.rs` into 9 focused modules
+- Created 6 top-level modules: `models`, `utils`, `api`, `registry`, `download`, `ui`
+- Created 2 UI submodules: `app` (state/logic) and `render` (presentation)
+- Improved maintainability, testability, and readability
+- Average file size reduced to ~240 lines per module
+- No breaking changes - purely internal refactoring
+- See [changelog/RELEASE_NOTES_0.7.0.md](changelog/RELEASE_NOTES_0.7.0.md) for full details
+
 ### Version 0.6.5 (2025-11-21)
 - Pinned indexmap dependency to v2.2.6
 
@@ -192,15 +218,11 @@ Key security features in v0.6.0:
 ### Version 0.6.0 (2024-11-21)
 - **Security**: Fixed HIGH severity path traversal vulnerability
 - Added comprehensive path validation and sanitization
-- Added `validate_and_sanitize_path()` function for safe path handling
-- Updated download manager with canonicalization checks
-- Created SECURITY.md with remaining security considerations
+- See [changelog/RELEASE_NOTES_0.6.0.md](changelog/RELEASE_NOTES_0.6.0.md) for details
 
-### Version 0.5.0
-- Added download resume on startup
-- Multi-part GGUF file support
-- Progress tracking with speed indicators
-- TOML-based download registry
+### Older Versions
+
+For detailed release notes of older versions, see the [changelog directory](changelog/).
 
 ## License
 

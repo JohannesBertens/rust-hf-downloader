@@ -1,0 +1,790 @@
+use crate::api::{fetch_models, fetch_model_files, parse_multipart_filename};
+use crate::download::{start_download, validate_and_sanitize_path};
+use crate::models::*;
+use crate::registry;
+use color_eyre::Result;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::{FutureExt, StreamExt};
+use ratatui::{DefaultTerminal, Frame, widgets::ListState};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
+use tui_input::backend::crossterm::EventHandler;
+use tui_input::Input;
+
+#[derive(Debug)]
+pub struct App {
+    running: bool,
+    event_stream: EventStream,
+    input: Input,
+    input_mode: InputMode,
+    focused_pane: FocusedPane,
+    models: Arc<Mutex<Vec<ModelInfo>>>,
+    list_state: ListState,
+    quant_list_state: ListState,
+    loading: bool,
+    error: Option<String>,
+    status: String,
+    quantizations: Arc<Mutex<Vec<QuantizationInfo>>>,
+    loading_quants: bool,
+    quant_cache: Arc<Mutex<QuantizationCache>>,
+    popup_mode: PopupMode,
+    download_path_input: Input,
+    download_progress: Arc<Mutex<Option<DownloadProgress>>>,
+    download_tx: mpsc::UnboundedSender<(String, String, PathBuf)>,
+    download_rx: Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf)>>>,
+    download_queue_size: Arc<Mutex<usize>>,
+    incomplete_downloads: Vec<DownloadMetadata>,
+    status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+    status_tx: mpsc::UnboundedSender<String>,
+    download_registry: Arc<Mutex<DownloadRegistry>>,
+    complete_downloads: Arc<Mutex<CompleteDownloads>>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl App {
+    pub fn new() -> Self {
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+        
+        let quant_list_state = ListState::default();
+        
+        let (download_tx, download_rx) = mpsc::unbounded_channel();
+        let (status_tx, status_rx) = mpsc::unbounded_channel();
+        
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let default_path = format!("{}/models", home);
+        let mut download_path_input = Input::default();
+        download_path_input = download_path_input.with_value(default_path);
+        
+        Self {
+            running: false,
+            event_stream: EventStream::default(),
+            input: Input::default(),
+            input_mode: InputMode::Editing,  // Start in editing mode for immediate search
+            focused_pane: FocusedPane::Models,
+            models: Arc::new(Mutex::new(Vec::new())),
+            list_state,
+            quant_list_state,
+            loading: false,
+            error: None,
+            status: "Enter search query, press Enter to search, ESC to browse, 'q' to quit".to_string(),
+            quantizations: Arc::new(Mutex::new(Vec::new())),
+            loading_quants: false,
+            quant_cache: Arc::new(Mutex::new(HashMap::new())),
+            popup_mode: PopupMode::None,
+            download_path_input,
+            download_progress: Arc::new(Mutex::new(None)),
+            download_tx,
+            download_rx: Arc::new(Mutex::new(download_rx)),
+            download_queue_size: Arc::new(Mutex::new(0)),
+            incomplete_downloads: Vec::new(),
+            status_rx: Arc::new(Mutex::new(status_rx)),
+            status_tx,
+            download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
+            complete_downloads: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn scan_incomplete_downloads(&mut self) {
+        // Load registry from disk
+        let registry = registry::load_registry();
+        
+        // Update the app's registry
+        {
+            let mut reg = self.download_registry.lock().await;
+            *reg = registry.clone();
+        }
+        
+        // Find incomplete downloads
+        self.incomplete_downloads = registry::get_incomplete_downloads(&registry);
+        
+        // Load complete downloads into memory
+        let complete_map = registry::get_complete_downloads(&registry);
+        
+        {
+            let mut complete = self.complete_downloads.lock().await;
+            *complete = complete_map;
+        }
+        
+        // Show popup if incomplete downloads found
+        if !self.incomplete_downloads.is_empty() {
+            self.popup_mode = PopupMode::ResumeDownload;
+            self.status = format!("Found {} incomplete download(s)", self.incomplete_downloads.len());
+        }
+    }
+
+    pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
+        self.running = true;
+        
+        // Scan for incomplete downloads on startup
+        self.scan_incomplete_downloads().await;
+        
+        // Spawn download manager task
+        let download_rx = self.download_rx.clone();
+        let download_progress = self.download_progress.clone();
+        let download_queue_size = self.download_queue_size.clone();
+        let status_tx = self.status_tx.clone();
+        let complete_downloads = self.complete_downloads.clone();
+        tokio::spawn(async move {
+            let mut rx = download_rx.lock().await;
+            while let Some((model_id, filename, path)) = rx.recv().await {
+                // Decrement queue size when we start processing
+                {
+                    let mut queue_size = download_queue_size.lock().await;
+                    *queue_size = queue_size.saturating_sub(1);
+                }
+                start_download(model_id, filename, path, download_progress.clone(), status_tx.clone(), complete_downloads.clone()).await;
+            }
+        });
+        
+        while self.running {
+            terminal.draw(|frame| self.draw(frame))?;
+            self.handle_crossterm_events().await?;
+        }
+        Ok(())
+    }
+
+    fn draw(&mut self, frame: &mut Frame) {
+        // Get all the data we need for rendering
+        let models = futures::executor::block_on(async {
+            self.models.lock().await.clone()
+        });
+        
+        let quantizations = futures::executor::block_on(async {
+            self.quantizations.lock().await.clone()
+        });
+        
+        let complete_downloads = futures::executor::block_on(async {
+            self.complete_downloads.lock().await.clone()
+        });
+        
+        // Render main UI
+        super::render::render_ui(
+            frame,
+            &self.input,
+            self.input_mode,
+            &models,
+            &mut self.list_state,
+            self.loading,
+            &quantizations,
+            &mut self.quant_list_state,
+            self.loading_quants,
+            self.focused_pane,
+            &self.error,
+            &self.status,
+            &complete_downloads,
+        );
+        
+        // Render download progress bar
+        let (download_progress, queue_size) = futures::executor::block_on(async {
+            let progress = self.download_progress.lock().await.clone();
+            let queue = *self.download_queue_size.lock().await;
+            (progress, queue)
+        });
+        
+        super::render::render_progress_bar(frame, &download_progress, queue_size);
+        
+        // Render popups (must be last to appear on top)
+        match self.popup_mode {
+            PopupMode::ResumeDownload => {
+                super::render::render_resume_popup(frame, &self.incomplete_downloads);
+            }
+            PopupMode::DownloadPath => {
+                super::render::render_download_path_popup(frame, &self.download_path_input);
+            }
+            PopupMode::None => {}
+        }
+    }
+
+    async fn handle_crossterm_events(&mut self) -> Result<()> {
+        // Check for status messages from download tasks
+        {
+            let mut rx = self.status_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                self.status = msg;
+            }
+        }
+        
+        let delay = tokio::time::sleep(tokio::time::Duration::from_millis(100));
+        tokio::select! {
+            maybe_event = self.event_stream.next().fuse() => {
+                match maybe_event {
+                    Some(Ok(evt)) => {
+                        if let Event::Key(key) = evt {
+                            if key.kind == KeyEventKind::Press {
+                                self.on_key_event(key).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ = delay => {
+                // Timeout - just redraw
+            }
+        }
+        Ok(())
+    }
+
+    async fn on_key_event(&mut self, key: KeyEvent) {
+        self.error = None;
+
+        // Handle popup input separately
+        if self.popup_mode == PopupMode::ResumeDownload {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.resume_incomplete_downloads().await;
+                    self.popup_mode = PopupMode::None;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.popup_mode = PopupMode::None;
+                    self.incomplete_downloads.clear();
+                    self.status = "Skipped incomplete downloads".to_string();
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.delete_incomplete_downloads().await;
+                    self.popup_mode = PopupMode::None;
+                }
+                _ => {}
+            }
+            return;
+        } else if self.popup_mode == PopupMode::DownloadPath {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_download().await;
+                    self.popup_mode = PopupMode::None;
+                }
+                KeyCode::Esc => {
+                    self.popup_mode = PopupMode::None;
+                    self.status = "Download cancelled".to_string();
+                }
+                _ => {
+                    self.download_path_input.handle_event(&Event::Key(key));
+                }
+            }
+            return;
+        }
+
+        match self.input_mode {
+            InputMode::Normal => match (key.modifiers, key.code) {
+                (_, KeyCode::Char('q'))
+                | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
+                (_, KeyCode::Char('/')) => {
+                    self.input_mode = InputMode::Editing;
+                    self.status = "Enter search query, press Enter to search, ESC to cancel".to_string();
+                }
+                (_, KeyCode::Char('d')) => {
+                    if self.focused_pane == FocusedPane::Quantizations {
+                        self.trigger_download();
+                    }
+                }
+                (_, KeyCode::Tab) => {
+                    self.toggle_focus();
+                }
+                (_, KeyCode::Down | KeyCode::Char('j')) => {
+                    match self.focused_pane {
+                        FocusedPane::Models => {
+                            self.next();
+                            self.load_quantizations().await;
+                        }
+                        FocusedPane::Quantizations => {
+                            self.next_quant();
+                        }
+                    }
+                }
+                (_, KeyCode::Up | KeyCode::Char('k')) => {
+                    match self.focused_pane {
+                        FocusedPane::Models => {
+                            self.previous();
+                            self.load_quantizations().await;
+                        }
+                        FocusedPane::Quantizations => {
+                            self.previous_quant();
+                        }
+                    }
+                }
+                (_, KeyCode::Enter) => {
+                    match self.focused_pane {
+                        FocusedPane::Models => {
+                            // Switch focus to Quantizations list
+                            self.toggle_focus();
+                            self.show_model_details().await;
+                        }
+                        FocusedPane::Quantizations => {
+                            self.show_quantization_details().await;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            InputMode::Editing => match key.code {
+                KeyCode::Enter => {
+                    self.input_mode = InputMode::Normal;
+                    self.status = "Searching...".to_string();
+                    self.search_models().await;
+                }
+                KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                    self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'q' to quit".to_string();
+                }
+                _ => {
+                    self.input.handle_event(&Event::Key(key));
+                }
+            },
+        }
+    }
+
+    fn next(&mut self) {
+        let models_len = futures::executor::block_on(async {
+            self.models.lock().await.len()
+        });
+        
+        if models_len == 0 {
+            return;
+        }
+        
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i >= models_len - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
+
+    fn previous(&mut self) {
+        let models_len = futures::executor::block_on(async {
+            self.models.lock().await.len()
+        });
+        
+        if models_len == 0 {
+            return;
+        }
+        
+        let i = match self.list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    models_len - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.list_state.select(Some(i));
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focused_pane = match self.focused_pane {
+            FocusedPane::Models => {
+                // When switching to quantizations, select first item if available
+                let quants_len = futures::executor::block_on(async {
+                    self.quantizations.lock().await.len()
+                });
+                if quants_len > 0 {
+                    self.quant_list_state.select(Some(0));
+                }
+                FocusedPane::Quantizations
+            }
+            FocusedPane::Quantizations => FocusedPane::Models,
+        };
+    }
+
+    fn next_quant(&mut self) {
+        let quants_len = futures::executor::block_on(async {
+            self.quantizations.lock().await.len()
+        });
+        
+        if quants_len == 0 {
+            return;
+        }
+        
+        let i = match self.quant_list_state.selected() {
+            Some(i) => {
+                if i >= quants_len - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.quant_list_state.select(Some(i));
+    }
+
+    fn previous_quant(&mut self) {
+        let quants_len = futures::executor::block_on(async {
+            self.quantizations.lock().await.len()
+        });
+        
+        if quants_len == 0 {
+            return;
+        }
+        
+        let i = match self.quant_list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    quants_len - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.quant_list_state.select(Some(i));
+    }
+
+    async fn search_models(&mut self) {
+        let query = self.input.value().to_string();
+        
+        if query.is_empty() {
+            return;
+        }
+
+        self.loading = true;
+        self.error = None;
+        
+        let models = self.models.clone();
+        
+        match fetch_models(&query).await {
+            Ok(results) => {
+                let mut models_lock = models.lock().await;
+                *models_lock = results;
+                self.loading = false;
+                self.list_state.select(Some(0));
+                self.status = format!("Found {} models", models_lock.len());
+                drop(models_lock);
+                
+                // Load quantizations for first result
+                self.load_quantizations().await;
+                
+                // Start background prefetch for all models
+                self.start_background_prefetch();
+            }
+            Err(e) => {
+                self.loading = false;
+                self.error = Some(format!("Failed to fetch models: {}", e));
+                self.status = "Search failed".to_string();
+            }
+        }
+    }
+
+    async fn show_model_details(&mut self) {
+        let models = self.models.lock().await;
+        if let Some(selected) = self.list_state.selected() {
+            if selected < models.len() {
+                let model = &models[selected];
+                self.status = format!(
+                    "{} | Downloads: {} | Likes: {} | Tags: {}",
+                    model.id,
+                    crate::utils::format_number(model.downloads),
+                    crate::utils::format_number(model.likes),
+                    if model.tags.is_empty() {
+                        "none".to_string()
+                    } else {
+                        model.tags.join(", ")
+                    }
+                );
+            }
+        }
+    }
+
+    async fn show_quantization_details(&mut self) {
+        let quantizations = self.quantizations.lock().await;
+        if let Some(selected) = self.quant_list_state.selected() {
+            if selected < quantizations.len() {
+                let quant = &quantizations[selected];
+                self.status = format!(
+                    "Type: {} | Size: {} | File: {}",
+                    quant.quant_type,
+                    crate::utils::format_size(quant.size),
+                    quant.filename
+                );
+            }
+        }
+    }
+
+    async fn load_quantizations(&mut self) {
+        let models = self.models.lock().await;
+        if let Some(selected) = self.list_state.selected() {
+            if selected < models.len() {
+                let model_id = models[selected].id.clone();
+                drop(models);
+                
+                // Check cache first
+                let cache = self.quant_cache.lock().await;
+                if let Some(cached_quants) = cache.get(&model_id) {
+                    let mut quants_lock = self.quantizations.lock().await;
+                    *quants_lock = cached_quants.clone();
+                    drop(cache);
+                    return;
+                }
+                drop(cache);
+                
+                self.loading_quants = true;
+                let quantizations = self.quantizations.clone();
+                let cache = self.quant_cache.clone();
+                
+                match fetch_model_files(&model_id).await {
+                    Ok(quants) => {
+                        let mut quants_lock = quantizations.lock().await;
+                        *quants_lock = quants.clone();
+                        self.loading_quants = false;
+                        
+                        // Store in cache
+                        let mut cache_lock = cache.lock().await;
+                        cache_lock.insert(model_id, quants);
+                    }
+                    Err(_) => {
+                        self.loading_quants = false;
+                        let mut quants_lock = quantizations.lock().await;
+                        quants_lock.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn start_background_prefetch(&self) {
+        let models = self.models.clone();
+        let cache = self.quant_cache.clone();
+        
+        tokio::spawn(async move {
+            let models_lock = models.lock().await;
+            let model_list = models_lock.clone();
+            drop(models_lock);
+            
+            for model in model_list {
+                // Check if already cached
+                let cache_lock = cache.lock().await;
+                let already_cached = cache_lock.contains_key(&model.id);
+                drop(cache_lock);
+                
+                if !already_cached {
+                    // Fetch quantization info
+                    if let Ok(quants) = fetch_model_files(&model.id).await {
+                        let mut cache_lock = cache.lock().await;
+                        cache_lock.insert(model.id.clone(), quants);
+                    }
+                    
+                    // Small delay to avoid overwhelming the API
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        });
+    }
+
+    fn quit(&mut self) {
+        self.running = false;
+    }
+    
+    fn trigger_download(&mut self) {
+        let quantizations = futures::executor::block_on(async {
+            self.quantizations.lock().await.clone()
+        });
+        
+        if let Some(selected) = self.quant_list_state.selected() {
+            if selected < quantizations.len() {
+                self.popup_mode = PopupMode::DownloadPath;
+                self.status = "Enter download path and press Enter".to_string();
+            }
+        }
+    }
+    
+    async fn resume_incomplete_downloads(&mut self) {
+        let count = self.incomplete_downloads.len();
+        
+        for metadata in &self.incomplete_downloads {
+            // Queue the download to resume
+            let base_path = PathBuf::from(&metadata.local_path).parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(&metadata.local_path));
+            
+            let _ = self.download_tx.send((
+                metadata.model_id.clone(),
+                metadata.filename.clone(),
+                base_path,
+            ));
+        }
+        
+        // Update queue size
+        {
+            let mut queue_size = self.download_queue_size.lock().await;
+            *queue_size += count;
+        }
+        
+        self.status = format!("Resuming {} incomplete download(s)", count);
+        self.incomplete_downloads.clear();
+    }
+
+    async fn delete_incomplete_downloads(&mut self) {
+        let mut deleted = 0;
+        let mut errors = Vec::new();
+        
+        // Load registry
+        let mut registry = {
+            let reg = self.download_registry.lock().await;
+            reg.clone()
+        };
+        
+        for metadata in &self.incomplete_downloads {
+            // Try to delete the actual .incomplete file
+            let file_path = PathBuf::from(&metadata.local_path);
+            let incomplete_path = PathBuf::from(format!("{}.incomplete", file_path.display()));
+            
+            match tokio::fs::remove_file(&incomplete_path).await {
+                Ok(_) => deleted += 1,
+                Err(e) => {
+                    errors.push(format!("{}: {}", metadata.filename, e));
+                }
+            }
+            
+            // Remove from registry
+            registry.downloads.retain(|d| d.url != metadata.url);
+        }
+        
+        // Save updated registry
+        registry::save_registry(&registry);
+        {
+            let mut reg = self.download_registry.lock().await;
+            *reg = registry;
+        }
+        
+        if errors.is_empty() {
+            self.status = format!("Deleted {} incomplete file(s)", deleted);
+        } else {
+            self.status = format!("Deleted {} file(s), {} error(s): {}", deleted, errors.len(), errors.join(", "));
+        }
+        self.incomplete_downloads.clear();
+    }
+
+    async fn confirm_download(&mut self) {
+        let models = self.models.lock().await.clone();
+        let quantizations = self.quantizations.lock().await.clone();
+        
+        let model_selected = self.list_state.selected();
+        let quant_selected = self.quant_list_state.selected();
+        
+        if let (Some(model_idx), Some(quant_idx)) = (model_selected, quant_selected) {
+            if model_idx < models.len() && quant_idx < quantizations.len() {
+                let model = &models[model_idx];
+                let quant = &quantizations[quant_idx];
+                
+                let base_path = self.download_path_input.value().to_string();
+                
+                // Validate and sanitize the path to prevent path traversal
+                let model_path = match validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
+                    Ok(path) => path.parent().unwrap_or(&path).to_path_buf(),
+                    Err(e) => {
+                        self.error = Some(format!("Invalid path: {}", e));
+                        self.status = "Download cancelled due to invalid path".to_string();
+                        return;
+                    }
+                };
+                
+                // Check if this is a multi-part file (e.g., "00001-of-00005.gguf")
+                let files_to_download = if let Some((current_part, total_parts)) = parse_multipart_filename(&quant.filename) {
+                    // Generate all part filenames
+                    let mut files = Vec::new();
+                    for part in 1..=total_parts {
+                        let part_filename = quant.filename.replace(
+                            &format!("{:05}-of-{:05}", current_part, total_parts),
+                            &format!("{:05}-of-{:05}", part, total_parts)
+                        );
+                        files.push(part_filename);
+                    }
+                    files
+                } else {
+                    vec![quant.filename.clone()]
+                };
+                
+                let num_files = files_to_download.len();
+                
+                // Load registry and add metadata entries for all files
+                let mut registry = {
+                    let reg = self.download_registry.lock().await;
+                    reg.clone()
+                };
+                
+                for filename in &files_to_download {
+                    // Validate each filename before processing
+                    let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            self.error = Some(format!("Invalid filename '{}': {}", filename, e));
+                            continue;
+                        }
+                    };
+                    
+                    let url = format!("https://huggingface.co/{}/resolve/main/{}", model.id, filename);
+                    let local_path_str = validated_path.to_string_lossy().to_string();
+                    
+                    // Only add if not already in registry
+                    if !registry.downloads.iter().any(|d| d.url == url) {
+                        registry.downloads.push(DownloadMetadata {
+                            model_id: model.id.clone(),
+                            filename: filename.clone(),
+                            url: url.clone(),
+                            local_path: local_path_str,
+                            total_size: 0,
+                            downloaded_size: 0,
+                            status: DownloadStatus::Incomplete,
+                        });
+                    }
+                }
+                
+                // Save registry with all new entries
+                registry::save_registry(&registry);
+                {
+                    let mut reg = self.download_registry.lock().await;
+                    *reg = registry;
+                }
+                
+                // Increment queue size by number of files
+                {
+                    let mut queue_size = self.download_queue_size.lock().await;
+                    *queue_size += num_files;
+                }
+                
+                // Send all download requests
+                let mut success_count = 0;
+                for filename in &files_to_download {
+                    if self.download_tx.send((
+                        model.id.clone(),
+                        filename.clone(),
+                        model_path.clone(),
+                    )).is_ok() {
+                        success_count += 1;
+                    }
+                }
+                
+                if success_count > 0 {
+                    if num_files > 1 {
+                        self.status = format!("Queued {} parts of {} to {}", num_files, quant.filename, model_path.display());
+                    } else {
+                        self.status = format!("Starting download of {} to {}", quant.filename, model_path.display());
+                    }
+                } else {
+                    self.error = Some("Failed to start download".to_string());
+                }
+                
+                // Adjust queue size if some sends failed
+                if success_count < num_files {
+                    let mut queue_size = self.download_queue_size.lock().await;
+                    *queue_size = queue_size.saturating_sub(num_files - success_count);
+                }
+            }
+        }
+    }
+}
