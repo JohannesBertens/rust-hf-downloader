@@ -1,4 +1,4 @@
-# Release Notes - hf-search v0.6.0
+# Release Notes - Rust HF Downloader v0.6.0
 
 **Release Date**: November 21, 2024  
 **Focus**: Security hardening and path traversal vulnerability fix
@@ -93,8 +93,8 @@ None. This release is fully backward compatible with v0.5.0.
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/username/hf-search.git
-cd hf-search
+git clone https://github.com/JohannesBertens/rust-hf-downloader.git
+cd rust-hf-downloader
 cargo build --release
 ```
 
@@ -125,7 +125,7 @@ Security analysis and fix implemented to address the top security concerns ident
 
 If you discover a security vulnerability, please report it to:
 - **Email**: 
-- **Subject**: [SECURITY] hf-search vulnerability report
+- **Subject**: [SECURITY] Rust HF Downloader vulnerability report
 
 Do not create public GitHub issues for security vulnerabilities.
 
@@ -152,6 +152,6 @@ Do not create public GitHub issues for security vulnerabilities.
 
 ---
 
-**Project**: hf-search  
+**Project**: Rust HF Downloader  
 **License**: MIT  
 **Author**: Johannes Bertens

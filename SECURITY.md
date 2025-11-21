@@ -1,6 +1,6 @@
-# Security Considerations for hf-search
+# Security Considerations for Rust HF Downloader
 
-This document outlines security considerations and recommendations for the hf-search application.
+This document outlines security considerations and recommendations for the Rust HF Downloader application.
 
 ## Status of Known Vulnerabilities
 
@@ -200,7 +200,7 @@ fn sanitize_path_for_display(path: &Path) -> String {
 #[cfg(target_os = "linux")]
 fn get_hf_token() -> Result<Option<String>, Error> {
     use keyring::Entry;
-    let entry = Entry::new("hf-search", "huggingface-token")?;
+    let entry = Entry::new("rust-hf-downloader", "huggingface-token")?;
     entry.get_password().ok()
 }
 
@@ -407,10 +407,9 @@ Before each release, verify:
 
 ## Reporting Security Vulnerabilities
 
-If you discover a security vulnerability in hf-search, please report it to:
+If you discover a security vulnerability in Rust HF Downloader, please report it via GitHub Issues.
 
-**Email**:   
-**Subject**: [SECURITY] hf-search vulnerability report
+**Subject**: [SECURITY] Rust HF Downloader vulnerability report
 
 Please include:
 - Description of the vulnerability

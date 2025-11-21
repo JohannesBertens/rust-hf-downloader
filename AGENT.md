@@ -1,10 +1,10 @@
-# AGENT.md - AI Agent Guide for hf-search
+# AGENT.md - AI Agent Guide for Rust HF Downloader
 
-This document provides AI agents with a comprehensive understanding of the hf-search codebase, its architecture, and how to work with it.
+This document provides AI agents with a comprehensive understanding of the Rust HF Downloader codebase, its architecture, and how to work with it.
 
 ## Project Overview
 
-**hf-search** is a Terminal User Interface (TUI) application written in Rust that allows users to search, browse, and download models from the HuggingFace model hub. It provides an interactive, keyboard-driven interface with vim-like controls and comprehensive download management.
+**Rust HF Downloader** is a Terminal User Interface (TUI) application written in Rust that allows users to search, browse, and download models from the HuggingFace model hub. It provides an interactive, keyboard-driven interface with vim-like controls and comprehensive download management.
 
 ### Purpose
 Enable users to discover, explore, and download HuggingFace models directly from the terminal with:

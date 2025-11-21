@@ -1,4 +1,4 @@
-# hf-search
+# Rust HF Downloader
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -132,7 +132,7 @@ The application queries the HuggingFace API with the following parameters:
 ### Project Structure
 
 ```
-hf-search/
+rust-hf-downloader/
 ├── Cargo.toml          # Dependencies and project metadata
 ├── README.md           # This file
 └── src/
