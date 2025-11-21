@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tui_input::backend::crossterm::EventHandler;
 use tui_input::Input;
+use std::fs;
+use std::io::Write;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -63,12 +65,36 @@ struct DownloadProgress {
     filename: String,
     downloaded: u64,
     total: u64,
+    speed_mbps: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+enum DownloadStatus {
+    Incomplete,
+    Complete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DownloadMetadata {
+    model_id: String,
+    filename: String,
+    url: String,
+    local_path: String,
+    total_size: u64,
+    downloaded_size: u64,
+    status: DownloadStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DownloadRegistry {
+    downloads: Vec<DownloadMetadata>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopupMode {
     None,
     DownloadPath,
+    ResumeDownload,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +130,12 @@ pub struct App {
     download_progress: Arc<Mutex<Option<DownloadProgress>>>,
     download_tx: mpsc::UnboundedSender<(String, String, PathBuf)>,
     download_rx: Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf)>>>,
+    download_queue_size: Arc<Mutex<usize>>,
+    incomplete_downloads: Vec<DownloadMetadata>,
+    status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+    status_tx: mpsc::UnboundedSender<String>,
+    download_registry: Arc<Mutex<DownloadRegistry>>,
+    complete_downloads: Arc<Mutex<HashMap<String, DownloadMetadata>>>, // Key: filename
 }
 
 impl Default for App {
@@ -120,6 +152,7 @@ impl App {
         let quant_list_state = ListState::default();
         
         let (download_tx, download_rx) = mpsc::unbounded_channel();
+        let (status_tx, status_rx) = mpsc::unbounded_channel();
         
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let default_path = format!("{}/models", home);
@@ -146,19 +179,102 @@ impl App {
             download_progress: Arc::new(Mutex::new(None)),
             download_tx,
             download_rx: Arc::new(Mutex::new(download_rx)),
+            download_queue_size: Arc::new(Mutex::new(0)),
+            incomplete_downloads: Vec::new(),
+            status_rx: Arc::new(Mutex::new(status_rx)),
+            status_tx,
+            download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
+            complete_downloads: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    fn get_registry_path() -> PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(format!("{}/models/hf-downloads.toml", home))
+    }
+    
+    fn load_registry() -> DownloadRegistry {
+        let path = Self::get_registry_path();
+        if !path.exists() {
+            return DownloadRegistry::default();
+        }
+        
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                toml::from_str(&content).unwrap_or_default()
+            }
+            Err(_) => DownloadRegistry::default(),
+        }
+    }
+    
+    fn save_registry(registry: &DownloadRegistry) {
+        let path = Self::get_registry_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        
+        if let Ok(toml_string) = toml::to_string_pretty(registry) {
+            if let Ok(mut file) = fs::File::create(&path) {
+                let _ = file.write_all(toml_string.as_bytes());
+            }
+        }
+    }
+
+    async fn scan_incomplete_downloads(&mut self) {
+        // Load registry from disk
+        let registry = Self::load_registry();
+        
+        // Update the app's registry
+        {
+            let mut reg = self.download_registry.lock().await;
+            *reg = registry.clone();
+        }
+        
+        // Find incomplete downloads
+        self.incomplete_downloads = registry.downloads.iter()
+            .filter(|d| d.status == DownloadStatus::Incomplete)
+            .cloned()
+            .collect();
+        
+        // Load complete downloads into memory (keyed by filename for quick lookup)
+        let complete_map: HashMap<String, DownloadMetadata> = registry.downloads.into_iter()
+            .filter(|d| d.status == DownloadStatus::Complete)
+            .map(|d| (d.filename.clone(), d))
+            .collect();
+        
+        {
+            let mut complete = self.complete_downloads.lock().await;
+            *complete = complete_map;
+        }
+        
+        // Show popup if incomplete downloads found
+        if !self.incomplete_downloads.is_empty() {
+            self.popup_mode = PopupMode::ResumeDownload;
+            self.status = format!("Found {} incomplete download(s)", self.incomplete_downloads.len());
         }
     }
 
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.running = true;
         
+        // Scan for incomplete downloads on startup
+        self.scan_incomplete_downloads().await;
+        
         // Spawn download manager task
         let download_rx = self.download_rx.clone();
         let download_progress = self.download_progress.clone();
+        let download_queue_size = self.download_queue_size.clone();
+        let status_tx = self.status_tx.clone();
+        let complete_downloads = self.complete_downloads.clone();
         tokio::spawn(async move {
             let mut rx = download_rx.lock().await;
             while let Some((model_id, filename, path)) = rx.recv().await {
-                start_download(model_id, filename, path, download_progress.clone()).await;
+                // Decrement queue size when we start processing
+                {
+                    let mut queue_size = download_queue_size.lock().await;
+                    *queue_size = queue_size.saturating_sub(1);
+                }
+                start_download(model_id, filename, path, download_progress.clone(), status_tx.clone(), complete_downloads.clone()).await;
             }
         });
         
@@ -216,7 +332,10 @@ impl App {
             .iter()
             .enumerate()
             .map(|(idx, model)| {
-                let author = model.author.as_deref().unwrap_or("unknown");
+                // Extract author from model.id if not provided (e.g., "unsloth/model" -> "unsloth")
+                let author = model.author.as_deref()
+                    .or_else(|| model.id.split('/').next())
+                    .unwrap_or("unknown");
                 let downloads = format_number(model.downloads);
                 let likes = format_number(model.likes);
                 
@@ -282,6 +401,10 @@ impl App {
         let quantizations = futures::executor::block_on(async {
             self.quantizations.lock().await.clone()
         });
+        
+        let complete_downloads = futures::executor::block_on(async {
+            self.complete_downloads.lock().await.clone()
+        });
 
         let quant_title = if self.loading_quants {
             "Quantization Details [Loading...]"
@@ -295,14 +418,24 @@ impl App {
             .iter()
             .map(|q| {
                 let size_str = format_size(q.size);
-                let content = Line::from(vec![
+                let is_downloaded = complete_downloads.contains_key(&q.filename);
+                
+                let mut spans = vec![
                     Span::raw(format!("{:>10}  ", size_str)),
                     Span::styled(
                         format!("{:<14} ", q.quant_type),
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(&q.filename, Style::default().fg(Color::DarkGray)),
-                ]);
+                ];
+                
+                if is_downloaded {
+                    spans.push(Span::styled(&q.filename, Style::default().fg(Color::Green)));
+                    spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
+                } else {
+                    spans.push(Span::styled(&q.filename, Style::default().fg(Color::DarkGray)));
+                }
+                
+                let content = Line::from(spans);
                 ListItem::new(content)
             })
             .collect();
@@ -363,8 +496,10 @@ impl App {
         frame.render_widget(status, chunks[3]);
         
         // Render download progress bar in top right corner if download is active
-        let download_progress = futures::executor::block_on(async {
-            self.download_progress.lock().await.clone()
+        let (download_progress, queue_size) = futures::executor::block_on(async {
+            let progress = self.download_progress.lock().await.clone();
+            let queue = *self.download_queue_size.lock().await;
+            (progress, queue)
         });
         
         if let Some(progress) = download_progress {
@@ -381,16 +516,139 @@ impl App {
                 0
             };
             
+            // Format title with queue info
+            let title = if queue_size > 0 {
+                format!("Downloading ({} queued)", queue_size)
+            } else {
+                "Downloading".to_string()
+            };
+            
+            // Format label with percentage and speed
+            let label = if progress.speed_mbps > 0.0 {
+                format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
+            } else {
+                format!("{}%", percentage)
+            };
+            
             let gauge = Gauge::default()
-                .block(Block::default().borders(Borders::ALL).title("Downloading"))
+                .block(Block::default().borders(Borders::ALL).title(title))
                 .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-                .percent(percentage);
+                .percent(percentage)
+                .label(label);
             
             frame.render_widget(gauge, progress_area);
         }
         
         // IMPORTANT: Render popup last so it appears on top of all other widgets
-        if self.popup_mode == PopupMode::DownloadPath {
+        if self.popup_mode == PopupMode::ResumeDownload {
+            // Calculate centered popup area
+            let popup_width = 70.min(frame.area().width.saturating_sub(4));
+            let popup_height = 10 + self.incomplete_downloads.len().min(5) as u16;
+            let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
+            let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
+            
+            let popup_area = Rect {
+                x: popup_x,
+                y: popup_y,
+                width: popup_width,
+                height: popup_height,
+            };
+            
+            // Clear the popup area first to remove any underlying content
+            frame.render_widget(Clear, popup_area);
+            
+            // Render popup background
+            let popup_block = Block::default()
+                .borders(Borders::ALL)
+                .title("Resume Incomplete Downloads?")
+                .style(Style::default().fg(Color::Yellow).bg(Color::Black));
+            
+            frame.render_widget(popup_block, popup_area);
+            
+            // Render message
+            let message_area = Rect {
+                x: popup_area.x + 2,
+                y: popup_area.y + 1,
+                width: popup_area.width.saturating_sub(4),
+                height: 2,
+            };
+            
+            let message = Paragraph::new(format!(
+                "Found {} incomplete download(s):\n",
+                self.incomplete_downloads.len()
+            ))
+            .style(Style::default().fg(Color::White));
+            
+            frame.render_widget(message, message_area);
+            
+            // Render list of incomplete files (up to 5)
+            let list_area = Rect {
+                x: popup_area.x + 2,
+                y: popup_area.y + 3,
+                width: popup_area.width.saturating_sub(4),
+                height: self.incomplete_downloads.len().min(5) as u16,
+            };
+            
+            let file_lines: Vec<Line> = self.incomplete_downloads
+                .iter()
+                .take(5)
+                .map(|metadata| {
+                    let progress_pct = if metadata.total_size > 0 {
+                        (metadata.downloaded_size as f64 / metadata.total_size as f64 * 100.0) as u64
+                    } else {
+                        0
+                    };
+                    Line::from(vec![
+                        Span::raw("  • "),
+                        Span::styled(&metadata.filename, Style::default().fg(Color::Cyan)),
+                        Span::raw(format!(" ({}%)", progress_pct)),
+                    ])
+                })
+                .collect();
+            
+            let files_widget = Paragraph::new(file_lines)
+                .style(Style::default().fg(Color::White));
+            
+            frame.render_widget(files_widget, list_area);
+            
+            // Show "and X more..." if there are more than 5
+            if self.incomplete_downloads.len() > 5 {
+                let more_area = Rect {
+                    x: popup_area.x + 2,
+                    y: list_area.y + list_area.height,
+                    width: popup_area.width.saturating_sub(4),
+                    height: 1,
+                };
+                
+                let more_text = Paragraph::new(format!("  ... and {} more", self.incomplete_downloads.len() - 5))
+                    .style(Style::default().fg(Color::DarkGray));
+                
+                frame.render_widget(more_text, more_area);
+            }
+            
+            // Render instructions
+            let instructions_area = Rect {
+                x: popup_area.x + 2,
+                y: popup_area.y + popup_area.height.saturating_sub(3),
+                width: popup_area.width.saturating_sub(4),
+                height: 2,
+            };
+            
+            let instructions = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw(" to resume all  |  "),
+                    Span::styled("N", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw(" to skip  |  "),
+                    Span::styled("D", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw(" to delete and skip"),
+                ]),
+            ])
+            .style(Style::default().fg(Color::White));
+            
+            frame.render_widget(instructions, instructions_area);
+        } else if self.popup_mode == PopupMode::DownloadPath {
             // Calculate centered popup area
             let popup_width = 60.min(frame.area().width.saturating_sub(4));
             let popup_height = 7;
@@ -467,6 +725,14 @@ impl App {
     }
 
     async fn handle_crossterm_events(&mut self) -> Result<()> {
+        // Check for status messages from download tasks
+        {
+            let mut rx = self.status_rx.lock().await;
+            while let Ok(msg) = rx.try_recv() {
+                self.status = msg;
+            }
+        }
+        
         let delay = tokio::time::sleep(tokio::time::Duration::from_millis(100));
         tokio::select! {
             maybe_event = self.event_stream.next().fuse() => {
@@ -492,7 +758,25 @@ impl App {
         self.error = None;
 
         // Handle popup input separately
-        if self.popup_mode == PopupMode::DownloadPath {
+        if self.popup_mode == PopupMode::ResumeDownload {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.resume_incomplete_downloads().await;
+                    self.popup_mode = PopupMode::None;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.popup_mode = PopupMode::None;
+                    self.incomplete_downloads.clear();
+                    self.status = "Skipped incomplete downloads".to_string();
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.delete_incomplete_downloads().await;
+                    self.popup_mode = PopupMode::None;
+                }
+                _ => {}
+            }
+            return;
+        } else if self.popup_mode == PopupMode::DownloadPath {
             match key.code {
                 KeyCode::Enter => {
                     self.confirm_download().await;
@@ -837,6 +1121,73 @@ impl App {
         }
     }
     
+    async fn resume_incomplete_downloads(&mut self) {
+        let count = self.incomplete_downloads.len();
+        
+        for metadata in &self.incomplete_downloads {
+            // Queue the download to resume
+            let base_path = PathBuf::from(&metadata.local_path).parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(&metadata.local_path));
+            
+            let _ = self.download_tx.send((
+                metadata.model_id.clone(),
+                metadata.filename.clone(),
+                base_path,
+            ));
+        }
+        
+        // Update queue size
+        {
+            let mut queue_size = self.download_queue_size.lock().await;
+            *queue_size += count;
+        }
+        
+        self.status = format!("Resuming {} incomplete download(s)", count);
+        self.incomplete_downloads.clear();
+    }
+
+    async fn delete_incomplete_downloads(&mut self) {
+        let mut deleted = 0;
+        let mut errors = Vec::new();
+        
+        // Load registry
+        let mut registry = {
+            let reg = self.download_registry.lock().await;
+            reg.clone()
+        };
+        
+        for metadata in &self.incomplete_downloads {
+            // Try to delete the actual .incomplete file
+            let file_path = PathBuf::from(&metadata.local_path);
+            let incomplete_path = PathBuf::from(format!("{}.incomplete", file_path.display()));
+            
+            match tokio::fs::remove_file(&incomplete_path).await {
+                Ok(_) => deleted += 1,
+                Err(e) => {
+                    errors.push(format!("{}: {}", metadata.filename, e));
+                }
+            }
+            
+            // Remove from registry
+            registry.downloads.retain(|d| d.url != metadata.url);
+        }
+        
+        // Save updated registry
+        Self::save_registry(&registry);
+        {
+            let mut reg = self.download_registry.lock().await;
+            *reg = registry;
+        }
+        
+        if errors.is_empty() {
+            self.status = format!("Deleted {} incomplete file(s)", deleted);
+        } else {
+            self.status = format!("Deleted {} file(s), {} error(s): {}", deleted, errors.len(), errors.join(", "));
+        }
+        self.incomplete_downloads.clear();
+    }
+
     async fn confirm_download(&mut self) {
         let models = self.models.lock().await.clone();
         let quantizations = self.quantizations.lock().await.clone();
@@ -849,18 +1200,95 @@ impl App {
                 let model = &models[model_idx];
                 let quant = &quantizations[quant_idx];
                 
-                let path = self.download_path_input.value().to_string();
-                let path_buf = PathBuf::from(path);
+                let base_path = self.download_path_input.value().to_string();
+                let base_path_buf = PathBuf::from(&base_path);
                 
-                // Send download request
-                if self.download_tx.send((
-                    model.id.clone(),
-                    quant.filename.clone(),
-                    path_buf,
-                )).is_ok() {
-                    self.status = format!("Starting download of {} to {}", quant.filename, self.download_path_input.value());
+                // Create subfolder structure: {base_path}/{author}/{model_name}/
+                // Model ID is in format "author/model-name"
+                let model_path = base_path_buf.join(&model.id);
+                
+                // Check if this is a multi-part file (e.g., "00001-of-00005.gguf")
+                let files_to_download = if let Some((current_part, total_parts)) = parse_multipart_filename(&quant.filename) {
+                    // Generate all part filenames
+                    let mut files = Vec::new();
+                    for part in 1..=total_parts {
+                        let part_filename = quant.filename.replace(
+                            &format!("{:05}-of-{:05}", current_part, total_parts),
+                            &format!("{:05}-of-{:05}", part, total_parts)
+                        );
+                        files.push(part_filename);
+                    }
+                    files
+                } else {
+                    vec![quant.filename.clone()]
+                };
+                
+                let num_files = files_to_download.len();
+                
+                // Load registry and add metadata entries for all files
+                let mut registry = {
+                    let reg = self.download_registry.lock().await;
+                    reg.clone()
+                };
+                
+                for filename in &files_to_download {
+                    let url = format!("https://huggingface.co/{}/resolve/main/{}", model.id, filename);
+                    let local_path = model_path.join(filename);
+                    let local_path_str = local_path.to_string_lossy().to_string();
+                    
+                    // Only add if not already in registry
+                    if !registry.downloads.iter().any(|d| d.url == url) {
+                        registry.downloads.push(DownloadMetadata {
+                            model_id: model.id.clone(),
+                            filename: filename.clone(),
+                            url: url.clone(),
+                            local_path: local_path_str,
+                            total_size: 0, // Will be updated when download starts
+                            downloaded_size: 0,
+                            status: DownloadStatus::Incomplete,
+                        });
+                    }
+                }
+                
+                // Save registry with all new entries
+                Self::save_registry(&registry);
+                {
+                    let mut reg = self.download_registry.lock().await;
+                    *reg = registry;
+                }
+                
+                // Increment queue size by number of files
+                {
+                    let mut queue_size = self.download_queue_size.lock().await;
+                    *queue_size += num_files;
+                }
+                
+                // Send all download requests
+                let mut success_count = 0;
+                for filename in &files_to_download {
+                    if self.download_tx.send((
+                        model.id.clone(),
+                        filename.clone(),
+                        model_path.clone(),
+                    )).is_ok() {
+                        success_count += 1;
+                    }
+                }
+                
+                if success_count > 0 {
+                    if num_files > 1 {
+                        self.status = format!("Queued {} parts of {} to {}", num_files, quant.filename, model_path.display());
+                    } else {
+                        self.status = format!("Starting download of {} to {}", quant.filename, model_path.display());
+                    }
                 } else {
                     self.error = Some("Failed to start download".to_string());
+                }
+                
+                // Adjust queue size if some sends failed
+                if success_count < num_files {
+                    let mut queue_size = self.download_queue_size.lock().await;
+                    *queue_size = queue_size.saturating_sub(num_files - success_count);
                 }
             }
         }
@@ -915,16 +1343,25 @@ async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqw
     let files: Vec<ModelFile> = response.json().await?;
     
     let mut quantizations = Vec::new();
+    let mut multi_part_groups: HashMap<String, Vec<ModelFile>> = HashMap::new();
     
     for file in &files {
         // Handle GGUF files in root directory
         if file.file_type == "file" && file.path.ends_with(".gguf") {
-            if let Some(quant_type) = extract_quantization_type(&file.path) {
-                quantizations.push(QuantizationInfo {
-                    quant_type,
-                    filename: file.path.clone(),
-                    size: file.size,
-                });
+            // Check if this is a multi-part file
+            if let Some((_, _)) = parse_multipart_filename(&file.path) {
+                // Group multi-part files by their base name
+                let base_name = get_multipart_base_name(&file.path);
+                multi_part_groups.entry(base_name).or_insert_with(Vec::new).push(file.clone());
+            } else {
+                // Single file
+                if let Some(quant_type) = extract_quantization_type(&file.path) {
+                    quantizations.push(QuantizationInfo {
+                        quant_type,
+                        filename: file.path.clone(),
+                        size: file.size,
+                    });
+                }
             }
         }
         // Handle subdirectories named by quantization type (e.g., Q4_K_M/, Q8_0/)
@@ -965,10 +1402,56 @@ async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqw
         }
     }
     
+    // Process multi-part groups
+    for (base_name, parts) in multi_part_groups {
+        let total_size: u64 = parts.iter().map(|f| f.size).sum();
+        if let Some(quant_type) = extract_quantization_type(&base_name) {
+            // Use the first part's filename as representative
+            let filename = parts.first().map(|f| f.path.clone()).unwrap_or(base_name);
+            quantizations.push(QuantizationInfo {
+                quant_type,
+                filename,
+                size: total_size,
+            });
+        }
+    }
+    
     // Sort by file size (largest first)
     quantizations.sort_by(|a, b| b.size.cmp(&a.size));
     
     Ok(quantizations)
+}
+
+fn get_multipart_base_name(filename: &str) -> String {
+    // Extract base name from multi-part filename
+    // E.g., "model-Q6_K-00003-of-00009.gguf" -> "model-Q6_K.gguf"
+    // E.g., "model.Q4_K_M.gguf.part1of2" -> "model.Q4_K_M.gguf"
+    
+    // Handle 5-digit format: -00003-of-00009
+    if let Some(multi_part_pos) = filename.rfind("-of-") {
+        if let Some(part_start) = filename[..multi_part_pos].rfind('-') {
+            let part_num = &filename[part_start + 1..multi_part_pos];
+            if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
+                return format!("{}{}", &filename[..part_start], &filename[filename.rfind(".gguf").unwrap_or(filename.len())..]);
+            }
+        }
+    }
+    
+    // Handle partNofM format: .part1of2, .part2of3, etc.
+    if let Some(part_pos) = filename.rfind(".part") {
+        // Check if it's followed by digits+of+digits
+        let suffix = &filename[part_pos + 5..]; // Skip ".part"
+        if let Some(of_pos) = suffix.find("of") {
+            let part_num = &suffix[..of_pos];
+            let total_num = &suffix[of_pos + 2..];
+            if part_num.chars().all(|c| c.is_ascii_digit()) && total_num.chars().all(|c| c.is_ascii_digit()) {
+                // Return filename without the .partNofM suffix
+                return filename[..part_pos].to_string();
+            }
+        }
+    }
+    
+    filename.to_string()
 }
 
 fn is_quantization_directory(dirname: &str) -> bool {
@@ -981,23 +1464,134 @@ fn is_quantization_directory(dirname: &str) -> bool {
 fn extract_quantization_type(filename: &str) -> Option<String> {
     // Extract quantization type from filenames like:
     // "model.Q4_K_M.gguf" or "llama-2-7b.Q5_0.gguf" or "Qwen3-VL-30B-Q8_K_XL.gguf"
-    let name = filename.trim_end_matches(".gguf");
+    // "Qwen3-VL-4B-Thinking-1M-IQ4_XS.gguf" or "model-BF16.gguf"
+    // "cerebras.MiniMax-M2-REAP-172B-A10B.Q6_K-00003-of-00009.gguf" (multi-part)
+    // "MiniMax-M2-REAP-162B-A10B.Q4_K_M.gguf.part1of2" (multi-part)
+    let name = filename;
+    
+    // Remove .partNofM suffix if present (must do this BEFORE removing .gguf)
+    let name = if let Some(part_pos) = name.rfind(".part") {
+        let suffix = &name[part_pos + 5..];
+        if let Some(of_pos) = suffix.find("of") {
+            let part_num = &suffix[..of_pos];
+            if part_num.chars().all(|c| c.is_ascii_digit()) {
+                &name[..part_pos]
+            } else {
+                name
+            }
+        } else {
+            name
+        }
+    } else {
+        name
+    };
+    
+    // Now remove .gguf extension
+    let mut name = name.trim_end_matches(".gguf");
+    
+    // Remove multi-part suffix if present (e.g., "-00003-of-00009")
+    if let Some(multi_part_pos) = name.rfind("-of-") {
+        // Find the start of the part number (should be format: -NNNNN-of-NNNNN)
+        if let Some(part_start) = name[..multi_part_pos].rfind('-') {
+            // Verify it looks like a part number (5 digits)
+            let part_num = &name[part_start + 1..multi_part_pos];
+            if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
+                // Remove the multi-part suffix
+                name = &name[..part_start];
+            }
+        }
+    }
+    
+    // Helper function to check if a string looks like a quantization type
+    let is_quant_type = |s: &str| -> bool {
+        let upper = s.to_uppercase();
+        // Check for common quantization patterns
+        // Q followed by digit (Q4, Q5, Q8, etc.)
+        if upper.starts_with('Q') && upper.len() > 1 && upper.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+            return true;
+        }
+        // IQ followed by digit (IQ4_XS, IQ3_M, etc.)
+        if upper.starts_with("IQ") && upper.len() > 2 && upper.chars().nth(2).map_or(false, |c| c.is_ascii_digit()) {
+            return true;
+        }
+        // MXFP followed by digit (MXFP4, MXFP6, MXFP8, etc.)
+        // But not MXFP4_MOE (that should be split to MXFP4)
+        if upper.starts_with("MXFP") && upper.len() > 4 && upper.chars().nth(4).map_or(false, |c| c.is_ascii_digit()) {
+            // Make sure there's no underscore with additional suffix
+            if !upper.contains('_') || upper.chars().nth(5).map_or(false, |c| c == '_' && upper.len() == 6) {
+                return true;
+            }
+        }
+        // Special formats
+        if upper == "BF16" || upper == "FP16" || upper == "FP32" {
+            return true;
+        }
+        false
+    };
     
     // Try splitting by '.' first (handles model.Q4_K_M.gguf)
     let parts: Vec<&str> = name.split('.').collect();
     if parts.len() > 1 {
         if let Some(last_part) = parts.last() {
-            if last_part.starts_with('Q') || last_part.starts_with('q') {
+            if is_quant_type(last_part) {
                 return Some(last_part.to_uppercase());
             }
         }
     }
     
-    // If no dots, try splitting by '-' (handles Qwen3-VL-30B-Q8_K_XL.gguf)
+    // If no dots, try splitting by '-' (handles Qwen3-VL-30B-Q8_K_XL.gguf and IQ4_XS)
     let parts: Vec<&str> = name.split('-').collect();
     for part in parts.iter().rev() {
-        if part.starts_with('Q') || part.starts_with('q') {
+        // First check if the whole part is a valid quant type (e.g., Q4_K_M, IQ4_XS)
+        if is_quant_type(part) {
             return Some(part.to_uppercase());
+        }
+        // If not, check if it contains an underscore and the prefix is a quant type
+        // This handles cases like "MXFP4_MOE" where MXFP4_MOE is not recognized as a whole,
+        // but MXFP4 is the actual quantization type
+        if part.contains('_') {
+            let subparts: Vec<&str> = part.split('_').collect();
+            if let Some(first) = subparts.first() {
+                if is_quant_type(first) {
+                    // Only use the prefix if it's different from checking the whole part
+                    // This prevents Q4_K_M from becoming just Q4
+                    return Some(first.to_uppercase());
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
+    // Parse filenames like:
+    // "Q2_K/MiniMax-M2-Q2_K-00001-of-00002.gguf" (5-digit format)
+    // "MiniMax-M2-REAP-162B-A10B.Q4_K_M.gguf.part1of2" (partNofM format)
+    // Returns (current_part, total_parts) if this is a multi-part file
+    use regex::Regex;
+    
+    // Try 5-digit format first: 00001-of-00002
+    if let Ok(re) = Regex::new(r"(\d{5})-of-(\d{5})") {
+        if let Some(caps) = re.captures(filename) {
+            let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
+            let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
+            
+            if total_parts > 1 && current_part <= total_parts {
+                return Some((current_part, total_parts));
+            }
+        }
+    }
+    
+    // Try partNofM format: part1of2, part2of3, etc.
+    if let Ok(re) = Regex::new(r"part(\d+)of(\d+)") {
+        if let Some(caps) = re.captures(filename) {
+            let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
+            let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
+            
+            if total_parts > 1 && current_part <= total_parts {
+                return Some((current_part, total_parts));
+            }
         }
     }
     
@@ -1009,97 +1603,272 @@ async fn start_download(
     filename: String,
     base_path: PathBuf,
     progress: Arc<Mutex<Option<DownloadProgress>>>,
+    status_tx: mpsc::UnboundedSender<String>,
+    complete_downloads: Arc<Mutex<HashMap<String, DownloadMetadata>>>,
 ) {
+    let url = format!("https://huggingface.co/{}/resolve/main/{}", model_id, filename);
+    let final_path = base_path.join(&filename);
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-        eprintln!("Failed to create directory: {}", e);
+        let _ = status_tx.send(format!("Error: Failed to create directory: {}", e));
         return;
     }
     
-    // Construct full file path
-    let file_path = base_path.join(&filename);
+    // Construct file paths  
+    let incomplete_path = base_path.join(format!("{}.incomplete", filename));
+    
+    // Create parent directories for the file (in case filename contains subdirectories like "Q4_K_M/file.gguf")
+    if let Some(parent) = final_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            let _ = status_tx.send(format!("Error: Failed to create parent directory: {}", e));
+            return;
+        }
+    }
+    if let Some(parent) = incomplete_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            let _ = status_tx.send(format!("Error: Failed to create parent directory for incomplete file: {}", e));
+            return;
+        }
+    }
+    
+    // Load registry to check existing metadata
+    let mut registry = App::load_registry();
+    
+    // Find or create metadata entry
+    let metadata_entry = registry.downloads.iter_mut()
+        .find(|d| d.url == url);
+    
+    let resume_from = if let Some(entry) = metadata_entry {
+        // Check if file actually exists and size matches
+        if incomplete_path.exists() {
+            if let Ok(metadata) = tokio::fs::metadata(&incomplete_path).await {
+                let size = metadata.len();
+                entry.downloaded_size = size;
+                let _ = status_tx.send(format!("Resuming {} from {} bytes", filename, size));
+                size
+            } else {
+                0
+            }
+        } else {
+            entry.downloaded_size
+        }
+    } else {
+        0
+    };
+    
+    const MAX_RETRIES: u32 = 5;
+    let mut retries = MAX_RETRIES;
+    let mut current_resume_from = resume_from;
+    
+    loop {
+        match download_with_resume(
+            &url,
+            &incomplete_path,
+            &final_path,
+            current_resume_from,
+            &progress,
+            &model_id,
+            &filename,
+            &status_tx,
+        ).await {
+            Ok((final_size, expected_size)) => {
+                // Verify the download is complete
+                if final_size == expected_size && expected_size > 0 {
+                    // Update registry: mark as complete
+                    let mut registry = App::load_registry();
+                    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                        entry.status = DownloadStatus::Complete;
+                        entry.downloaded_size = final_size;
+                        
+                        // Update in-memory complete downloads map
+                        let mut complete = complete_downloads.lock().await;
+                        complete.insert(filename.clone(), entry.clone());
+                    }
+                    App::save_registry(&registry);
+                    let _ = status_tx.send(format!("Download complete: {} ({} bytes)", filename, final_size));
+                } else {
+                    let _ = status_tx.send(format!("Warning: Download may be incomplete: {} (got {} bytes, expected {})", filename, final_size, expected_size));
+                }
+                break;
+            }
+            Err(e) if retries > 0 && is_transient_error(&e) => {
+                retries -= 1;
+                let _ = status_tx.send(format!("Download interrupted: {}. Retrying ({} left)...", e, retries));
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                
+                // Update current position from incomplete file and save to registry
+                if incomplete_path.exists() {
+                    if let Ok(metadata) = tokio::fs::metadata(&incomplete_path).await {
+                        current_resume_from = metadata.len();
+                        
+                        // Update registry
+                        let mut registry = App::load_registry();
+                        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                            entry.downloaded_size = current_resume_from;
+                        }
+                        App::save_registry(&registry);
+                    }
+                }
+                continue;
+            }
+            Err(e) => {
+                let _ = status_tx.send(format!("Error: Download failed after retries: {}", e));
+                
+                // Update registry with current state
+                let mut registry = App::load_registry();
+                if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                    entry.status = DownloadStatus::Incomplete;
+                    if incomplete_path.exists() {
+                        if let Ok(metadata) = tokio::fs::metadata(&incomplete_path).await {
+                            entry.downloaded_size = metadata.len();
+                        }
+                    }
+                }
+                App::save_registry(&registry);
+                
+                let mut prog = progress.lock().await;
+                *prog = None;
+                return;
+            }
+        }
+    }
+    
+    // Clear progress when done
+    let mut prog = progress.lock().await;
+    *prog = None;
+}
+
+fn is_transient_error(e: &Box<dyn std::error::Error + Send + Sync>) -> bool {
+    // Check if error is a reqwest error and if it's a timeout or connection error
+    if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
+        return reqwest_err.is_timeout() || reqwest_err.is_connect();
+    }
+    false
+}
+
+async fn download_with_resume(
+    url: &str,
+    incomplete_path: &PathBuf,
+    final_path: &PathBuf,
+    resume_from: u64,
+    progress: &Arc<Mutex<Option<DownloadProgress>>>,
+    model_id: &str,
+    filename: &str,
+    _status_tx: &mpsc::UnboundedSender<String>,
+) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    let local_path_str = final_path.to_string_lossy().to_string();
+    let client = reqwest::Client::new();
+    
+    // Build request with Range header if resuming
+    let mut request = client.get(url);
+    if resume_from > 0 {
+        request = request.header("Range", format!("bytes={}-", resume_from));
+    }
+    
+    let response = request.send().await?;
+    
+    // Get total size from Content-Length or Content-Range
+    let total_size = if let Some(content_range) = response.headers().get("content-range") {
+        // Parse "bytes X-Y/Z" to get Z (total size)
+        if let Ok(range_str) = content_range.to_str() {
+            if let Some(total_str) = range_str.split('/').nth(1) {
+                total_str.parse::<u64>().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        response.content_length().unwrap_or(0) + resume_from
+    };
+    
+    // Update metadata entry in registry with total_size
+    let mut registry = App::load_registry();
+    
+    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+        // Update existing entry with total size
+        entry.total_size = total_size;
+        entry.downloaded_size = resume_from;
+    } else {
+        // Create new entry if it doesn't exist (shouldn't happen but be defensive)
+        registry.downloads.push(DownloadMetadata {
+            model_id: model_id.to_string(),
+            filename: filename.to_string(),
+            url: url.to_string(),
+            local_path: local_path_str.clone(),
+            total_size,
+            downloaded_size: resume_from,
+            status: DownloadStatus::Incomplete,
+        });
+    }
+    
+    App::save_registry(&registry);
     
     // Initialize progress
     {
         let mut prog = progress.lock().await;
         *prog = Some(DownloadProgress {
-            model_id: model_id.clone(),
-            filename: filename.clone(),
-            downloaded: 0,
-            total: 0,
+            model_id: model_id.to_string(),
+            filename: filename.to_string(),
+            downloaded: resume_from,
+            total: total_size,
+            speed_mbps: 0.0,
         });
     }
     
-    // Download the file using streaming
-    let url = format!("https://huggingface.co/{}/resolve/main/{}", model_id, filename);
+    // Open file in append mode
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&incomplete_path)
+        .await?;
     
-    let client = reqwest::Client::new();
-    let response = match client.get(&url).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            eprintln!("Failed to start download: {}", e);
-            let mut prog = progress.lock().await;
-            *prog = None;
-            return;
-        }
-    };
-    
-    let total_size = response.content_length().unwrap_or(0);
-    
-    // Update total size
-    {
-        let mut prog = progress.lock().await;
-        if let Some(p) = prog.as_mut() {
-            p.total = total_size;
-        }
-    }
-    
-    let mut file = match tokio::fs::File::create(&file_path).await {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Failed to create file: {}", e);
-            let mut prog = progress.lock().await;
-            *prog = None;
-            return;
-        }
-    };
-    
-    let mut downloaded: u64 = 0;
+    let mut downloaded: u64 = resume_from;
     let mut stream = response.bytes_stream();
     
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
     
+    // For speed calculation
+    let start_time = std::time::Instant::now();
+    let mut last_update = start_time;
+    let mut last_downloaded = resume_from;
+    
     while let Some(item) = stream.next().await {
-        let chunk = match item {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Error while downloading: {}", e);
-                break;
-            }
-        };
+        let chunk = item?;
         
-        if let Err(e) = file.write_all(&chunk).await {
-            eprintln!("Error writing to file: {}", e);
-            break;
-        }
+        file.write_all(&chunk).await?;
         
         downloaded += chunk.len() as u64;
         
-        // Update progress
-        let mut prog = progress.lock().await;
-        if let Some(p) = prog.as_mut() {
-            p.downloaded = downloaded;
+        // Update progress and calculate speed every 500ms
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(last_update).as_secs_f64();
+        
+        if elapsed >= 0.5 {
+            let bytes_since_last = downloaded - last_downloaded;
+            let speed_mbps = (bytes_since_last as f64 / elapsed) / 1_048_576.0; // Convert to MB/s
+            
+            let mut prog = progress.lock().await;
+            if let Some(p) = prog.as_mut() {
+                p.downloaded = downloaded;
+                p.speed_mbps = speed_mbps;
+            }
+            
+            last_update = now;
+            last_downloaded = downloaded;
         }
     }
     
     // Flush and sync
-    let _ = file.flush().await;
-    let _ = file.sync_all().await;
+    file.flush().await?;
+    file.sync_all().await?;
     
-    // Clear progress when done
-    let mut prog = progress.lock().await;
-    *prog = None;
+    // Rename to final path on successful completion
+    tokio::fs::rename(incomplete_path, final_path).await?;
+    
+    Ok((downloaded, total_size))
 }
 
 
