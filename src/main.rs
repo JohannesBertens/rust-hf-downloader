@@ -1452,7 +1452,11 @@ async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqw
     
     for file in &files {
         // Handle GGUF files in root directory
-        if file.file_type == "file" && file.path.ends_with(".gguf") {
+        // Match both .gguf and .gguf.partNofM patterns
+        let is_gguf_file = file.file_type == "file" && 
+                          (file.path.ends_with(".gguf") || file.path.contains(".gguf.part"));
+        
+        if is_gguf_file {
             // Check if this is a multi-part file
             if let Some((_, _)) = parse_multipart_filename(&file.path) {
                 // Group multi-part files by their base name
@@ -1481,9 +1485,11 @@ async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqw
                 if let Ok(subdir_response) = reqwest::get(&subdir_url).await {
                     if let Ok(subdir_files) = subdir_response.json::<Vec<ModelFile>>().await {
                         // Calculate total size of all GGUF files in this directory
+                        // Match both .gguf and .gguf.partNofM patterns
                         let total_size: u64 = subdir_files
                             .iter()
-                            .filter(|f| f.file_type == "file" && f.path.ends_with(".gguf"))
+                            .filter(|f| f.file_type == "file" && 
+                                       (f.path.ends_with(".gguf") || f.path.contains(".gguf.part")))
                             .map(|f| f.size)
                             .sum();
                         
@@ -1491,12 +1497,13 @@ async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqw
                             // Get first GGUF file as representative filename
                             let filename = subdir_files
                                 .iter()
-                                .find(|f| f.file_type == "file" && f.path.ends_with(".gguf"))
+                                .find(|f| f.file_type == "file" && 
+                                         (f.path.ends_with(".gguf") || f.path.contains(".gguf.part")))
                                 .map(|f| f.path.clone())
                                 .unwrap_or_else(|| format!("{}/model.gguf", file.path));
                             
                             quantizations.push(QuantizationInfo {
-                                quant_type: file.path.to_uppercase(),
+                                quant_type: extract_quantization_type_from_dirname(&file.path),
                                 filename,
                                 size: total_size,
                             });
@@ -1562,8 +1569,58 @@ fn get_multipart_base_name(filename: &str) -> String {
 fn is_quantization_directory(dirname: &str) -> bool {
     // Check if directory name looks like a quantization type
     // Examples: Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, BF16, etc.
+    // Also handles patterns like: cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0
     let upper = dirname.to_uppercase();
-    upper.starts_with('Q') || upper.starts_with("IQ") || upper == "BF16" || upper == "FP16"
+    
+    // First check if it starts with a known quantization pattern (original behavior)
+    if upper.starts_with('Q') || upper.starts_with("IQ") || upper == "BF16" || upper == "FP16" {
+        return true;
+    }
+    
+    // Extract the last component after the last hyphen
+    // This handles cases like "cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0" -> "Q8_0"
+    let parts: Vec<&str> = upper.split('-').collect();
+    if let Some(&last_part) = parts.last() {
+        // Check if last part looks like a quantization type
+        // Q followed by digit (Q4, Q5, Q8, etc.)
+        if last_part.starts_with('Q') && last_part.len() > 1 && last_part.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+            return true;
+        }
+        // IQ followed by digit (IQ4, IQ3, etc.)
+        if last_part.starts_with("IQ") && last_part.len() > 2 && last_part.chars().nth(2).map_or(false, |c| c.is_ascii_digit()) {
+            return true;
+        }
+        // Special formats
+        if last_part == "BF16" || last_part == "FP16" || last_part == "FP32" {
+            return true;
+        }
+    }
+    
+    false
+}
+
+fn extract_quantization_type_from_dirname(dirname: &str) -> String {
+    // Extract just the quantization type from a directory name
+    // Examples:
+    //   "Q4_K_M" -> "Q4_K_M"
+    //   "cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0" -> "Q8_0"
+    let upper = dirname.to_uppercase();
+    
+    // If it already starts with a quantization pattern, return as-is
+    if upper.starts_with('Q') || upper.starts_with("IQ") || upper == "BF16" || upper == "FP16" {
+        return upper;
+    }
+    
+    // Extract the last component after the last hyphen
+    let parts: Vec<&str> = upper.split('-').collect();
+    if let Some(&last_part) = parts.last() {
+        if last_part.starts_with('Q') || last_part.starts_with("IQ") || last_part == "BF16" || last_part == "FP16" || last_part == "FP32" {
+            return last_part.to_string();
+        }
+    }
+    
+    // Fallback: return the original name uppercased
+    upper
 }
 
 fn extract_quantization_type(filename: &str) -> Option<String> {
