@@ -111,6 +111,7 @@ The **Quantization Details** section shows all available GGUF quantized versions
 
 ### Architecture
 
+- **Rust Edition**: 2021
 - **TUI Framework**: [ratatui](https://github.com/ratatui/ratatui)
 - **HTTP Client**: reqwest with async support and streaming downloads
 - **API**: HuggingFace REST API (`https://huggingface.co/api/models`)
@@ -163,6 +164,10 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 0.6.1 (2025-11-21)
+- Changed Rust edition from 2024 to 2021 in Cargo.toml
+- Ensures broader compatibility with stable Rust toolchains
 
 ### Version 0.6.0 (2024-11-21)
 - **Security**: Fixed HIGH severity path traversal vulnerability

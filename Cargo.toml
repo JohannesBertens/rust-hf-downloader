@@ -1,10 +1,10 @@
 [package]
 name = "rust-hf-downloader"
-version = "0.6.0"
+version = "0.6.1"
 description = "TUI for searching and downloading HuggingFace models"
 authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
-edition = "2024"
+edition = "2021"
 documentation = "https://github.com/JohannesBertens/rust-hf-downloader"
 homepage = "https://jreb.nl"
 repository = "https://github.com/JohannesBertens/rust-hf-downloader"
