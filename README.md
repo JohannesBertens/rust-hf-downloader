@@ -172,6 +172,13 @@ Key security features in v0.6.0:
 
 ## Changelog
 
+### Version 0.6.4 (2025-11-21)
+- Pinned backtrace dependency to v0.3.71 for Rust 1.75.0 compatibility
+- Ensures out-of-the-box build support on Ubuntu 22.04 LTS
+
+### Version 0.6.3 (2025-11-21)
+- Pinned additional dependencies (url, idna) for Rust 1.75.0 compatibility
+
 ### Version 0.6.2 (2025-11-21)
 - Switched from native-tls to rustls for TLS implementation
 - Added support for Rust 1.75.0+ (Ubuntu 22.04 compatibility)
