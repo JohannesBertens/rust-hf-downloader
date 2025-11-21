@@ -432,7 +432,7 @@ impl App {
                     spans.push(Span::styled(&q.filename, Style::default().fg(Color::Green)));
                     spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
                 } else {
-                    spans.push(Span::styled(&q.filename, Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(&q.filename, Style::default().fg(Color::White)));
                 }
                 
                 let content = Line::from(spans);
@@ -1203,11 +1203,16 @@ impl App {
                 let quant = &quantizations[quant_idx];
                 
                 let base_path = self.download_path_input.value().to_string();
-                let base_path_buf = PathBuf::from(&base_path);
                 
-                // Create subfolder structure: {base_path}/{author}/{model_name}/
-                // Model ID is in format "author/model-name"
-                let model_path = base_path_buf.join(&model.id);
+                // Validate and sanitize the path to prevent path traversal
+                let model_path = match validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
+                    Ok(path) => path.parent().unwrap_or(&path).to_path_buf(),
+                    Err(e) => {
+                        self.error = Some(format!("Invalid path: {}", e));
+                        self.status = "Download cancelled due to invalid path".to_string();
+                        return;
+                    }
+                };
                 
                 // Check if this is a multi-part file (e.g., "00001-of-00005.gguf")
                 let files_to_download = if let Some((current_part, total_parts)) = parse_multipart_filename(&quant.filename) {
@@ -1234,9 +1239,17 @@ impl App {
                 };
                 
                 for filename in &files_to_download {
+                    // Validate each filename before processing
+                    let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            self.error = Some(format!("Invalid filename '{}': {}", filename, e));
+                            continue;
+                        }
+                    };
+                    
                     let url = format!("https://huggingface.co/{}/resolve/main/{}", model.id, filename);
-                    let local_path = model_path.join(filename);
-                    let local_path_str = local_path.to_string_lossy().to_string();
+                    let local_path_str = validated_path.to_string_lossy().to_string();
                     
                     // Only add if not already in registry
                     if !registry.downloads.iter().any(|d| d.url == url) {
@@ -1245,7 +1258,7 @@ impl App {
                             filename: filename.clone(),
                             url: url.clone(),
                             local_path: local_path_str,
-                            total_size: 0, // Will be updated when download starts
+                            total_size: 0,
                             downloaded_size: 0,
                             status: DownloadStatus::Incomplete,
                         });
@@ -1333,6 +1346,96 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn sanitize_path_component(component: &str) -> Option<String> {
+    // Reject path components that contain path traversal or are invalid
+    if component.is_empty() 
+        || component == "." 
+        || component == ".." 
+        || component.contains('/') 
+        || component.contains('\\')
+        || component.contains('\0') {
+        return None;
+    }
+    
+    // Remove any leading/trailing whitespace and dots
+    let trimmed = component.trim().trim_start_matches('.').trim_end_matches('.');
+    
+    if trimmed.is_empty() {
+        return None;
+    }
+    
+    Some(trimmed.to_string())
+}
+
+fn validate_and_sanitize_path(base_path: &str, model_id: &str, filename: &str) -> Result<PathBuf, String> {
+    // Validate base path
+    let base = PathBuf::from(base_path);
+    
+    // Canonicalize base path if it exists, otherwise just validate it doesn't contain traversal
+    let canonical_base = if base.exists() {
+        base.canonicalize().map_err(|e| format!("Invalid base path: {}", e))?
+    } else {
+        // For non-existent paths, ensure they're absolute or under home/current dir
+        if base.is_absolute() {
+            base.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("Cannot determine current directory: {}", e))?
+                .join(&base)
+        }
+    };
+    
+    // Validate and sanitize model_id (format: "author/model-name")
+    let model_parts: Vec<&str> = model_id.split('/').collect();
+    if model_parts.len() != 2 {
+        return Err(format!("Invalid model ID format: {}", model_id));
+    }
+    
+    let author = sanitize_path_component(model_parts[0])
+        .ok_or_else(|| format!("Invalid author in model ID: {}", model_parts[0]))?;
+    let model_name = sanitize_path_component(model_parts[1])
+        .ok_or_else(|| format!("Invalid model name in model ID: {}", model_parts[1]))?;
+    
+    // Validate and sanitize filename - may contain subdirectory (e.g., "Q4_K_M/file.gguf")
+    let filename_parts: Vec<&str> = filename.split('/').collect();
+    let mut sanitized_filename_parts = Vec::new();
+    
+    for part in filename_parts {
+        let sanitized = sanitize_path_component(part)
+            .ok_or_else(|| format!("Invalid filename component: {}", part))?;
+        sanitized_filename_parts.push(sanitized);
+    }
+    
+    // Build the final path: base/author/model_name/[subdir/]filename
+    let mut final_path = canonical_base.join(&author).join(&model_name);
+    for part in sanitized_filename_parts {
+        final_path = final_path.join(&part);
+    }
+    
+    // Final safety check: ensure the resulting path is still under the base directory
+    if let Ok(canonical_final) = final_path.canonicalize() {
+        if !canonical_final.starts_with(&canonical_base) {
+            return Err("Path traversal detected: final path escapes base directory".to_string());
+        }
+    } else {
+        // File doesn't exist yet, check parent directories
+        let mut check_path = final_path.clone();
+        while let Some(parent) = check_path.parent() {
+            if parent.exists() {
+                if let Ok(canonical_parent) = parent.canonicalize() {
+                    if !canonical_parent.starts_with(&canonical_base) {
+                        return Err("Path traversal detected: parent path escapes base directory".to_string());
+                    }
+                }
+                break;
+            }
+            check_path = parent.to_path_buf();
+        }
+    }
+    
+    Ok(final_path)
 }
 
 async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqwest::Error> {
@@ -1608,16 +1711,55 @@ async fn start_download(
     status_tx: mpsc::UnboundedSender<String>,
     complete_downloads: Arc<Mutex<HashMap<String, DownloadMetadata>>>,
 ) {
-    let url = format!("https://huggingface.co/{}/resolve/main/{}", model_id, filename);
-    let final_path = base_path.join(&filename);
+    // Validate filename to prevent path traversal
+    let sanitized_filename = {
+        let parts: Vec<&str> = filename.split('/').collect();
+        let mut sanitized_parts = Vec::new();
+        for part in parts {
+            match sanitize_path_component(part) {
+                Some(p) => sanitized_parts.push(p),
+                None => {
+                    let _ = status_tx.send(format!("Error: Invalid filename component: {}", part));
+                    return;
+                }
+            }
+        }
+        sanitized_parts.join("/")
+    };
+    
+    let url = format!("https://huggingface.co/{}/resolve/main/{}", model_id, sanitized_filename);
+    
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
         let _ = status_tx.send(format!("Error: Failed to create directory: {}", e));
         return;
     }
     
+    // Canonicalize base path for safety checks
+    let canonical_base = match base_path.canonicalize() {
+        Ok(path) => path,
+        Err(e) => {
+            let _ = status_tx.send(format!("Error: Cannot canonicalize base path: {}", e));
+            return;
+        }
+    };
+    
+    let final_path = canonical_base.join(&sanitized_filename);
+    
+    // Ensure final path is still under base directory
+    if let Some(parent) = final_path.parent() {
+        if let Ok(canonical_final_parent) = parent.canonicalize() {
+            if !canonical_final_parent.starts_with(&canonical_base) {
+                let _ = status_tx.send("Error: Path traversal detected".to_string());
+                return;
+            }
+        }
+    }
+    
     // Construct file paths  
-    let incomplete_path = base_path.join(format!("{}.incomplete", filename));
+    let incomplete_path = final_path.parent()
+        .unwrap_or(&canonical_base)
+        .join(format!("{}.incomplete", final_path.file_name().unwrap().to_string_lossy()));
     
     // Create parent directories for the file (in case filename contains subdirectories like "Q4_K_M/file.gguf")
     if let Some(parent) = final_path.parent() {

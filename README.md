@@ -2,6 +2,8 @@
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
+> **Security Note**: Version 0.6.0 includes important security fixes for path traversal vulnerabilities. See [SECURITY.md](SECURITY.md) for details and remaining security considerations.
+
 ## Features
 
 - 🔍 **Interactive Search**: Search through thousands of HuggingFace models
@@ -151,9 +153,33 @@ hf-search/
 - `urlencoding`: URL-safe query encoding
 - `futures`: Async stream utilities
 
+## Security
+
+For security considerations and vulnerability reporting, see [SECURITY.md](SECURITY.md).
+
+Key security features in v0.6.0:
+- ✅ Path traversal protection with comprehensive validation
+- ✅ Sanitization of all user inputs and API responses
+- ✅ Canonicalization checks for download paths
+
+## Changelog
+
+### Version 0.6.0 (2024-11-21)
+- **Security**: Fixed HIGH severity path traversal vulnerability
+- Added comprehensive path validation and sanitization
+- Added `validate_and_sanitize_path()` function for safe path handling
+- Updated download manager with canonicalization checks
+- Created SECURITY.md with remaining security considerations
+
+### Version 0.5.0
+- Added download resume on startup
+- Multi-part GGUF file support
+- Progress tracking with speed indicators
+- TOML-based download registry
+
 ## License
 
-Copyright (c) Johannes Bertens <>
+Copyright (c) Johannes Bertens
 
 This project is licensed under the MIT license ([LICENSE] or <http://opensource.org/licenses/MIT>)
 

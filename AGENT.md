@@ -690,4 +690,4 @@ When modifying this codebase:
 
 **Last Updated**: 2025-11-21  
 **Version**: 0.5.0  
-**Maintainer**: Johannes Bertens <>
+**Maintainer**: Johannes Bertens
