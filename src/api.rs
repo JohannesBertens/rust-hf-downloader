@@ -301,6 +301,26 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
     None
 }
 
+pub fn extract_filename_without_quant_dir(filename: &str) -> String {
+    // Extract clean filename by removing quantization directory if present
+    // Examples:
+    // "Q2_K_L/model.gguf" -> "model.gguf"
+    // "Q4_K_M/model.Q5_0.gguf" -> "model.Q5_0.gguf" 
+    // "model.gguf" -> "model.gguf" (no change)
+    
+    if let Some(slash_pos) = filename.find('/') {
+        // Check if the part before the slash looks like a quantization directory
+        let dir_part = &filename[..slash_pos];
+        if is_quantization_directory(dir_part) {
+            // Return everything after the slash (the actual filename)
+            return filename[slash_pos + 1..].to_string();
+        }
+    }
+    
+    // No quantization directory found, return as-is
+    filename.to_string()
+}
+
 pub fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
     // Parse filenames like:
     // "Q2_K/MiniMax-M2-Q2_K-00001-of-00002.gguf" (5-digit format)

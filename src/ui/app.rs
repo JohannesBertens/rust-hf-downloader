@@ -1,4 +1,4 @@
-use crate::api::{fetch_models, fetch_model_files, parse_multipart_filename};
+use crate::api::{fetch_models, fetch_model_files, parse_multipart_filename, extract_filename_without_quant_dir};
 use crate::download::{start_download, validate_and_sanitize_path};
 use crate::models::*;
 use crate::registry;
@@ -683,8 +683,11 @@ impl App {
                 
                 let base_path = self.download_path_input.value().to_string();
                 
+                // Extract clean filename (remove quantization directory if present)
+                let clean_filename = extract_filename_without_quant_dir(&quant.filename);
+                
                 // Validate and sanitize the path to prevent path traversal
-                let model_path = match validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
+                let model_path = match validate_and_sanitize_path(&base_path, &model.id, &clean_filename) {
                     Ok(path) => path.parent().unwrap_or(&path).to_path_buf(),
                     Err(e) => {
                         self.error = Some(format!("Invalid path: {}", e));
@@ -694,11 +697,11 @@ impl App {
                 };
                 
                 // Check if this is a multi-part file (e.g., "00001-of-00005.gguf")
-                let files_to_download = if let Some((current_part, total_parts)) = parse_multipart_filename(&quant.filename) {
+                let files_to_download = if let Some((current_part, total_parts)) = parse_multipart_filename(&clean_filename) {
                     // Generate all part filenames
                     let mut files = Vec::new();
                     for part in 1..=total_parts {
-                        let part_filename = quant.filename.replace(
+                        let part_filename = clean_filename.replace(
                             &format!("{:05}-of-{:05}", current_part, total_parts),
                             &format!("{:05}-of-{:05}", part, total_parts)
                         );
@@ -706,7 +709,7 @@ impl App {
                     }
                     files
                 } else {
-                    vec![quant.filename.clone()]
+                    vec![clean_filename.clone()]
                 };
                 
                 let num_files = files_to_download.len();
@@ -771,9 +774,9 @@ impl App {
                 
                 if success_count > 0 {
                     if num_files > 1 {
-                        self.status = format!("Queued {} parts of {} to {}", num_files, quant.filename, model_path.display());
+                        self.status = format!("Queued {} parts of {} to {}", num_files, clean_filename, model_path.display());
                     } else {
-                        self.status = format!("Starting download of {} to {}", quant.filename, model_path.display());
+                        self.status = format!("Starting download of {} to {}", clean_filename, model_path.display());
                     }
                 } else {
                     self.error = Some("Failed to start download".to_string());

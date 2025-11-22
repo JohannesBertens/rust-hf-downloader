@@ -15,6 +15,7 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
   - Resume support for interrupted downloads
   - Multi-part GGUF file handling
   - Automatic subfolder organization by publisher/model
+  - Fixed quantization folder duplication issue
   - Download queue with status display
 - ✅ **Download Tracking**: Visual indicators showing already downloaded files
 - 🔄 **Resume on Startup**: Automatically detect and offer to resume incomplete downloads
