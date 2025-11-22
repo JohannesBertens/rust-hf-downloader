@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "rust-hf-downloader"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "backtrace",
  "color-eyre",
