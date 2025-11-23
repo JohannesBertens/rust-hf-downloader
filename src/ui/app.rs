@@ -1,4 +1,4 @@
-use crate::api::{fetch_models, fetch_model_files, parse_multipart_filename};
+use crate::api::{fetch_models, fetch_model_files, fetch_multipart_sha256s, parse_multipart_filename};
 use crate::download::{start_download, validate_and_sanitize_path};
 use crate::models::*;
 use crate::registry;
@@ -25,21 +25,25 @@ pub struct App {
     quant_list_state: ListState,
     loading: bool,
     error: Option<String>,
-    status: String,
+    status: String,  // Status messages (downloads, verification, etc.)
+    selection_info: String,  // Model selection info (name + URL)
     quantizations: Arc<Mutex<Vec<QuantizationInfo>>>,
     loading_quants: bool,
     quant_cache: Arc<Mutex<QuantizationCache>>,
     popup_mode: PopupMode,
     download_path_input: Input,
     download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    download_tx: mpsc::UnboundedSender<(String, String, PathBuf)>,
-    download_rx: Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf)>>>,
+    download_tx: mpsc::UnboundedSender<(String, String, PathBuf, Option<String>)>,
+    download_rx: Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf, Option<String>)>>>,
     download_queue_size: Arc<Mutex<usize>>,
     incomplete_downloads: Vec<DownloadMetadata>,
     status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
     complete_downloads: Arc<Mutex<CompleteDownloads>>,
+    verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
+    verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
+    verification_queue_size: Arc<Mutex<usize>>,
 }
 
 impl Default for App {
@@ -74,7 +78,8 @@ impl App {
             quant_list_state,
             loading: false,
             error: None,
-            status: "Enter search query, press Enter to search, ESC to browse, 'q' to quit".to_string(),
+            status: "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'q' to quit".to_string(),
+            selection_info: String::new(),
             quantizations: Arc::new(Mutex::new(Vec::new())),
             loading_quants: false,
             quant_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -89,6 +94,9 @@ impl App {
             status_tx,
             download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
             complete_downloads: Arc::new(Mutex::new(HashMap::new())),
+            verification_progress: Arc::new(Mutex::new(Vec::new())),
+            verification_queue: Arc::new(Mutex::new(Vec::new())),
+            verification_queue_size: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -126,21 +134,50 @@ impl App {
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
         
+        // Spawn verification worker
+        let verification_queue = self.verification_queue.clone();
+        let verification_progress = self.verification_progress.clone();
+        let verification_queue_size = self.verification_queue_size.clone();
+        let status_tx_verify = self.status_tx.clone();
+        let download_registry = self.download_registry.clone();
+        
+        tokio::spawn(async move {
+            crate::verification::verification_worker(
+                verification_queue,
+                verification_progress,
+                verification_queue_size,
+                status_tx_verify,
+                download_registry,
+            ).await;
+        });
+        
         // Spawn download manager task
         let download_rx = self.download_rx.clone();
         let download_progress = self.download_progress.clone();
         let download_queue_size = self.download_queue_size.clone();
         let status_tx = self.status_tx.clone();
         let complete_downloads = self.complete_downloads.clone();
+        let verification_queue = self.verification_queue.clone();
+        let verification_queue_size = self.verification_queue_size.clone();
         tokio::spawn(async move {
             let mut rx = download_rx.lock().await;
-            while let Some((model_id, filename, path)) = rx.recv().await {
+            while let Some((model_id, filename, path, sha256)) = rx.recv().await {
                 // Decrement queue size when we start processing
                 {
                     let mut queue_size = download_queue_size.lock().await;
                     *queue_size = queue_size.saturating_sub(1);
                 }
-                start_download(model_id, filename, path, download_progress.clone(), status_tx.clone(), complete_downloads.clone()).await;
+                start_download(
+                    model_id,
+                    filename,
+                    path,
+                    download_progress.clone(),
+                    status_tx.clone(),
+                    complete_downloads.clone(),
+                    sha256,
+                    verification_queue.clone(),
+                    verification_queue_size.clone(),
+                ).await;
             }
         });
         
@@ -179,17 +216,27 @@ impl App {
             self.focused_pane,
             &self.error,
             &self.status,
+            &self.selection_info,
             &complete_downloads,
         );
         
-        // Render download progress bar
-        let (download_progress, queue_size) = futures::executor::block_on(async {
-            let progress = self.download_progress.lock().await.clone();
-            let queue = *self.download_queue_size.lock().await;
-            (progress, queue)
-        });
+        // Render both download and verification progress bars
+        let (download_progress, download_queue_size, verification_progress, verification_queue_size) = 
+            futures::executor::block_on(async {
+                let dl_prog = self.download_progress.lock().await.clone();
+                let dl_queue = *self.download_queue_size.lock().await;
+                let ver_prog = self.verification_progress.lock().await.clone();
+                let ver_queue = *self.verification_queue_size.lock().await;
+                (dl_prog, dl_queue, ver_prog, ver_queue)
+            });
         
-        super::render::render_progress_bar(frame, &download_progress, queue_size);
+        super::render::render_progress_bars(
+            frame,
+            &download_progress,
+            download_queue_size,
+            &verification_progress,
+            verification_queue_size,
+        );
         
         // Render popups (must be last to appear on top)
         match self.popup_mode {
@@ -285,6 +332,11 @@ impl App {
                         self.trigger_download();
                     }
                 }
+                (_, KeyCode::Char('v')) => {
+                    if self.focused_pane == FocusedPane::Quantizations {
+                        self.verify_downloaded_file().await;
+                    }
+                }
                 (_, KeyCode::Tab) => {
                     self.toggle_focus();
                 }
@@ -332,7 +384,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
-                    self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'q' to quit".to_string();
+                    self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'q' to quit".to_string();
                 }
                 _ => {
                     self.input.handle_event(&Event::Key(key));
@@ -485,16 +537,9 @@ impl App {
         if let Some(selected) = self.list_state.selected() {
             if selected < models.len() {
                 let model = &models[selected];
-                self.status = format!(
-                    "{} | Downloads: {} | Likes: {} | Tags: {}",
-                    model.id,
-                    crate::utils::format_number(model.downloads),
-                    crate::utils::format_number(model.likes),
-                    if model.tags.is_empty() {
-                        "none".to_string()
-                    } else {
-                        model.tags.join(", ")
-                    }
+                self.selection_info = format!(
+                    "Selected: {} | URL: https://huggingface.co/{}",
+                    model.id, model.id
                 );
             }
         }
@@ -505,6 +550,7 @@ impl App {
         if let Some(selected) = self.quant_list_state.selected() {
             if selected < quantizations.len() {
                 let quant = &quantizations[selected];
+                // Keep the model selection in line 1, show quant details in line 2
                 self.status = format!(
                     "Type: {} | Size: {} | File: {}",
                     quant.quant_type,
@@ -615,6 +661,7 @@ impl App {
                 metadata.model_id.clone(),
                 metadata.filename.clone(),
                 base_path,
+                metadata.expected_sha256.clone(),
             ));
         }
         
@@ -711,6 +758,19 @@ impl App {
                 
                 let num_files = files_to_download.len();
                 
+                // Fetch SHA256 hashes for all parts if this is a multi-part file
+                let sha256_map = if num_files > 1 {
+                    match fetch_multipart_sha256s(&model.id, &files_to_download).await {
+                        Ok(map) => map,
+                        Err(e) => {
+                            self.status = format!("Warning: Failed to fetch SHA256 hashes: {}. Downloads will proceed without verification.", e);
+                            HashMap::new()
+                        }
+                    }
+                } else {
+                    HashMap::new() // Single file uses quant.sha256 directly
+                };
+                
                 // Load registry and add metadata entries for all files
                 let mut registry = {
                     let reg = self.download_registry.lock().await;
@@ -732,6 +792,15 @@ impl App {
                     
                     // Only add if not already in registry
                     if !registry.downloads.iter().any(|d| d.url == url) {
+                        // For single files, use the SHA256 from quantization info
+                        // For multi-part files, look up the hash for this specific part
+                        let expected_sha256 = if num_files == 1 {
+                            quant.sha256.clone()
+                        } else {
+                            // Look up hash for this specific part from fetched map
+                            sha256_map.get(filename).and_then(|h| h.clone())
+                        };
+                        
                         registry.downloads.push(DownloadMetadata {
                             model_id: model.id.clone(),
                             filename: filename.clone(),
@@ -740,6 +809,7 @@ impl App {
                             total_size: 0,
                             downloaded_size: 0,
                             status: DownloadStatus::Incomplete,
+                            expected_sha256,
                         });
                     }
                 }
@@ -760,10 +830,20 @@ impl App {
                 // Send all download requests
                 let mut success_count = 0;
                 for filename in &files_to_download {
+                    // For single files, use the SHA256 from quantization info
+                    // For multi-part files, look up the hash for this specific part
+                    let sha256 = if num_files == 1 {
+                        quant.sha256.clone()
+                    } else {
+                        // Look up hash for this specific part from already-fetched map
+                        sha256_map.get(filename).and_then(|h| h.clone())
+                    };
+                    
                     if self.download_tx.send((
                         model.id.clone(),
                         filename.clone(),
                         model_path.clone(),
+                        sha256,
                     )).is_ok() {
                         success_count += 1;
                     }
@@ -784,6 +864,77 @@ impl App {
                     let mut queue_size = self.download_queue_size.lock().await;
                     *queue_size = queue_size.saturating_sub(num_files - success_count);
                 }
+            }
+        }
+    }
+    
+    async fn verify_downloaded_file(&mut self) {
+        let models = self.models.lock().await.clone();
+        let quantizations = self.quantizations.lock().await.clone();
+        let complete_downloads = self.complete_downloads.lock().await.clone();
+        
+        let model_selected = self.list_state.selected();
+        let quant_selected = self.quant_list_state.selected();
+        
+        if let (Some(model_idx), Some(quant_idx)) = (model_selected, quant_selected) {
+            if model_idx < models.len() && quant_idx < quantizations.len() {
+                let quant = &quantizations[quant_idx];
+                
+                // Check if file is marked as downloaded
+                if !complete_downloads.contains_key(&quant.filename) {
+                    self.status = format!("File {} is not marked as downloaded", quant.filename);
+                    return;
+                }
+                
+                // Get the metadata to find local path and expected hash
+                let metadata = match complete_downloads.get(&quant.filename) {
+                    Some(m) => m,
+                    None => {
+                        self.status = format!("Could not find metadata for {}", quant.filename);
+                        return;
+                    }
+                };
+                
+                // Check if we have expected hash
+                let expected_hash = match &metadata.expected_sha256 {
+                    Some(hash) => hash.clone(),
+                    None => {
+                        self.status = format!("No SHA256 hash available for {}, cannot verify", quant.filename);
+                        return;
+                    }
+                };
+                
+                let local_path = std::path::PathBuf::from(&metadata.local_path);
+                
+                // Check if file exists
+                if !local_path.exists() {
+                    self.status = format!("File not found: {}", local_path.display());
+                    self.error = Some(format!("File marked as downloaded but not found at {}", local_path.display()));
+                    return;
+                }
+                
+                // Get file size for progress tracking
+                let file_size = match tokio::fs::metadata(&local_path).await {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => 0,
+                };
+                
+                // Queue verification item (ALWAYS queue, ignoring ENABLE_DOWNLOAD_VERIFICATION)
+                let item = VerificationQueueItem {
+                    filename: quant.filename.clone(),
+                    local_path: local_path.to_string_lossy().to_string(),
+                    expected_sha256: expected_hash,
+                    total_size: file_size,
+                    is_manual: true,  // Mark as manual
+                };
+                
+                crate::verification::queue_verification(
+                    self.verification_queue.clone(),
+                    self.verification_queue_size.clone(),
+                    item,
+                ).await;
+                
+                self.status = format!("Queued {} for verification", quant.filename);
             }
         }
     }

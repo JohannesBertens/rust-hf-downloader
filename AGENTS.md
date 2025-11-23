@@ -641,7 +641,21 @@ let response = client
 
 ## Version History
 
-- **v0.7.5** (Current): Performance optimizations and adaptive download system
+- **v0.8.0** (Current): SHA256 verification system
+  - **Automatic verification**: Downloads fetch SHA256 hashes from HuggingFace and auto-verify
+  - **Manual verification**: Press 'v' to verify any downloaded file
+  - **Multi-part hash fetching**: Single API call fetches hashes for all parts
+  - **Verification worker**: Background worker processes verification queue (up to 2 concurrent)
+  - **Progress tracking**: Real-time verification progress bars with speed (MB/s)
+  - **Registry enhancement**: Added `expected_sha256` field to track hashes
+  - **Hash mismatch detection**: Three states: `Complete`, `Incomplete`, `HashMismatch`
+  - **New module**: `src/verification.rs` with streaming SHA256 calculation
+  - **Enhanced UI**: 4-line status bar with persistent model info and action messages
+  - **Dependencies**: Added `sha2` and `hex` for hash calculation
+  - **Thread-safe**: Filename-based progress tracking (no race conditions)
+  - **Documentation**: Added `VERIFICATION_CORRECTNESS.md` for technical analysis
+
+- **v0.7.5**: Performance optimizations and adaptive download system
   - **Adaptive chunk sizing**: Targets ~20 chunks per file (5MB-100MB range)
   - **Real-time speed tracking**: Updates every 200ms during streaming (not just at chunk completion)
   - **Improved UI**: Bordered container for chunk progress display

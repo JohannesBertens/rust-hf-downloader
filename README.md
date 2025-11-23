@@ -18,6 +18,12 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
   - Fixed quantization folder duplication issue
   - Download queue with status display
 - ✅ **Download Tracking**: Visual indicators showing already downloaded files
+- 🔒 **SHA256 Verification**: Automatic integrity checking with:
+  - Post-download hash verification
+  - Manual verification with 'v' key
+  - Multi-part file support (all parts verified)
+  - Real-time verification progress bars
+  - Hash mismatch detection
 - 🔄 **Resume on Startup**: Automatically detect and offer to resume incomplete downloads
 - 💾 **Metadata Management**: TOML-based download registry for reliable tracking
 - ⚡ **Async API**: Non-blocking UI with async API calls
@@ -68,6 +74,7 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 | `/` | Enter search mode |
 | `Tab` | Switch focus between Models and Quantizations lists |
 | `d` | Download selected quantization (when Quantizations list is focused) |
+| `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
 | `Enter` | Execute search (in search mode) / Show details (in browse mode) |
 | `Esc` | Return to browse mode from search mode / Cancel popup |
 | `j` or `↓` | Move selection down in focused list |
@@ -115,11 +122,16 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
      - Download speed (MB/s)
      - Queue count if multiple downloads pending
 
-10. **Press Enter** to see full details of the selected item in the status bar
+10. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
+   - Verification runs in background with progress bar
+   - Shows verification speed and percentage
+   - Status shows success (✓) or hash mismatch (✗)
 
-11. **Press Tab** again to return focus to the Models list
+11. **Press Enter** to see full details of the selected item in the status bar
 
-12. **Press `/`** to start a new search
+12. **Press Tab** again to return focus to the Models list
+
+13. **Press `/`** to start a new search
 
 The **Quantization Details** section shows all available GGUF quantized versions with:
 - **Left**: Combined file size (formatted as GB/MB/KB) - sum of all parts for multi-part files
@@ -174,6 +186,7 @@ rust-hf-downloader/
     ├── api.rs              # HuggingFace API client
     ├── registry.rs         # Download registry persistence
     ├── download.rs         # Download manager & security
+    ├── verification.rs     # SHA256 verification worker
     └── ui/
         ├── mod.rs          # UI module declaration
         ├── app.rs          # App state & event handling
@@ -199,6 +212,8 @@ rust-hf-downloader/
 - `regex`: Multi-part filename pattern matching
 - `urlencoding`: URL-safe query encoding
 - `futures`: Async stream utilities
+- `sha2`: SHA256 hash calculation
+- `hex`: Hex encoding for hash display
 
 ## Security
 
@@ -210,6 +225,19 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 0.8.0 (2025-11-23)
+- **Feature**: SHA256 hash verification system
+- **Automatic Verification**: Downloads automatically verify integrity after completion
+- **Manual Verification**: Press 'v' to verify any downloaded file
+- **Multi-part Support**: All parts of split GGUF files are verified individually
+- **Progress Tracking**: Real-time verification progress bars with speed indicators
+- **Status Display**: Visual feedback with ✓ (success) or ✗ (hash mismatch)
+- **Registry Enhancement**: Added `expected_sha256` field to download metadata
+- **New States**: Three download states - Complete, Incomplete, HashMismatch
+- **New Module**: `src/verification.rs` with background verification worker
+- **Dependencies**: Added `sha2` and `hex` for hash calculation
+- See [changelog/RELEASE_NOTES_0.8.0.md](changelog/RELEASE_NOTES_0.8.0.md) for full details
 
 ### Version 0.7.5 (2025-11-23)
 - **Performance**: Adaptive chunk sizing for optimal download performance across all file sizes

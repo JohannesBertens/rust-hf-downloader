@@ -32,6 +32,9 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
                           (file.path.ends_with(".gguf") || file.path.contains(".gguf.part"));
         
         if is_gguf_file {
+            // Extract SHA256 from lfs.oid (available for all files)
+            let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
+            
             // Check if this is a multi-part file
             if let Some((_, _)) = parse_multipart_filename(&file.path) {
                 // Group multi-part files by their base name
@@ -44,6 +47,7 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
                         quant_type,
                         filename: file.path.clone(),
                         size: file.size,
+                        sha256,
                     });
                 }
             }
@@ -69,18 +73,26 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
                             .sum();
                         
                         if total_size > 0 {
-                            // Get first GGUF file as representative filename
-                            let filename = subdir_files
+                            // Get first GGUF file as representative filename and its SHA256
+                            let first_file = subdir_files
                                 .iter()
                                 .find(|f| f.file_type == "file" && 
-                                         (f.path.ends_with(".gguf") || f.path.contains(".gguf.part")))
+                                         (f.path.ends_with(".gguf") || f.path.contains(".gguf.part")));
+                            
+                            let filename = first_file
                                 .map(|f| f.path.clone())
                                 .unwrap_or_else(|| format!("{}/model.gguf", file.path));
+                            
+                            // Extract SHA256 from first file's lfs.oid
+                            let sha256 = first_file
+                                .and_then(|f| f.lfs.as_ref())
+                                .map(|lfs| lfs.oid.clone());
                             
                             quantizations.push(QuantizationInfo {
                                 quant_type: extract_quantization_type_from_dirname(&file.path),
                                 filename,
                                 size: total_size,
+                                sha256,
                             });
                         }
                     }
@@ -90,15 +102,26 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
     }
     
     // Process multi-part groups
+    // Note: Multi-part files are separate complete files, each with their own SHA256
+    // They are NOT downloaded as chunks and concatenated
     for (base_name, parts) in multi_part_groups {
         let total_size: u64 = parts.iter().map(|f| f.size).sum();
         if let Some(quant_type) = extract_quantization_type(&base_name) {
             // Use the first part's filename as representative
-            let filename = parts.first().map(|f| f.path.clone()).unwrap_or(base_name);
+            let first_part = parts.first();
+            let filename = first_part.map(|f| f.path.clone()).unwrap_or(base_name);
+            
+            // Extract SHA256 from first part's lfs.oid
+            // Each part is a separate file with its own hash
+            let sha256 = first_part
+                .and_then(|f| f.lfs.as_ref())
+                .map(|lfs| lfs.oid.clone());
+            
             quantizations.push(QuantizationInfo {
                 quant_type,
                 filename,
                 size: total_size,
+                sha256,
             });
         }
     }
@@ -107,6 +130,36 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
     quantizations.sort_by(|a, b| b.size.cmp(&a.size));
     
     Ok(quantizations)
+}
+
+/// Fetch SHA256 hashes for multiple files in a single API call
+/// Returns a HashMap mapping filename to its SHA256 hash (if available)
+pub async fn fetch_multipart_sha256s(
+    model_id: &str,
+    filenames: &[String],
+) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
+    // Single API call to get all files
+    let url = format!(
+        "https://huggingface.co/api/models/{}/tree/main",
+        model_id
+    );
+    
+    let response = reqwest::get(&url).await?;
+    let files: Vec<ModelFile> = response.json().await?;
+    
+    // Create lookup map for fast matching
+    let mut sha256_map = HashMap::new();
+    
+    for filename in filenames {
+        let sha256 = files.iter()
+            .find(|f| &f.path == filename && f.file_type == "file")
+            .and_then(|f| f.lfs.as_ref())
+            .map(|lfs| lfs.oid.clone());
+        
+        sha256_map.insert(filename.clone(), sha256);
+    }
+    
+    Ok(sha256_map)
 }
 
 pub fn get_multipart_base_name(filename: &str) -> String {
