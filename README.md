@@ -11,7 +11,9 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - 📊 **Rich Display**: View model details including downloads, likes, and tags
 - 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, IQ4_XS, MXFP4, etc.) with file sizes
 - 📥 **Smart Downloads**: Download models directly from the TUI with:
-  - Progress tracking with speed indicators
+  - Adaptive chunk sizing for optimal performance across all file sizes
+  - Real-time speed tracking with continuous updates
+  - Progress tracking with per-chunk speed indicators
   - Resume support for interrupted downloads
   - Multi-part GGUF file handling
   - Automatic subfolder organization by publisher/model
@@ -125,6 +127,9 @@ The **Quantization Details** section shows all available GGUF quantized versions
 - **API**: HuggingFace REST API (`https://huggingface.co/api/models`)
 - **Text Input**: tui-input for search box handling
 - **Download Management**: 
+  - Adaptive chunk sizing (targets ~20 chunks per file, 5MB-100MB range)
+  - Parallel downloads with up to 8 concurrent chunks
+  - Real-time speed tracking (updated every 200ms during streaming)
   - TOML-based metadata registry (`~/models/hf-downloads.toml`)
   - Automatic resume from byte position
   - Retry logic with exponential backoff
@@ -188,6 +193,24 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 0.7.5 (2025-11-23)
+- **Performance**: Adaptive chunk sizing for optimal download performance across all file sizes
+- **Enhancement**: Real-time continuous speed tracking (updated every 200ms during streaming)
+- **UI Improvement**: Added bordered container for chunk progress display
+- Target ~20 chunks per file with 5MB-100MB size bounds
+- 90% reduction in task overhead for large files (>10GB)
+- Better parallelism for small files (<100MB)
+- See [changelog/RELEASE_NOTES_0.7.5.md](changelog/RELEASE_NOTES_0.7.5.md) for full details
+
+### Version 0.7.2 (2025-11-22)
+- Fixed quantization folder duplication issue in download paths
+- Improved local file path handling for quantization subdirectories
+- See [changelog/RELEASE_NOTES_0.7.2.md](changelog/RELEASE_NOTES_0.7.2.md) for details
+
+### Version 0.7.1 (2025-11-22)
+- Fixed quantization folder duplication issue
+- See [changelog/RELEASE_NOTES_0.7.1.md](changelog/RELEASE_NOTES_0.7.1.md) for details
 
 ### Version 0.7.0 (2025-11-21)
 - **Major Refactoring**: Complete modular architecture overhaul

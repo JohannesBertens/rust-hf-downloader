@@ -1,6 +1,6 @@
 [package]
 name = "rust-hf-downloader"
-version = "0.7.2"
+version = "0.7.5"
 description = "TUI for searching and downloading HuggingFace models"
 authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
