@@ -33,6 +33,19 @@ pub struct QuantizationInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChunkProgress {
+    pub chunk_id: usize,
+    #[allow(dead_code)]
+    pub start: u64,
+    #[allow(dead_code)]
+    pub end: u64,
+    pub downloaded: u64,
+    pub total: u64,
+    pub speed_mbps: f64,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DownloadProgress {
     pub model_id: String,
@@ -40,6 +53,7 @@ pub struct DownloadProgress {
     pub downloaded: u64,
     pub total: u64,
     pub speed_mbps: f64,
+    pub chunks: Vec<ChunkProgress>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -8,6 +8,8 @@ This document provides AI agents with a comprehensive understanding of the Rust 
 
 ### Purpose
 Enable users to discover, explore, and download HuggingFace models directly from the terminal with:
+- High-performance adaptive chunked downloads
+- Real-time continuous speed tracking
 - Reliable download management with resume support
 - Multi-part GGUF file handling
 - Organized folder structure by publisher and model
@@ -639,7 +641,30 @@ let response = client
 
 ## Version History
 
-- **v0.5.0** (Current): Complete download management system
+- **v0.7.5** (Current): Performance optimizations and adaptive download system
+  - **Adaptive chunk sizing**: Targets ~20 chunks per file (5MB-100MB range)
+  - **Real-time speed tracking**: Updates every 200ms during streaming (not just at chunk completion)
+  - **Improved UI**: Bordered container for chunk progress display
+  - **Performance gains**: 90% reduction in task overhead for large files (>10GB)
+  - **Better parallelism**: Optimized for small files (<100MB)
+  - **Constants**: `TARGET_CHUNKS = 20`, `MIN_CHUNK_SIZE = 5MB`, `MAX_CHUNK_SIZE = 100MB`
+  - **Continuous monitoring**: Speed calculated during active streaming, not delayed until chunk completion
+
+- **v0.7.2**: Fixed quantization folder duplication issue
+  - Improved local file path handling to prevent duplicate quantization folders
+  - Extracts only filename for local storage when base path already includes quant directory
+
+- **v0.7.0**: Modular architecture refactoring
+  - Split monolithic main.rs into 9 focused modules
+  - 6 top-level modules: models, utils, api, registry, download, ui
+  - 2 UI submodules: app (state/logic), render (presentation)
+  - Average file size reduced to ~240 lines per module
+
+- **v0.6.0**: Security hardening
+  - Fixed HIGH severity path traversal vulnerability
+  - Comprehensive path validation and sanitization
+
+- **v0.5.0**: Complete download management system
   - **Download functionality**: Stream downloads with progress tracking and speed indicators
   - **Resume support**: Automatic detection and resumption of interrupted downloads
   - **Multi-part GGUF handling**: Two filename formats supported (`-00001-of-00005` and `.part1of5`)
@@ -686,8 +711,75 @@ When modifying this codebase:
 5. Test all input modes and edge cases
 6. Ensure error messages are user-friendly
 
+## Download Performance Architecture (v0.7.5)
+
+### Adaptive Chunk Sizing
+
+**Function**: `calculate_chunk_size(file_size: u64) -> usize`
+
+```rust
+const TARGET_CHUNKS: usize = 20;
+const MIN_CHUNK_SIZE: u64 = 5 * 1024 * 1024;   // 5MB
+const MAX_CHUNK_SIZE: u64 = 100 * 1024 * 1024; // 100MB
+
+fn calculate_chunk_size(file_size: u64) -> usize {
+    let ideal_size = file_size / TARGET_CHUNKS as u64;
+    ideal_size.clamp(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE) as usize
+}
+```
+
+**Benefits by File Size:**
+- **50MB file**: 10 chunks of 5MB (better parallelism vs old 5 chunks)
+- **200MB file**: 20 chunks of 10MB (optimal)
+- **5GB file**: 50 chunks of 100MB (vs old 500 chunks - 90% reduction)
+- **50GB file**: 500 chunks of 100MB (vs old 5,000 chunks - 90% reduction)
+
+### Real-Time Speed Tracking
+
+**Location**: `download_chunk_with_progress()` streaming loop
+
+**Old Approach** (v0.7.2 and earlier):
+- Speed calculated only when chunk completed
+- Updated in chunk completion callback
+- Delayed feedback, inaccurate during active downloads
+
+**New Approach** (v0.7.5):
+```rust
+// Inside streaming loop, for every received byte chunk:
+while let Some(item) = stream.next().await {
+    let bytes = item?;
+    file.write_all(&bytes).await?;
+    
+    // Update total immediately
+    {
+        let mut downloaded = progress_downloaded.lock().await;
+        *downloaded += bytes.len() as u64;
+    }
+    
+    // Calculate total speed every 200ms
+    if elapsed >= 0.2 {
+        // Calculate both chunk speed and total speed
+        // Update progress.speed_mbps with real-time value
+    }
+}
+```
+
+**Benefits:**
+- Real-time speed updates (not delayed until chunk completion)
+- Accurate representation of current download rate
+- Smooth user feedback with 200ms update intervals
+- Immediate response to network speed changes
+
+### Parallel Download Architecture
+
+- **Concurrency**: Up to 8 chunks downloaded simultaneously
+- **Semaphore**: Controls max concurrent chunks via `Arc<Semaphore>`
+- **Shared State**: `Arc<Mutex<u64>>` for total downloaded bytes
+- **Per-Chunk Tracking**: Individual speed and progress for each active chunk
+- **Memory Bounded**: Max 8 × 100MB = 800MB worst case
+
 ---
 
-**Last Updated**: 2025-11-21  
-**Version**: 0.5.0  
+**Last Updated**: 2025-11-23  
+**Version**: 0.7.5  
 **Maintainer**: Johannes Bertens
