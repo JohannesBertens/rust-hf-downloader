@@ -49,7 +49,6 @@ No configuration changes required. All downloads and registry files remain compa
 ### Version 0.6.0 (2024-11-21)
 - **Security**: Fixed HIGH severity path traversal vulnerability
 - Added comprehensive path validation and sanitization
-- Created SECURITY.md and SECURITY_FIX.md documentation
 
 ### Version 0.5.0
 - Added download resume on startup

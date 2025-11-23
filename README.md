@@ -217,8 +217,6 @@ rust-hf-downloader/
 
 ## Security
 
-For security considerations and vulnerability reporting, see [SECURITY.md](SECURITY.md).
-
 Key security features in v0.6.0:
 - ✅ Path traversal protection with comprehensive validation
 - ✅ Sanitization of all user inputs and API responses

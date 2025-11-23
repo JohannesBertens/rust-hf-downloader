@@ -38,25 +38,11 @@ Fixed a critical security vulnerability that could allow malicious model IDs or 
 
 ## 📚 Documentation
 
-### New Files
-- **SECURITY.md**: Comprehensive security documentation
-  - Lists all security considerations (fixed and remaining)
-  - Provides code examples for recommended fixes
-  - Includes vulnerability reporting process
-  - Documents security update policy
-  
-- **SECURITY_FIX.md**: Detailed analysis of the path traversal fix
-  - Attack scenarios and examples
-  - Before/after comparison
-  - Security guarantees provided
-  - Testing recommendations
-
 ### Updated Files
 - **README.md**: 
   - Added security notice at the top
   - New "Security" section with key features
   - New "Changelog" section
-  - Reference to SECURITY.md
   
 - **Cargo.toml**: Version bumped to 0.6.0
 
@@ -83,8 +69,6 @@ While this release addresses the critical path traversal vulnerability, the foll
 2. **File System Operations** (MEDIUM) - Implement file locking and atomic operations
 3. **Credential Handling** (MEDIUM) - Add secure token storage for private models
 4. **Resource Limits** (MEDIUM) - Implement download size/rate limiting
-
-See [SECURITY.md](SECURITY.md) for detailed recommendations and code examples.
 
 ## 🔄 Breaking Changes
 
@@ -139,8 +123,6 @@ Do not create public GitHub issues for security vulnerabilities.
 - Updated download manager with canonicalization checks
 - Updated `App::confirm_download()` with path validation
 - Updated `start_download()` with runtime validation
-- Created SECURITY.md with remaining security considerations
-- Created SECURITY_FIX.md with detailed vulnerability analysis
 - Updated README.md with security notice and changelog
 - Version bumped to 0.6.0 in Cargo.toml
 
