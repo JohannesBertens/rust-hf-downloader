@@ -2,8 +2,6 @@
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
-> **Security Note**: Version 0.6.0 includes important security fixes for path traversal vulnerabilities. See [SECURITY.md](SECURITY.md) for details and remaining security considerations.
-
 ## Features
 
 - 🔍 **Interactive Search**: Search through thousands of HuggingFace models
@@ -32,17 +30,36 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 
 ## Installation
 
+### From source
+
+Clone this repository:
+```bash
+git clone https://github.com/JohannesBertens/rust-hf-downloader.git
+```
+
+Build:
 ```bash
 cargo build --release
 ```
 
-## Usage
-
 Run the application:
-
 ```bash
 cargo run --release
 ```
+
+### Using Crates.io
+
+Install:
+```bash
+cargo install rust-hf-downloader
+```
+
+Run:
+```bash
+rust-hf-downloader
+```
+
+See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-downloader)
 
 ### Controls
 
