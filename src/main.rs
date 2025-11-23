@@ -1,6 +1,7 @@
 mod models;
 mod api;
 mod download;
+mod verification;
 mod registry;
 mod ui;
 mod utils;

@@ -16,6 +16,14 @@ pub struct ModelInfo {
     pub last_modified: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LfsInfo {
+    pub oid: String,
+    pub size: u64,
+    #[serde(rename = "pointerSize")]
+    pub pointer_size: u32,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelFile {
     #[serde(rename = "type")]
@@ -23,6 +31,8 @@ pub struct ModelFile {
     pub path: String,
     #[serde(default)]
     pub size: u64,
+    #[serde(default)]
+    pub lfs: Option<LfsInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +40,7 @@ pub struct QuantizationInfo {
     pub quant_type: String,
     pub filename: String,
     pub size: u64,
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +65,14 @@ pub struct DownloadProgress {
     pub total: u64,
     pub speed_mbps: f64,
     pub chunks: Vec<ChunkProgress>,
+    pub verifying: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DownloadStatus {
     Incomplete,
     Complete,
+    HashMismatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +84,8 @@ pub struct DownloadMetadata {
     pub total_size: u64,
     pub downloaded_size: u64,
     pub status: DownloadStatus,
+    #[serde(default)]
+    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -99,3 +114,25 @@ pub enum FocusedPane {
 
 pub type QuantizationCache = HashMap<String, Vec<QuantizationInfo>>;
 pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
+
+/// Progress tracking for an active verification operation
+#[derive(Debug, Clone)]
+pub struct VerificationProgress {
+    pub filename: String,
+    #[allow(dead_code)]
+    pub local_path: String,
+    pub verified_bytes: u64,
+    pub total_bytes: u64,
+    pub speed_mbps: f64,
+}
+
+/// Item in the verification queue
+#[derive(Debug, Clone)]
+pub struct VerificationQueueItem {
+    pub filename: String,
+    pub local_path: String,
+    pub expected_sha256: String,
+    pub total_size: u64,
+    #[allow(dead_code)]
+    pub is_manual: bool,  // True if triggered by 'v' key, false if automatic
+}

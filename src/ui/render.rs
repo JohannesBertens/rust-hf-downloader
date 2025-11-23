@@ -1,4 +1,4 @@
-use crate::models::{FocusedPane, InputMode, ModelInfo, QuantizationInfo};
+use crate::models::{FocusedPane, InputMode, ModelInfo, QuantizationInfo, DownloadProgress, VerificationProgress};
 use crate::utils::{format_number, format_size};
 use ratatui::{
     Frame,
@@ -23,6 +23,7 @@ pub fn render_ui(
     focused_pane: FocusedPane,
     error: &Option<String>,
     status: &str,
+    selection_info: &str,
     complete_downloads: &HashMap<String, crate::models::DownloadMetadata>,
 ) {
     let chunks = Layout::default()
@@ -31,7 +32,7 @@ pub fn render_ui(
             Constraint::Length(3),
             Constraint::Min(10),
             Constraint::Length(12),
-            Constraint::Length(3),
+            Constraint::Length(4),  // Changed from 3 to 4 for 2-line status
         ])
         .split(frame.area());
 
@@ -190,10 +191,10 @@ pub fn render_ui(
 
     frame.render_stateful_widget(quant_list, chunks[2], quant_list_state);
 
-    // Status bar
-    let status_text = if let Some(err) = error {
-        format!("Error: {}", err)
-    } else if !models.is_empty() {
+    // Status bar with 2 lines: selection_info and status message
+    let line1 = if !selection_info.is_empty() {
+        selection_info.to_string()
+    } else {
         if let Some(selected) = list_state.selected() {
             if selected < models.len() {
                 let model = &models[selected];
@@ -202,13 +203,23 @@ pub fn render_ui(
                     model.id, model.id
                 )
             } else {
-                status.to_string()
+                format!("")
             }
         } else {
-            status.to_string()
+            format!("")
         }
+    };
+    
+    let line2 = if let Some(err) = error {
+        format!("Error: {}", err)
     } else {
-        status.to_string()
+                status.to_string()
+    };
+    
+    let status_text = if !line1.is_empty() {
+        format!("{}\n{}", line1, line2)
+    } else {
+        line2
     };
 
     let status_widget = Paragraph::new(status_text)
@@ -223,125 +234,217 @@ pub fn render_ui(
     frame.render_widget(status_widget, chunks[3]);
 }
 
-pub fn render_progress_bar(
+/// Render both download and verification progress bars
+pub fn render_progress_bars(
     frame: &mut Frame,
-    download_progress: &Option<crate::models::DownloadProgress>,
+    download_progress: &Option<DownloadProgress>,
+    download_queue_size: usize,
+    verification_progress: &[VerificationProgress],
+    verification_queue_size: usize,
+) {
+    // Render download progress (top-right) if active
+    if let Some(progress) = download_progress {
+        render_download_progress(frame, progress, download_queue_size);
+    }
+    
+    // Render verification progress (bottom-right) if active
+    if !verification_progress.is_empty() || verification_queue_size > 0 {
+        render_verification_progress(frame, verification_progress, verification_queue_size);
+    }
+}
+
+/// Render download progress bar in top-right corner
+fn render_download_progress(
+    frame: &mut Frame,
+    progress: &DownloadProgress,
     queue_size: usize,
 ) {
-    if let Some(progress) = download_progress {
-        // Filter to show only active chunks
-        let active_chunks: Vec<_> = progress.chunks.iter()
-            .filter(|c| c.is_active)
-            .collect();
-        
-        // Calculate needed height: 3 for overall progress + chunks with borders
-        let num_active = active_chunks.len();
-        let total_height = if num_active > 0 {
-            3 + num_active as u16 + 2 // +2 for chunk block borders
-        } else {
-            3 // Just the overall bar
+    // Filter active chunks
+    let active_chunks: Vec<_> = progress.chunks.iter()
+        .filter(|c| c.is_active)
+        .collect();
+    
+    // Calculate height
+    let num_active = active_chunks.len();
+    let total_height = if num_active > 0 {
+        3 + num_active as u16 + 2
+    } else {
+        3
+    };
+    
+    // Position: top-right
+    let progress_area = Rect {
+        x: frame.area().width.saturating_sub(52),
+        y: 0,
+        width: 52.min(frame.area().width),
+        height: total_height.min(frame.area().height),
+    };
+    
+    frame.render_widget(Clear, progress_area);
+    
+    let percentage = if progress.total > 0 {
+        (progress.downloaded as f64 / progress.total as f64 * 100.0) as u16
+    } else {
+        0
+    };
+    
+    // Title with queue info (no more verifying logic)
+    let title = if queue_size > 0 {
+        format!("Downloading ({} queued)", queue_size)
+    } else {
+        "Downloading".to_string()
+    };
+    
+    // Label with speed
+    let label = if progress.speed_mbps > 0.0 {
+        format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
+    } else {
+        format!("{}%", percentage)
+    };
+    
+    // Overall progress gauge
+    let overall_area = Rect {
+        x: progress_area.x,
+        y: progress_area.y,
+        width: progress_area.width,
+        height: 3,
+    };
+    
+    let gauge = Gauge::default()
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+        .percent(percentage)
+        .label(label);
+    
+    frame.render_widget(gauge, overall_area);
+    
+    // Render active chunk progress
+    if !active_chunks.is_empty() {
+        let chunks_area = Rect {
+            x: progress_area.x,
+            y: progress_area.y + 3,
+            width: progress_area.width,
+            height: num_active as u16 + 2,
         };
         
-        let progress_area = Rect {
-            x: frame.area().width.saturating_sub(52),
-            y: 0,
-            width: 52.min(frame.area().width),
-            height: total_height.min(frame.area().height),
+        let chunks_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Active Chunks");
+        
+        let inner_area = chunks_block.inner(chunks_area);
+        frame.render_widget(chunks_block, chunks_area);
+        
+        let mut y_offset = 0;
+        
+        for chunk in active_chunks {
+            let chunk_area = Rect {
+                x: inner_area.x,
+                y: inner_area.y + y_offset,
+                width: inner_area.width,
+                height: 1,
+            };
+            
+            let chunk_pct = if chunk.total > 0 {
+                (chunk.downloaded as f64 / chunk.total as f64 * 100.0) as u16
+            } else {
+                0
+            };
+            
+            let bar_width = chunk_area.width.saturating_sub(20) as usize;
+            let filled = (bar_width as f64 * chunk_pct as f64 / 100.0) as usize;
+            let empty = bar_width.saturating_sub(filled);
+            
+            let bar = format!(
+                "#{:<2}[{}{}] {:>6.2} MB/s",
+                chunk.chunk_id + 1,
+                "=".repeat(filled),
+                " ".repeat(empty),
+                chunk.speed_mbps
+            );
+            
+            let chunk_widget = Paragraph::new(bar)
+                .style(Style::default().fg(Color::Yellow));
+            
+            frame.render_widget(chunk_widget, chunk_area);
+            y_offset += 1;
+        }
+    }
+}
+
+/// Render verification progress bar in bottom-right corner
+fn render_verification_progress(
+    frame: &mut Frame,
+    verifications: &[VerificationProgress],
+    queue_size: usize,
+) {
+    if verifications.is_empty() && queue_size == 0 {
+        return;
+    }
+    
+    // Calculate height: each verification gets 3 lines
+    let height = 3 + (verifications.len() as u16 * 3);
+    
+    // Position: bottom-right
+    let area = Rect {
+        x: frame.area().width.saturating_sub(52),
+        y: frame.area().height.saturating_sub(height.min(frame.area().height)),
+        width: 52.min(frame.area().width),
+        height: height.min(frame.area().height),
+    };
+    
+    frame.render_widget(Clear, area);
+    
+    // Title with queue info
+    let title = if queue_size > 0 {
+        format!("Verifying ({} queued)", queue_size)
+    } else {
+        "Verifying".to_string()
+    };
+    
+    // Main container block
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Green));
+    
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    
+    // Render each active verification as a progress bar
+    for (i, ver) in verifications.iter().enumerate() {
+        let ver_area = Rect {
+            x: inner.x,
+            y: inner.y + (i as u16 * 3),
+            width: inner.width,
+            height: 3.min(inner.height.saturating_sub(i as u16 * 3)),
         };
         
-        // Clear the background
-        frame.render_widget(Clear, progress_area);
+        if ver_area.height == 0 {
+            break; // No more room
+        }
         
-        let percentage = if progress.total > 0 {
-            (progress.downloaded as f64 / progress.total as f64 * 100.0) as u16
+        let percentage = if ver.total_bytes > 0 {
+            (ver.verified_bytes as f64 / ver.total_bytes as f64 * 100.0) as u16
         } else {
             0
         };
         
-        // Format title with queue info
-        let title = if queue_size > 0 {
-            format!("Downloading ({} queued)", queue_size)
+        // Truncate filename to fit (show end of filename)
+        let display_name = if ver.filename.len() > 35 {
+            format!("...{}", &ver.filename[ver.filename.len()-32..])
         } else {
-            "Downloading".to_string()
+            ver.filename.clone()
         };
         
-        // Format label with percentage and speed
-        let label = if progress.speed_mbps > 0.0 {
-            format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
-        } else {
-            format!("{}%", percentage)
-        };
-        
-        // Overall progress gauge
-        let overall_area = Rect {
-            x: progress_area.x,
-            y: progress_area.y,
-            width: progress_area.width,
-            height: 3,
-        };
+        let label = format!("{}%", percentage);
         
         let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
+            .block(Block::default().borders(Borders::ALL).title(display_name))
+            .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
             .percent(percentage)
             .label(label);
         
-        frame.render_widget(gauge, overall_area);
-        
-        // Show active chunk progress bars only
-        if !active_chunks.is_empty() {
-            // Create a bordered block for all chunks
-            let chunks_area = Rect {
-                x: progress_area.x,
-                y: progress_area.y + 3,
-                width: progress_area.width,
-                height: num_active as u16 + 2, // +2 for borders
-            };
-            
-            let chunks_block = Block::default()
-                .borders(Borders::ALL)
-                .title("Active Chunks");
-            
-            let inner_area = chunks_block.inner(chunks_area);
-            
-            frame.render_widget(chunks_block, chunks_area);
-            
-            let mut y_offset = 0;
-            
-            for chunk in active_chunks {
-                let chunk_area = Rect {
-                    x: inner_area.x,
-                    y: inner_area.y + y_offset,
-                    width: inner_area.width,
-                    height: 1,
-                };
-                
-                let chunk_pct = if chunk.total > 0 {
-                    (chunk.downloaded as f64 / chunk.total as f64 * 100.0) as u16
-                } else {
-                    0
-                };
-                
-                // Create visual bar with speed
-                let bar_width = chunk_area.width.saturating_sub(20) as usize;
-                let filled = (bar_width as f64 * chunk_pct as f64 / 100.0) as usize;
-                let empty = bar_width.saturating_sub(filled);
-                
-                let bar = format!(
-                    "#{:<2}[{}{}] {:>6.2} MB/s",
-                    chunk.chunk_id + 1,
-                    "=".repeat(filled),
-                    " ".repeat(empty),
-                    chunk.speed_mbps
-                );
-                
-                let chunk_widget = Paragraph::new(bar)
-                    .style(Style::default().fg(Color::Yellow));
-                
-                frame.render_widget(chunk_widget, chunk_area);
-                y_offset += 1;
-            }
-        }
+        frame.render_widget(gauge, ver_area);
     }
 }
 

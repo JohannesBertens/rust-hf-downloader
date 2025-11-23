@@ -37,7 +37,7 @@ pub fn save_registry(registry: &DownloadRegistry) {
 
 pub fn get_incomplete_downloads(registry: &DownloadRegistry) -> Vec<crate::models::DownloadMetadata> {
     registry.downloads.iter()
-        .filter(|d| d.status == DownloadStatus::Incomplete)
+        .filter(|d| d.status == DownloadStatus::Incomplete || d.status == DownloadStatus::HashMismatch)
         .cloned()
         .collect()
 }

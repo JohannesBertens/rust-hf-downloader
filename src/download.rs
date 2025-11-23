@@ -1,4 +1,4 @@
-use crate::models::{ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus};
+use crate::models::{ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus, VerificationQueueItem};
 use crate::registry;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -103,7 +103,13 @@ pub async fn start_download(
     progress: Arc<Mutex<Option<DownloadProgress>>>,
     status_tx: mpsc::UnboundedSender<String>,
     complete_downloads: Arc<Mutex<CompleteDownloads>>,
+    expected_sha256: Option<String>,
+    verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
+    verification_queue_size: Arc<Mutex<usize>>,
 ) {
+    // Notify user that download is starting
+    let _ = status_tx.send(format!("Starting download: {}", filename));
+    
     // Validate filename to prevent path traversal
     let sanitized_filename = {
         let parts: Vec<&str> = filename.split('/').collect();
@@ -210,8 +216,9 @@ pub async fn start_download(
             &model_id,
             &filename,
             &status_tx,
+            &expected_sha256,
         ).await {
-            Ok((final_size, expected_size)) => {
+            Ok((final_size, expected_size, verification_item)) => {
                 // Verify the download is complete
                 if final_size == expected_size && expected_size > 0 {
                     // Update registry: mark as complete
@@ -225,7 +232,22 @@ pub async fn start_download(
                         complete.insert(filename.clone(), entry.clone());
                     }
                     registry::save_registry(&registry);
-                    let _ = status_tx.send(format!("Download complete: {} ({} bytes)", filename, final_size));
+                    
+                    // Queue verification if enabled AND hash is available
+                    if ENABLE_DOWNLOAD_VERIFICATION {
+                        if let Some(item) = verification_item {
+                            crate::verification::queue_verification(
+                                verification_queue,
+                                verification_queue_size,
+                                item,
+                            ).await;
+                            let _ = status_tx.send(format!("Download complete, queued for verification: {}", filename));
+                        } else {
+                            let _ = status_tx.send(format!("Download complete: {} (no hash available)", filename));
+                        }
+                    } else {
+                        let _ = status_tx.send(format!("Download complete: {}", filename));
+                    }
                 } else {
                     let _ = status_tx.send(format!("Warning: Download may be incomplete: {} (got {} bytes, expected {})", filename, final_size, expected_size));
                 }
@@ -284,6 +306,9 @@ const TARGET_CHUNKS: usize = 3 * MAX_CONCURRENT_CHUNKS; // Aim for ~3* amount of
 const MIN_CHUNK_SIZE: u64 = 5 * 1024 * 1024; // 5MB minimum
 const MAX_CHUNK_SIZE: u64 = 250 * 1024 * 1024; // 250MB maximum
 
+// Configuration for download verification
+pub const ENABLE_DOWNLOAD_VERIFICATION: bool = true; // Set to false to skip hash verification
+
 fn calculate_chunk_size(file_size: u64) -> usize {
     let ideal_size = file_size / TARGET_CHUNKS as u64;
     ideal_size.clamp(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE) as usize
@@ -297,7 +322,8 @@ async fn download_chunked(
     model_id: &str,
     filename: &str,
     _status_tx: &mpsc::UnboundedSender<String>,
-) -> Result<(u64, u64), Box<dyn std::error::Error + Send + Sync>> {
+    expected_sha256: &Option<String>,
+) -> Result<(u64, u64, Option<VerificationQueueItem>), Box<dyn std::error::Error + Send + Sync>> {
     let local_path_str = final_path.to_string_lossy().to_string();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
@@ -346,6 +372,7 @@ async fn download_chunked(
             total_size,
             downloaded_size: 0,
             status: DownloadStatus::Incomplete,
+            expected_sha256: expected_sha256.clone(),
         });
     }
     
@@ -366,6 +393,7 @@ async fn download_chunked(
             total: total_size,
             speed_mbps: 0.0,
             chunks: Vec::new(), // Chunks will be added dynamically as they start
+            verifying: false,
         });
     }
     
@@ -485,10 +513,23 @@ async fn download_chunked(
         }
     }
     
-    // Rename to final path on successful completion
+    // Rename to final path immediately after download completes
     tokio::fs::rename(incomplete_path, final_path).await?;
     
-    Ok((total_size, total_size))
+    // Prepare verification data if hash is available
+    let verification_item = if let Some(expected_hash) = expected_sha256 {
+        Some(VerificationQueueItem {
+            filename: filename.to_string(),
+            local_path: final_path.to_string_lossy().to_string(),
+            expected_sha256: expected_hash.clone(),
+            total_size,
+            is_manual: false,
+        })
+    } else {
+        None
+    };
+    
+    Ok((total_size, total_size, verification_item))
 }
 
 #[allow(clippy::too_many_arguments)]
