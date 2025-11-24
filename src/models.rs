@@ -98,6 +98,7 @@ pub enum PopupMode {
     None,
     DownloadPath,
     ResumeDownload,
+    Options,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,4 +136,54 @@ pub struct VerificationQueueItem {
     pub total_size: u64,
     #[allow(dead_code)]
     pub is_manual: bool,  // True if triggered by 'v' key, false if automatic
+}
+
+/// Application options/settings
+#[derive(Debug, Clone)]
+pub struct AppOptions {
+    // General
+    pub default_directory: String,
+    
+    // Download Settings
+    pub concurrent_threads: usize,
+    pub num_chunks: usize,
+    pub min_chunk_size: u64,
+    pub max_chunk_size: u64,
+    pub max_retries: u32,
+    pub download_timeout_secs: u64,
+    pub retry_delay_secs: u64,
+    pub progress_update_interval_ms: u64,
+    
+    // Verification Settings
+    pub verification_on_completion: bool,
+    pub concurrent_verifications: usize,
+    pub verification_buffer_size: usize,
+    pub verification_update_interval: usize,
+    
+    // UI State
+    pub selected_field: usize,
+    pub editing_directory: bool,
+}
+
+impl Default for AppOptions {
+    fn default() -> Self {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        Self {
+            default_directory: format!("{}/models", home),
+            concurrent_threads: 8,
+            num_chunks: 20,
+            min_chunk_size: 5 * 1024 * 1024,
+            max_chunk_size: 100 * 1024 * 1024,
+            max_retries: 5,
+            download_timeout_secs: 300,
+            retry_delay_secs: 1,
+            progress_update_interval_ms: 200,
+            verification_on_completion: true,
+            concurrent_verifications: 2,
+            verification_buffer_size: 128 * 1024,
+            verification_update_interval: 100,
+            selected_field: 0,
+            editing_directory: false,
+        }
+    }
 }

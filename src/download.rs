@@ -2,6 +2,7 @@ use crate::models::{ChunkProgress, CompleteDownloads, DownloadMetadata, Download
 use crate::registry;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, AtomicU64, AtomicU32, AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc, Semaphore};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use std::io::SeekFrom;
@@ -204,8 +205,7 @@ pub async fn start_download(
         return;
     }
     
-    const MAX_RETRIES: u32 = 5;
-    let mut retries = MAX_RETRIES;
+    let mut retries = DOWNLOAD_CONFIG.max_retries.load(Ordering::Relaxed);
     
     loop {
         match download_chunked(
@@ -234,7 +234,8 @@ pub async fn start_download(
                     registry::save_registry(&registry);
                     
                     // Queue verification if enabled AND hash is available
-                    if ENABLE_DOWNLOAD_VERIFICATION {
+                    let verification_enabled = DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
+                    if verification_enabled {
                         if let Some(item) = verification_item {
                             crate::verification::queue_verification(
                                 verification_queue,
@@ -256,7 +257,8 @@ pub async fn start_download(
             Err(e) if retries > 0 && is_transient_error(&e) => {
                 retries -= 1;
                 let _ = status_tx.send(format!("Download interrupted: {}. Retrying ({} left)...", e, retries));
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                let retry_delay = DOWNLOAD_CONFIG.retry_delay_secs.load(Ordering::Relaxed);
+                tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
                 
                 // Delete incomplete file to restart from beginning
                 if incomplete_path.exists() {
@@ -300,18 +302,44 @@ fn is_transient_error(e: &Box<dyn std::error::Error + Send + Sync>) -> bool {
     false
 }
 
-// Configuration for chunked downloads
-const MAX_CONCURRENT_CHUNKS: usize = 8; // Download up to 8 chunks in parallel
-const TARGET_CHUNKS: usize = 3 * MAX_CONCURRENT_CHUNKS; // Aim for ~3* amount of threads per file
-const MIN_CHUNK_SIZE: u64 = 5 * 1024 * 1024; // 5MB minimum
-const MAX_CHUNK_SIZE: u64 = 250 * 1024 * 1024; // 250MB maximum
+// Global download configuration (thread-safe, runtime-modifiable)
+pub struct DownloadConfig {
+    pub concurrent_threads: AtomicUsize,
+    pub target_chunks: AtomicUsize,
+    pub min_chunk_size: AtomicU64,
+    pub max_chunk_size: AtomicU64,
+    pub enable_verification: AtomicBool,
+    pub max_retries: AtomicU32,
+    pub download_timeout_secs: AtomicU64,
+    pub retry_delay_secs: AtomicU64,
+    pub progress_update_interval_ms: AtomicU64,
+}
 
-// Configuration for download verification
-pub const ENABLE_DOWNLOAD_VERIFICATION: bool = true; // Set to false to skip hash verification
+impl DownloadConfig {
+    pub const fn new() -> Self {
+        Self {
+            concurrent_threads: AtomicUsize::new(8),
+            target_chunks: AtomicUsize::new(20),
+            min_chunk_size: AtomicU64::new(5 * 1024 * 1024),
+            max_chunk_size: AtomicU64::new(100 * 1024 * 1024),
+            enable_verification: AtomicBool::new(true),
+            max_retries: AtomicU32::new(5),
+            download_timeout_secs: AtomicU64::new(300),
+            retry_delay_secs: AtomicU64::new(1),
+            progress_update_interval_ms: AtomicU64::new(200),
+        }
+    }
+}
+
+// Global static configuration
+pub static DOWNLOAD_CONFIG: DownloadConfig = DownloadConfig::new();
 
 fn calculate_chunk_size(file_size: u64) -> usize {
-    let ideal_size = file_size / TARGET_CHUNKS as u64;
-    ideal_size.clamp(MIN_CHUNK_SIZE, MAX_CHUNK_SIZE) as usize
+    let target_chunks = DOWNLOAD_CONFIG.target_chunks.load(Ordering::Relaxed) as u64;
+    let min_size = DOWNLOAD_CONFIG.min_chunk_size.load(Ordering::Relaxed);
+    let max_size = DOWNLOAD_CONFIG.max_chunk_size.load(Ordering::Relaxed);
+    let ideal_size = file_size / target_chunks;
+    ideal_size.clamp(min_size, max_size) as usize
 }
 
 async fn download_chunked(
@@ -325,8 +353,9 @@ async fn download_chunked(
     expected_sha256: &Option<String>,
 ) -> Result<(u64, u64, Option<VerificationQueueItem>), Box<dyn std::error::Error + Send + Sync>> {
     let local_path_str = final_path.to_string_lossy().to_string();
+    let timeout_secs = DOWNLOAD_CONFIG.download_timeout_secs.load(Ordering::Relaxed);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()?;
     
     // Step 1: Get file size using a range request
@@ -410,7 +439,8 @@ async fn download_chunked(
     drop(file); // Close to allow multiple handles
     
     // Step 3: Download chunks in parallel
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CHUNKS));
+    let max_concurrent = DOWNLOAD_CONFIG.concurrent_threads.load(Ordering::Relaxed);
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let mut handles = Vec::new();
     
     // Shared progress tracking
@@ -583,11 +613,12 @@ async fn download_chunk_with_progress(
             *downloaded += bytes_len;
         }
         
-        // Update chunk progress and total speed every 200ms
+        // Update chunk progress and total speed at configured interval
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(*last_update).as_secs_f64();
+        let interval_secs = DOWNLOAD_CONFIG.progress_update_interval_ms.load(Ordering::Relaxed) as f64 / 1000.0;
         
-        if elapsed >= 0.2 {
+        if elapsed >= interval_secs {
             let bytes_since_last = chunk_downloaded - *last_bytes;
             let chunk_speed_mbps = (bytes_since_last as f64 / elapsed) / 1_048_576.0;
             
@@ -595,7 +626,7 @@ async fn download_chunk_with_progress(
             let mut last_update_global = last_update_time.lock().await;
             let elapsed_global = now.duration_since(*last_update_global).as_secs_f64();
             
-            let total_speed_mbps = if elapsed_global >= 0.2 {
+            let total_speed_mbps = if elapsed_global >= interval_secs {
                 let downloaded = progress_downloaded.lock().await;
                 let total_downloaded = *downloaded;
                 drop(downloaded);

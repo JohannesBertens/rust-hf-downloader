@@ -2,11 +2,28 @@ use crate::models::{DownloadRegistry, DownloadStatus, VerificationProgress, Veri
 use sha2::{Sha256, Digest};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Mutex, mpsc, Semaphore};
 use tokio::io::AsyncReadExt;
 
-/// Maximum number of verifications that can run in parallel
-const MAX_CONCURRENT_VERIFICATIONS: usize = 2;
+/// Global verification configuration (thread-safe, runtime-modifiable)
+pub struct VerificationConfig {
+    pub concurrent_verifications: AtomicUsize,
+    pub buffer_size: AtomicUsize,
+    pub update_interval_iterations: AtomicUsize,
+}
+
+impl VerificationConfig {
+    pub const fn new() -> Self {
+        Self {
+            concurrent_verifications: AtomicUsize::new(2),
+            buffer_size: AtomicUsize::new(128 * 1024),
+            update_interval_iterations: AtomicUsize::new(100),
+        }
+    }
+}
+
+pub static VERIFICATION_CONFIG: VerificationConfig = VerificationConfig::new();
 
 /// Main verification worker that processes the verification queue
 /// Runs continuously in the background, processing items as they arrive
@@ -17,7 +34,8 @@ pub async fn verification_worker(
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
 ) {
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_VERIFICATIONS));
+    let max_concurrent = VERIFICATION_CONFIG.concurrent_verifications.load(Ordering::Relaxed);
+    let semaphore = Arc::new(Semaphore::new(max_concurrent));
     
     loop {
         // Check if there's work to do
@@ -125,7 +143,8 @@ async fn calculate_sha256_with_progress(
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let mut file = tokio::fs::File::open(file_path).await?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 131_072]; // 128KB buffer (optimized for SSDs)
+    let buffer_size = VERIFICATION_CONFIG.buffer_size.load(Ordering::Relaxed);
+    let mut buffer = vec![0u8; buffer_size];
     
     let mut bytes_verified = 0u64;
     let mut iteration = 0u64;
@@ -143,8 +162,9 @@ async fn calculate_sha256_with_progress(
         bytes_verified += bytes_read as u64;
         iteration += 1;
         
-        // Update progress every 100 iterations (~12.8MB) to avoid excessive mutex locks
-        if iteration % 100 == 0 || bytes_verified >= total_size {
+        // Update progress at configured interval to avoid excessive mutex locks
+        let update_interval = VERIFICATION_CONFIG.update_interval_iterations.load(Ordering::Relaxed);
+        if iteration % update_interval as u64 == 0 || bytes_verified >= total_size {
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(last_update).as_secs_f64();
             
