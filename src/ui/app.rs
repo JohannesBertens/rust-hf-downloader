@@ -64,8 +64,8 @@ impl App {
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         
-        // Create options first to get default directory
-        let options = crate::models::AppOptions::default();
+        // Load options from config file (or use defaults)
+        let options = crate::config::load_config();
         let mut download_path_input = Input::default();
         download_path_input = download_path_input.with_value(options.default_directory.clone());
         
@@ -302,6 +302,11 @@ impl App {
                         // Save the edited directory
                         self.options.default_directory = self.options_directory_input.value().to_string();
                         self.options.editing_directory = false;
+                        
+                        // Save to disk
+                        if let Err(e) = crate::config::save_config(&self.options) {
+                            self.status = format!("Failed to save config: {}", e);
+                        }
                     }
                     KeyCode::Esc => {
                         // Cancel editing
@@ -1075,6 +1080,11 @@ impl App {
         
         // Sync changes to global config immediately
         self.sync_options_to_config();
+        
+        // Save to disk
+        if let Err(e) = crate::config::save_config(&self.options) {
+            self.status = format!("Failed to save config: {}", e);
+        }
     }
     
     fn sync_options_to_config(&self) {

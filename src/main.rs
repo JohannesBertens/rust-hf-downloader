@@ -1,5 +1,6 @@
 mod models;
 mod api;
+mod config;
 mod download;
 mod verification;
 mod registry;

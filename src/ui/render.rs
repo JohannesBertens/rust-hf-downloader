@@ -644,9 +644,8 @@ pub fn render_options_popup(
     options: &crate::models::AppOptions,
     directory_input: &tui_input::Input,
 ) {
-    // 64x25 popup, centered (increased size for more options)
     let popup_width = 64.min(frame.area().width.saturating_sub(4));
-    let popup_height = 25;
+    let popup_height = 26;
     let popup_area = Rect {
         x: (frame.area().width.saturating_sub(popup_width)) / 2,
         y: (frame.area().height.saturating_sub(popup_height)) / 2,
@@ -695,7 +694,7 @@ pub fn render_options_popup(
         (9, "Verification"),
     ];
     
-    let mut y_offset = 2u16;
+    let mut y_offset = 1u16;
     let mut field_idx = 0;
     
     for (cat_idx, (field_start, category_name)) in category_offsets.iter().enumerate() {
@@ -754,16 +753,18 @@ pub fn render_options_popup(
         }
     }
     
-    // Controls help
-    let help_y = inner.y + inner.height - 4;
+    // Controls help (with empty line before)
+    let help_y = inner.y + inner.height - 5;
     let help = if options.editing_directory {
         vec![
+            "",
             "Type to edit directory path",
             "Enter: Save | ESC: Cancel",
             "",
         ]
     } else {
         vec![
+            "",
             "j/k or ↑/↓: Navigate | Enter: Edit directory",
             "+/- or ←/→: Modify values & toggle verification",
             "ESC: Close",

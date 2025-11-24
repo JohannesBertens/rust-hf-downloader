@@ -139,7 +139,7 @@ pub struct VerificationQueueItem {
 }
 
 /// Application options/settings
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppOptions {
     // General
     pub default_directory: String,
@@ -160,8 +160,10 @@ pub struct AppOptions {
     pub verification_buffer_size: usize,
     pub verification_update_interval: usize,
     
-    // UI State
+    // UI State (not serialized)
+    #[serde(skip)]
     pub selected_field: usize,
+    #[serde(skip)]
     pub editing_directory: bool,
 }
 
