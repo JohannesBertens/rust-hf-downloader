@@ -6,10 +6,15 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 
 - 🔥 **Trending Models on Startup**: Instantly browse 60 trending models when app starts
 - 🔍 **Interactive Search**: Search through thousands of HuggingFace models
+- 🔐 **Gated Model Support**: Download restricted models with HuggingFace token authentication
+  - Token configuration in Options screen
+  - Clear error messages with helpful guidance
+  - Supports Llama-3.1, Llama-2, and other gated models
 - ⚙️ **Persistent Configuration**: Customize and save settings (press 'o')
   - Download directory, concurrent threads, chunk sizes
   - Retry behavior, timeout settings
   - Verification options
+  - HuggingFace authentication token
   - Settings persist across restarts
 - ⌨️ **Vim-like Controls**: Efficient keyboard navigation
 - 📊 **Rich Display**: View model details including downloads, likes, and tags
@@ -112,26 +117,33 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 3. **Configure settings (optional)** - Press `o` to open options screen
    - Navigate with `j`/`k`
    - Edit directory: Press Enter, type path, Enter again
+   - Edit HuggingFace Token: Press Enter, paste token, Enter again (required for gated models)
    - Adjust numbers: Press `+`/`-`
    - Toggle options: Press Space
    - Press Esc to close and save
 
-4. **Search for specific models** - Press `/` to enter search mode (search box highlighted in yellow)
+4. **For gated models (Llama-3.1, Llama-2, etc.)**:
+   - Get a HuggingFace token from: https://huggingface.co/settings/tokens
+   - Accept model terms on the model's page (e.g., https://huggingface.co/meta-llama/Llama-3.1-8B)
+   - Press `o` to open options, navigate to "HuggingFace Token", press Enter, paste token, press Enter again
+   - Token is saved and will be used for all future downloads
 
-5. **Type your query** (e.g., "gpt", "llama", "mistral")
+5. **Search for specific models** - Press `/` to enter search mode (search box highlighted in yellow)
 
-6. **Press Enter** to search
+6. **Type your query** (e.g., "gpt", "llama", "mistral")
 
-5. **Navigate model results** with `j`/`k` or arrow keys (Models list is focused by default, yellow border)
+7. **Press Enter** to search
 
-6. **View quantization details** automatically as you select different models
+8. **Navigate model results** with `j`/`k` or arrow keys (Models list is focused by default, yellow border)
+
+9. **View quantization details** automatically as you select different models
    - Green `[downloaded]` indicator shows files you already have
 
-7. **Press Tab** to switch focus to the Quantizations list (yellow border moves)
+10. **Press Tab** to switch focus to the Quantizations list (yellow border moves)
 
-8. **Navigate quantizations** with `j`/`k` or arrow keys
+11. **Navigate quantizations** with `j`/`k` or arrow keys
 
-9. **Press `d`** to download the selected quantization:
+12. **Press `d`** to download the selected quantization:
    - A popup will appear with the default path `~/models`
    - Edit the path if needed
    - Press Enter to confirm and start download
@@ -143,16 +155,16 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
      - Download speed (MB/s)
      - Queue count if multiple downloads pending
 
-10. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
+13. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
    - Verification runs in background with progress bar
    - Shows verification speed and percentage
    - Status shows success (✓) or hash mismatch (✗)
 
-11. **Press Enter** to see full details of the selected item in the status bar
+14. **Press Enter** to see full details of the selected item in the status bar
 
-12. **Press Tab** again to return focus to the Models list
+15. **Press Tab** again to return focus to the Models list
 
-13. **Press `/`** to start a new search
+16. **Press `/`** to start a new search
 
 The **Quantization Details** section shows all available GGUF quantized versions with:
 - **Left**: Combined file size (formatted as GB/MB/KB) - sum of all parts for multi-part files
@@ -205,13 +217,20 @@ rust-hf-downloader/
     ├── models.rs           # Data structures & types
     ├── config.rs           # Configuration persistence (v0.9.0)
     ├── utils.rs            # Formatting utilities
-    ├── api.rs              # HuggingFace API client
+    ├── api.rs              # HuggingFace API client with auth (v0.9.5)
+    ├── http_client.rs      # Authenticated HTTP requests (v0.9.5)
     ├── registry.rs         # Download registry persistence
     ├── download.rs         # Download manager & security
     ├── verification.rs     # SHA256 verification worker
     └── ui/
         ├── mod.rs          # UI module declaration
-        ├── app.rs          # App state & event handling
+        ├── app.rs          # Module re-exports (v0.9.5)
+        ├── app/            # App submodules (v0.9.5)
+        │   ├── state.rs        # AppState initialization
+        │   ├── events.rs       # Event handling
+        │   ├── models.rs       # Model browsing logic
+        │   ├── downloads.rs    # Download management
+        │   └── verification.rs # Verification UI
         └── render.rs       # TUI rendering logic
 ```
 
@@ -220,6 +239,11 @@ rust-hf-downloader/
 - **2 UI submodules** for presentation layer
 - **~240 lines average** per file (previously 2,074 in one file)
 - **Improved maintainability, testability, and readability**
+
+**Version 0.9.5** further refines the architecture:
+- **Split app.rs** into 5 focused submodules (~250 lines each)
+- **New http_client module** for authentication
+- **Better code organization** with clear responsibility separation
 
 ## Dependencies
 
@@ -245,6 +269,22 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 0.9.5 (2025-11-25)
+- **Feature**: HuggingFace token authentication for gated models
+- **401 Error Popup**: Clear guidance when authentication is required with model URL and setup instructions
+- **New Module**: `src/http_client.rs` for authenticated HTTP requests
+- **Code Refactoring**: Split monolithic `src/ui/app.rs` (~1107 lines) into 5 focused submodules:
+  - `state.rs`: AppState initialization (~158 lines)
+  - `events.rs`: Event handling (~709 lines)
+  - `models.rs`: Model browsing logic (~253 lines)
+  - `downloads.rs`: Download management (~460 lines)
+  - `verification.rs`: Verification UI (~77 lines)
+- **Token Configuration**: HF token stored in `~/.config/jreb/config.toml`
+- **Options Screen**: New "HuggingFace Token" field for token management
+- **Authenticated Downloads**: Token passed through download pipeline to all API calls
+- **Code Quality**: Clippy warnings resolved, better maintainability
+- See [changelog/RELEASE_NOTES_0.9.5.md](changelog/RELEASE_NOTES_0.9.5.md) for full details
 
 ### Version 0.9.0 (2025-11-25)
 - **Feature**: Persistent configuration system with interactive options screen
