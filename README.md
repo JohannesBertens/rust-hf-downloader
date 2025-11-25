@@ -4,7 +4,13 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 
 ## Features
 
+- 🔥 **Trending Models on Startup**: Instantly browse 60 trending models when app starts
 - 🔍 **Interactive Search**: Search through thousands of HuggingFace models
+- ⚙️ **Persistent Configuration**: Customize and save settings (press 'o')
+  - Download directory, concurrent threads, chunk sizes
+  - Retry behavior, timeout settings
+  - Verification options
+  - Settings persist across restarts
 - ⌨️ **Vim-like Controls**: Efficient keyboard navigation
 - 📊 **Rich Display**: View model details including downloads, likes, and tags
 - 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, IQ4_XS, MXFP4, etc.) with file sizes
@@ -72,13 +78,17 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 | Key | Action |
 |-----|--------|
 | `/` | Enter search mode |
+| `o` | Toggle options screen (configure settings) |
 | `Tab` | Switch focus between Models and Quantizations lists |
 | `d` | Download selected quantization (when Quantizations list is focused) |
 | `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
-| `Enter` | Execute search (in search mode) / Show details (in browse mode) |
-| `Esc` | Return to browse mode from search mode / Cancel popup |
-| `j` or `↓` | Move selection down in focused list |
-| `k` or `↑` | Move selection up in focused list |
+| `Enter` | Execute search (in search mode) / Show details (in browse mode) / Edit directory (in options) |
+| `Esc` | Return to browse mode from search mode / Cancel popup / Close options |
+| `j` or `↓` | Move selection down in focused list / Navigate options down |
+| `k` or `↑` | Move selection up in focused list / Navigate options up |
+| `+` | Increment numeric option value (in options screen) |
+| `-` | Decrement numeric option value (in options screen) |
+| `Space` | Toggle boolean option (in options screen) |
 | `q` or `Ctrl+C` | Quit application |
 
 #### Resume Download Popup (on startup)
@@ -90,16 +100,27 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 ### How to Use
 
-1. **Start the application** - If incomplete downloads exist, you'll see a resume popup first
-   - Press `Y` to resume incomplete downloads
-   - Press `N` to skip and continue
-   - Press `D` to delete incomplete files
+1. **Start the application** 
+   - 60 trending models load automatically (no search needed!)
+   - If incomplete downloads exist, you'll see a resume popup first
+     - Press `Y` to resume incomplete downloads
+     - Press `N` to skip and continue
+     - Press `D` to delete incomplete files
    
-2. **Press `/`** to enter search mode (the search box will be highlighted in yellow)
+2. **Browse trending models** with `j`/`k` or arrow keys, or press `/` to search
 
-3. **Type your query** (e.g., "gpt", "llama", "mistral")
+3. **Configure settings (optional)** - Press `o` to open options screen
+   - Navigate with `j`/`k`
+   - Edit directory: Press Enter, type path, Enter again
+   - Adjust numbers: Press `+`/`-`
+   - Toggle options: Press Space
+   - Press Esc to close and save
 
-4. **Press Enter** to search
+4. **Search for specific models** - Press `/` to enter search mode (search box highlighted in yellow)
+
+5. **Type your query** (e.g., "gpt", "llama", "mistral")
+
+6. **Press Enter** to search
 
 5. **Navigate model results** with `j`/`k` or arrow keys (Models list is focused by default, yellow border)
 
@@ -182,6 +203,7 @@ rust-hf-downloader/
 └── src/
     ├── main.rs             # Entry point
     ├── models.rs           # Data structures & types
+    ├── config.rs           # Configuration persistence (v0.9.0)
     ├── utils.rs            # Formatting utilities
     ├── api.rs              # HuggingFace API client
     ├── registry.rs         # Download registry persistence
@@ -223,6 +245,18 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 0.9.0 (2025-11-25)
+- **Feature**: Persistent configuration system with interactive options screen
+- **Trending Models**: Automatically load 60 trending models on startup (2 pages in parallel)
+- **Options Screen**: Press 'o' to customize all settings interactively
+- **Configuration File**: Settings saved to `~/.config/jreb/config.toml`
+- **Configurable Settings**: Download threads, chunk sizes, retry behavior, verification options
+- **Auto-save/Auto-load**: Options persist across restarts with fallback to defaults
+- **New Module**: `src/config.rs` for configuration management
+- **API Enhancement**: Parallel fetching of trending models from HuggingFace
+- **UI Improvements**: Interactive navigation with +/- keys, Enter to edit, Space to toggle
+- See [changelog/RELEASE_NOTES_0.9.0.md](changelog/RELEASE_NOTES_0.9.0.md) for full details
 
 ### Version 0.8.0 (2025-11-23)
 - **Feature**: SHA256 hash verification system

@@ -16,25 +16,43 @@ Enable users to discover, explore, and download HuggingFace models directly from
 - Visual tracking of completed downloads
 
 ### Key Technologies
-- **Language**: Rust (Edition 2024)
+- **Language**: Rust (Edition 2021, compatible with Ubuntu 22.04)
 - **UI Framework**: ratatui 0.29.0
 - **Async Runtime**: tokio 1.40.0 (with full feature set)
-- **HTTP Client**: reqwest 0.12 (with JSON and streaming support)
+- **HTTP Client**: reqwest 0.11 (with JSON, streaming, and rustls-tls)
 - **Terminal Backend**: crossterm 0.28.1 (with event-stream)
-- **Metadata Format**: TOML 0.8 (for download registry)
+- **Serialization**: serde 1.0 (with derive feature)
+- **Configuration Format**: TOML 0.8 (for config and download registry)
 - **Pattern Matching**: regex 1.10 (for multi-part file detection)
+- **Cryptography**: sha2 0.10 (for SHA256 verification)
+- **Encoding**: hex 0.4 (for hash display)
 
 ## Architecture
 
-### Single-File Design
-The entire application is contained in a single file: `src/main.rs` (~1870 lines)
+### Modular Design (v0.7.0+)
+The application follows a modular architecture with clear separation of concerns:
 
-This monolithic approach simplifies:
-- Understanding the complete flow
-- Debugging
-- Making changes to any component
+```
+src/
+├── main.rs           # Entry point (~20 lines)
+├── models.rs         # Data structures and types
+├── config.rs         # Configuration persistence (v0.9.0)
+├── api.rs            # HuggingFace API client
+├── registry.rs       # Download metadata management
+├── download.rs       # Download orchestration
+├── verification.rs   # SHA256 verification (v0.8.0)
+├── utils.rs          # Helper functions
+└── ui/
+    ├── mod.rs        # UI module exports
+    ├── app.rs        # Application state and logic
+    └── render.rs     # UI rendering functions
+```
 
-Despite growing feature complexity (downloads, resume, multi-part handling, metadata), keeping everything in one file maintains clarity of the full system behavior.
+**Benefits of modular design:**
+- Clear separation of concerns (API, UI, downloads, verification, config)
+- Easier to test individual components
+- Better code organization (~240 lines per module average)
+- Simpler to maintain and extend
 
 ### Core Components
 
@@ -193,26 +211,58 @@ async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
 
 ### Key Functions
 
+#### Core Application (`src/ui/app.rs`)
 | Function | Purpose |
 |----------|---------|
-| `main()` | Entry point, terminal setup/teardown |
-| `App::new()` | Initialize application state |
-| `App::run()` | Main event loop |
+| `App::new()` | Initialize application state, load config |
+| `App::run()` | Main event loop, spawn workers, load trending models |
 | `App::draw()` | Render UI components (4 panels) |
 | `App::handle_crossterm_events()` | Process terminal events |
 | `App::on_key_event()` | Handle keyboard input |
-| `App::search_models()` | Execute API search |
-| `App::toggle_focus()` | Switch focus between Models and Quantizations panes |
-| `App::next_quant()` | Navigate to next quantization in list |
-| `App::previous_quant()` | Navigate to previous quantization in list |
+
+#### Model Management
+| Function | Purpose |
+|----------|---------|
+| `App::load_trending_models()` | Fetch and display 60 trending models on startup (v0.9.0) |
+| `App::search_models()` | Execute API search with user query |
 | `App::load_quantizations()` | Fetch quantized file info for selected model (with cache check) |
 | `App::start_background_prefetch()` | Spawn async task to prefetch all model quantizations |
 | `App::show_model_details()` | Display full model info in status bar |
 | `App::show_quantization_details()` | Display quantization info in status bar |
-| `fetch_models()` | HTTP request to HuggingFace models API |
-| `fetch_model_files()` | HTTP request to get model file tree, handles both single files and directories |
+
+#### Navigation & UI
+| Function | Purpose |
+|----------|---------|
+| `App::toggle_focus()` | Switch focus between Models and Quantizations panes |
+| `App::next_quant()` | Navigate to next quantization in list |
+| `App::previous_quant()` | Navigate to previous quantization in list |
+| `App::toggle_options_popup()` | Open/close options screen (v0.9.0) |
+| `App::next_option()` / `previous_option()` | Navigate options fields (v0.9.0) |
+| `App::increment_option()` / `decrement_option()` | Adjust numeric settings (v0.9.0) |
+
+#### Configuration (`src/config.rs`, v0.9.0)
+| Function | Purpose |
+|----------|---------|
+| `load_config()` | Load settings from `~/.config/jreb/config.toml` or use defaults |
+| `save_config()` | Serialize and save settings to disk |
+| `get_config_path()` | Return path to configuration file |
+
+#### API Client (`src/api.rs`)
+| Function | Purpose |
+|----------|---------|
+| `fetch_trending_models()` | Fetch pages 0 and 1 in parallel, return 60 models (v0.9.0) |
+| `fetch_trending_models_page()` | Fetch specific page of trending models (v0.9.0) |
+| `fetch_models()` | HTTP request to HuggingFace search API |
+| `fetch_model_files()` | Get model file tree, handles both single files and directories |
+| `fetch_multipart_sha256s()` | Batch fetch SHA256 hashes for multi-part files (v0.8.0) |
+
+#### Utility Functions (`src/api.rs`, `src/utils.rs`)
+| Function | Purpose |
+|----------|---------|
 | `is_quantization_directory()` | Check if directory name is a quantization type |
 | `extract_quantization_type()` | Parse quant type from filename (dash or dot separated) |
+| `parse_multipart_filename()` | Detect and parse multi-part file patterns |
+| `get_multipart_base_name()` | Extract base name from multi-part filename |
 | `format_number()` | Pretty-print large numbers (K/M suffix) |
 | `format_size()` | Format bytes as KB/MB/GB |
 
@@ -641,7 +691,19 @@ let response = client
 
 ## Version History
 
-- **v0.8.0** (Current): SHA256 verification system
+- **v0.9.0** (Current): Configuration system and trending models
+  - **Persistent configuration**: Settings saved to `~/.config/jreb/config.toml`
+  - **Options screen**: Press 'o' to customize all settings interactively
+  - **Trending models on startup**: Automatically loads 60 trending models (2 pages in parallel)
+  - **Configurable settings**: Download threads, chunk sizes, retry behavior, verification options
+  - **Auto-save**: Options automatically saved when modified
+  - **Auto-load**: Configuration loaded on startup with fallback to defaults
+  - **New module**: `src/config.rs` for configuration management
+  - **API enhancement**: `fetch_trending_models()` with parallel page fetching
+  - **ModelInfo compatibility**: Supports both search API (`modelId`) and trending API (`id`)
+  - **UI improvements**: Interactive options navigation with +/- keys and Enter to edit
+
+- **v0.8.0**: SHA256 verification system
   - **Automatic verification**: Downloads fetch SHA256 hashes from HuggingFace and auto-verify
   - **Manual verification**: Press 'v' to verify any downloaded file
   - **Multi-part hash fetching**: Single API call fetches hashes for all parts
@@ -794,6 +856,6 @@ while let Some(item) = stream.next().await {
 
 ---
 
-**Last Updated**: 2025-11-23  
-**Version**: 0.7.5  
+**Last Updated**: 2025-11-25  
+**Version**: 0.9.0  
 **Maintainer**: Johannes Bertens
