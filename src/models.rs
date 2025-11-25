@@ -3,7 +3,6 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
-    #[serde(alias = "modelId")]
     pub id: String,
     pub author: Option<String>,
     #[serde(default)]
