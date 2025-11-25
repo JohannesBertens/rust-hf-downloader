@@ -1,4 +1,4 @@
-use crate::api::{fetch_models, fetch_model_files, fetch_multipart_sha256s, parse_multipart_filename};
+use crate::api::{fetch_models, fetch_model_files, fetch_multipart_sha256s, parse_multipart_filename, fetch_trending_models};
 use crate::download::{start_download, validate_and_sanitize_path};
 use crate::models::*;
 use crate::registry;
@@ -44,6 +44,8 @@ pub struct App {
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     verification_queue_size: Arc<Mutex<usize>>,
+    options: crate::models::AppOptions,
+    options_directory_input: Input,
 }
 
 impl Default for App {
@@ -62,23 +64,23 @@ impl App {
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let default_path = format!("{}/models", home);
+        // Load options from config file (or use defaults)
+        let options = crate::config::load_config();
         let mut download_path_input = Input::default();
-        download_path_input = download_path_input.with_value(default_path);
+        download_path_input = download_path_input.with_value(options.default_directory.clone());
         
         Self {
             running: false,
             event_stream: EventStream::default(),
             input: Input::default(),
-            input_mode: InputMode::Editing,  // Start in editing mode for immediate search
+            input_mode: InputMode::Normal,  // Start in normal mode
             focused_pane: FocusedPane::Models,
             models: Arc::new(Mutex::new(Vec::new())),
             list_state,
             quant_list_state,
             loading: false,
             error: None,
-            status: "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'q' to quit".to_string(),
+            status: "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string(),
             selection_info: String::new(),
             quantizations: Arc::new(Mutex::new(Vec::new())),
             loading_quants: false,
@@ -97,6 +99,8 @@ impl App {
             verification_progress: Arc::new(Mutex::new(Vec::new())),
             verification_queue: Arc::new(Mutex::new(Vec::new())),
             verification_queue_size: Arc::new(Mutex::new(0)),
+            options,
+            options_directory_input: Input::default(),
         }
     }
 
@@ -131,8 +135,14 @@ impl App {
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.running = true;
         
+        // Initialize global download config from options
+        self.sync_options_to_config();
+        
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
+        
+        // Load trending models on startup
+        self.load_trending_models().await;
         
         // Spawn verification worker
         let verification_queue = self.verification_queue.clone();
@@ -246,6 +256,9 @@ impl App {
             PopupMode::DownloadPath => {
                 super::render::render_download_path_popup(frame, &self.download_path_input);
             }
+            PopupMode::Options => {
+                super::render::render_options_popup(frame, &self.options, &self.options_directory_input);
+            }
             PopupMode::None => {}
         }
     }
@@ -284,7 +297,63 @@ impl App {
         self.error = None;
 
         // Handle popup input separately
-        if self.popup_mode == PopupMode::ResumeDownload {
+        if self.popup_mode == PopupMode::Options {
+            // If editing directory, handle text input
+            if self.options.editing_directory {
+                match key.code {
+                    KeyCode::Enter => {
+                        // Save the edited directory
+                        self.options.default_directory = self.options_directory_input.value().to_string();
+                        self.options.editing_directory = false;
+                        
+                        // Save to disk
+                        if let Err(e) = crate::config::save_config(&self.options) {
+                            self.status = format!("Failed to save config: {}", e);
+                        }
+                    }
+                    KeyCode::Esc => {
+                        // Cancel editing
+                        self.options.editing_directory = false;
+                    }
+                    _ => {
+                        self.options_directory_input.handle_event(&Event::Key(key));
+                    }
+                }
+            } else {
+                // Normal navigation mode
+                match key.code {
+                    KeyCode::Esc => {
+                        self.popup_mode = PopupMode::None;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if self.options.selected_field > 0 {
+                            self.options.selected_field -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if self.options.selected_field < 12 {
+                            self.options.selected_field += 1;
+                        }
+                    }
+                    KeyCode::Char('+') | KeyCode::Right => {
+                        self.modify_option(1);
+                    }
+                    KeyCode::Char('-') | KeyCode::Left => {
+                        self.modify_option(-1);
+                    }
+                    KeyCode::Enter => {
+                        // Enter edit mode for directory field
+                        if self.options.selected_field == 0 {
+                            self.options.editing_directory = true;
+                            self.options_directory_input = Input::default()
+                                .with_value(self.options.default_directory.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        } else if self.popup_mode == PopupMode::ResumeDownload {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.resume_incomplete_downloads().await;
@@ -337,6 +406,9 @@ impl App {
                         self.verify_downloaded_file().await;
                     }
                 }
+                (_, KeyCode::Char('o')) => {
+                    self.popup_mode = PopupMode::Options;
+                }
                 (_, KeyCode::Tab) => {
                     self.toggle_focus();
                 }
@@ -384,7 +456,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.input_mode = InputMode::Normal;
-                    self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'q' to quit".to_string();
+                    self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string();
                 }
                 _ => {
                     self.input.handle_event(&Event::Key(key));
@@ -495,6 +567,35 @@ impl App {
             None => 0,
         };
         self.quant_list_state.select(Some(i));
+    }
+
+    async fn load_trending_models(&mut self) {
+        self.loading = true;
+        self.error = None;
+        
+        let models = self.models.clone();
+        
+        match fetch_trending_models().await {
+            Ok(results) => {
+                let mut models_lock = models.lock().await;
+                *models_lock = results;
+                self.loading = false;
+                self.list_state.select(Some(0));
+                self.status = format!("Loaded {} trending models", models_lock.len());
+                drop(models_lock);
+                
+                // Load quantizations for first result
+                self.load_quantizations().await;
+                
+                // Start background prefetch for all models
+                self.start_background_prefetch();
+            }
+            Err(e) => {
+                self.loading = false;
+                self.error = Some(format!("Failed to fetch trending models: {}", e));
+                self.status = "Failed to load trending models".to_string();
+            }
+        }
     }
 
     async fn search_models(&mut self) {
@@ -642,6 +743,9 @@ impl App {
         
         if let Some(selected) = self.quant_list_state.selected() {
             if selected < quantizations.len() {
+                // Update download path input with current default directory
+                self.download_path_input = Input::default()
+                    .with_value(self.options.default_directory.clone());
                 self.popup_mode = PopupMode::DownloadPath;
                 self.status = "Enter download path and press Enter".to_string();
             }
@@ -937,5 +1041,101 @@ impl App {
                 self.status = format!("Queued {} for verification", quant.filename);
             }
         }
+    }
+    
+    fn modify_option(&mut self, delta: i32) {
+        match self.options.selected_field {
+            0 => {} // default_directory - use Enter to edit
+            1 => { // concurrent_threads (1-32)
+                let new = (self.options.concurrent_threads as i32 + delta)
+                    .clamp(1, 32) as usize;
+                self.options.concurrent_threads = new;
+            }
+            2 => { // num_chunks (10-100)
+                let new = (self.options.num_chunks as i32 + delta)
+                    .clamp(10, 100) as usize;
+                self.options.num_chunks = new;
+            }
+            3 => { // min_chunk_size (1MB-50MB)
+                let step = 1024 * 1024; // 1MB
+                let new = (self.options.min_chunk_size as i64 + delta as i64 * step)
+                    .clamp(1024 * 1024, 50 * 1024 * 1024) as u64;
+                self.options.min_chunk_size = new;
+            }
+            4 => { // max_chunk_size (10MB-500MB)
+                let step = 10 * 1024 * 1024; // 10MB
+                let new = (self.options.max_chunk_size as i64 + delta as i64 * step)
+                    .clamp(10 * 1024 * 1024, 500 * 1024 * 1024) as u64;
+                self.options.max_chunk_size = new;
+            }
+            5 => { // max_retries (0-10, step 1)
+                let new = (self.options.max_retries as i32 + delta)
+                    .clamp(0, 10) as u32;
+                self.options.max_retries = new;
+            }
+            6 => { // download_timeout_secs (60-600, step 30)
+                let new = (self.options.download_timeout_secs as i64 + delta as i64 * 30)
+                    .clamp(60, 600) as u64;
+                self.options.download_timeout_secs = new;
+            }
+            7 => { // retry_delay_secs (1-10, step 1)
+                let new = (self.options.retry_delay_secs as i64 + delta as i64)
+                    .clamp(1, 10) as u64;
+                self.options.retry_delay_secs = new;
+            }
+            8 => { // progress_update_interval_ms (100-1000, step 50)
+                let new = (self.options.progress_update_interval_ms as i64 + delta as i64 * 50)
+                    .clamp(100, 1000) as u64;
+                self.options.progress_update_interval_ms = new;
+            }
+            9 => { // verification_on_completion - toggle with +/-
+                self.options.verification_on_completion = !self.options.verification_on_completion;
+            }
+            10 => { // concurrent_verifications (1-8, step 1)
+                let new = (self.options.concurrent_verifications as i32 + delta)
+                    .clamp(1, 8) as usize;
+                self.options.concurrent_verifications = new;
+            }
+            11 => { // verification_buffer_size (64KB-512KB, step 64KB)
+                let step = 64 * 1024;
+                let new = (self.options.verification_buffer_size as i64 + delta as i64 * step)
+                    .clamp(64 * 1024, 512 * 1024) as usize;
+                self.options.verification_buffer_size = new;
+            }
+            12 => { // verification_update_interval (50-500, step 50)
+                let new = (self.options.verification_update_interval as i32 + delta * 50)
+                    .clamp(50, 500) as usize;
+                self.options.verification_update_interval = new;
+            }
+            _ => {}
+        }
+        
+        // Sync changes to global config immediately
+        self.sync_options_to_config();
+        
+        // Save to disk
+        if let Err(e) = crate::config::save_config(&self.options) {
+            self.status = format!("Failed to save config: {}", e);
+        }
+    }
+    
+    fn sync_options_to_config(&self) {
+        use std::sync::atomic::Ordering;
+        
+        // Download config
+        crate::download::DOWNLOAD_CONFIG.concurrent_threads.store(self.options.concurrent_threads, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.target_chunks.store(self.options.num_chunks, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.min_chunk_size.store(self.options.min_chunk_size, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.max_chunk_size.store(self.options.max_chunk_size, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.enable_verification.store(self.options.verification_on_completion, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.max_retries.store(self.options.max_retries, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.download_timeout_secs.store(self.options.download_timeout_secs, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.retry_delay_secs.store(self.options.retry_delay_secs, Ordering::Relaxed);
+        crate::download::DOWNLOAD_CONFIG.progress_update_interval_ms.store(self.options.progress_update_interval_ms, Ordering::Relaxed);
+        
+        // Verification config
+        crate::verification::VERIFICATION_CONFIG.concurrent_verifications.store(self.options.concurrent_verifications, Ordering::Relaxed);
+        crate::verification::VERIFICATION_CONFIG.buffer_size.store(self.options.verification_buffer_size, Ordering::Relaxed);
+        crate::verification::VERIFICATION_CONFIG.update_interval_iterations.store(self.options.verification_update_interval, Ordering::Relaxed);
     }
 }

@@ -1,5 +1,31 @@
-use crate::models::{ModelInfo, ModelFile, QuantizationInfo};
+use crate::models::{ModelInfo, ModelFile, QuantizationInfo, TrendingResponse};
 use std::collections::HashMap;
+
+pub async fn fetch_trending_models_page(page: u32) -> Result<Vec<ModelInfo>, reqwest::Error> {
+    let url = format!(
+        "https://huggingface.co/models-json?apps=llama.cpp&p={}&sort=trending&withCount=true",
+        page
+    );
+    
+    let response = reqwest::get(&url).await?;
+    let trending: TrendingResponse = response.json().await?;
+    
+    Ok(trending.models)
+}
+
+pub async fn fetch_trending_models() -> Result<Vec<ModelInfo>, reqwest::Error> {
+    // Fetch both page 0 and page 1 to get ~60 trending models
+    let page0_future = fetch_trending_models_page(0);
+    let page1_future = fetch_trending_models_page(1);
+    
+    // Fetch both pages in parallel
+    let (page0_result, page1_result) = tokio::join!(page0_future, page1_future);
+    
+    let mut all_models = page0_result?;
+    all_models.extend(page1_result?);
+    
+    Ok(all_models)
+}
 
 pub async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
     let url = format!(

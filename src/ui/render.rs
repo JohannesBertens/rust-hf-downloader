@@ -638,3 +638,148 @@ pub fn render_download_path_popup(
     
     frame.render_widget(instructions, instructions_area);
 }
+
+pub fn render_options_popup(
+    frame: &mut Frame,
+    options: &crate::models::AppOptions,
+    directory_input: &tui_input::Input,
+) {
+    let popup_width = 64.min(frame.area().width.saturating_sub(4));
+    let popup_height = 26;
+    let popup_area = Rect {
+        x: (frame.area().width.saturating_sub(popup_width)) / 2,
+        y: (frame.area().height.saturating_sub(popup_height)) / 2,
+        width: popup_width,
+        height: popup_height,
+    };
+    
+    frame.render_widget(Clear, popup_area);
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Options (ESC to close)")
+        .border_style(Style::default().fg(Color::Yellow));
+    
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+    
+    // Render 13 fields with category headers
+    let fields = vec![
+        // General (index 0)
+        ("Default Directory:", if options.editing_directory { 
+            directory_input.value().to_string() 
+        } else { 
+            options.default_directory.clone() 
+        }),
+        // Download (indices 1-8)
+        ("Concurrent Threads:", options.concurrent_threads.to_string()),
+        ("Target Number of Chunks:", options.num_chunks.to_string()),
+        ("Min Chunk Size:", format_size(options.min_chunk_size)),
+        ("Max Chunk Size:", format_size(options.max_chunk_size)),
+        ("Max Retries:", options.max_retries.to_string()),
+        ("Download Timeout (sec):", options.download_timeout_secs.to_string()),
+        ("Retry Delay (sec):", options.retry_delay_secs.to_string()),
+        ("Progress Update Interval (ms):", options.progress_update_interval_ms.to_string()),
+        // Verification (indices 9-12)
+        ("Enable Verification:", if options.verification_on_completion { "Enabled".to_string() } else { "Disabled".to_string() }),
+        ("Concurrent Verifications:", options.concurrent_verifications.to_string()),
+        ("Verification Buffer Size:", format_size(options.verification_buffer_size as u64)),
+        ("Verification Update Interval:", options.verification_update_interval.to_string()),
+    ];
+    
+    // Render category headers
+    let category_offsets = [
+        (0, "General"),
+        (1, "Download"),
+        (9, "Verification"),
+    ];
+    
+    let mut y_offset = 1u16;
+    let mut field_idx = 0;
+    
+    for (cat_idx, (field_start, category_name)) in category_offsets.iter().enumerate() {
+        // Render category header
+        if cat_idx > 0 {
+            y_offset += 1; // Add spacing before category (except first)
+        }
+        
+        let separator = format!("─── {} ", category_name);
+        let full_width = inner.width.saturating_sub(4) as usize;
+        let separator = format!("{:─<width$}", separator, width = full_width);
+        
+        let header_area = Rect {
+            x: inner.x + 2,
+            y: inner.y + y_offset,
+            width: inner.width - 4,
+            height: 1,
+        };
+        
+        let header_widget = Paragraph::new(separator)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(header_widget, header_area);
+        
+        y_offset += 1;
+        
+        // Render fields in this category
+        let next_cat_start = category_offsets.get(cat_idx + 1).map(|(s, _)| *s).unwrap_or(fields.len());
+        for i in *field_start..next_cat_start {
+            let (label, value) = &fields[i];
+            
+            let area = Rect { 
+                x: inner.x + 2, 
+                y: inner.y + y_offset, 
+                width: inner.width - 4, 
+                height: 1 
+            };
+            
+            let style = if field_idx == options.selected_field {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            
+            let text = format!("{} {}", label, value);
+            let widget = Paragraph::new(text).style(style);
+            frame.render_widget(widget, area);
+            
+            // Show cursor when editing directory
+            if options.editing_directory && field_idx == 0 {
+                let cursor_x = area.x + label.len() as u16 + 1 + directory_input.visual_cursor() as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            }
+            
+            y_offset += 1;
+            field_idx += 1;
+        }
+    }
+    
+    // Controls help (with empty line before)
+    let help_y = inner.y + inner.height - 5;
+    let help = if options.editing_directory {
+        vec![
+            "",
+            "Type to edit directory path",
+            "Enter: Save | ESC: Cancel",
+            "",
+        ]
+    } else {
+        vec![
+            "",
+            "j/k or ↑/↓: Navigate | Enter: Edit directory",
+            "+/- or ←/→: Modify values & toggle verification",
+            "ESC: Close",
+        ]
+    };
+    
+    for (i, line) in help.iter().enumerate() {
+        let area = Rect { 
+            x: inner.x + 2, 
+            y: help_y + i as u16, 
+            width: inner.width - 4, 
+            height: 1 
+        };
+        let widget = Paragraph::new(*line)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(widget, area);
+    }
+}
