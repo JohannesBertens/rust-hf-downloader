@@ -7,6 +7,9 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tui_input::Input;
 
+/// Type alias for download receiver to reduce complexity
+pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf, Option<String>)>>>;
+
 /// Main application state container
 #[derive(Debug)]
 pub struct App {
@@ -29,7 +32,7 @@ pub struct App {
     pub download_path_input: Input,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
     pub download_tx: mpsc::UnboundedSender<(String, String, PathBuf, Option<String>)>,
-    pub download_rx: Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf, Option<String>)>>>,
+    pub download_rx: DownloadReceiver,
     pub download_queue_size: Arc<Mutex<usize>>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
     pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,

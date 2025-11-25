@@ -65,7 +65,7 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
             if let Some((_, _)) = parse_multipart_filename(&file.path) {
                 // Group multi-part files by their base name
                 let base_name = get_multipart_base_name(&file.path);
-                multi_part_groups.entry(base_name).or_insert_with(Vec::new).push(file.clone());
+                multi_part_groups.entry(base_name).or_default().push(file.clone());
             } else {
                 // Single file
                 if let Some(quant_type) = extract_quantization_type(&file.path) {
@@ -79,8 +79,8 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
             }
         }
         // Handle subdirectories named by quantization type (e.g., Q4_K_M/, Q8_0/)
-        else if file.file_type == "directory" {
-            if is_quantization_directory(&file.path) {
+        else if file.file_type == "directory"
+            && is_quantization_directory(&file.path) {
                 // Fetch files from this subdirectory
                 let subdir_url = format!(
                     "https://huggingface.co/api/models/{}/tree/main/{}",
@@ -124,7 +124,6 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
                     }
                 }
             }
-        }
     }
     
     // Process multi-part groups
@@ -237,11 +236,11 @@ pub fn is_quantization_directory(dirname: &str) -> bool {
     if let Some(&last_part) = parts.last() {
         // Check if last part looks like a quantization type
         // Q followed by digit (Q4, Q5, Q8, etc.)
-        if last_part.starts_with('Q') && last_part.len() > 1 && last_part.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+        if last_part.starts_with('Q') && last_part.len() > 1 && last_part.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // IQ followed by digit (IQ4, IQ3, etc.)
-        if last_part.starts_with("IQ") && last_part.len() > 2 && last_part.chars().nth(2).map_or(false, |c| c.is_ascii_digit()) {
+        if last_part.starts_with("IQ") && last_part.len() > 2 && last_part.chars().nth(2).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // Special formats
@@ -323,18 +322,18 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
         let upper = s.to_uppercase();
         // Check for common quantization patterns
         // Q followed by digit (Q4, Q5, Q8, etc.)
-        if upper.starts_with('Q') && upper.len() > 1 && upper.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+        if upper.starts_with('Q') && upper.len() > 1 && upper.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // IQ followed by digit (IQ4_XS, IQ3_M, etc.)
-        if upper.starts_with("IQ") && upper.len() > 2 && upper.chars().nth(2).map_or(false, |c| c.is_ascii_digit()) {
+        if upper.starts_with("IQ") && upper.len() > 2 && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // MXFP followed by digit (MXFP4, MXFP6, MXFP8, etc.)
         // But not MXFP4_MOE (that should be split to MXFP4)
-        if upper.starts_with("MXFP") && upper.len() > 4 && upper.chars().nth(4).map_or(false, |c| c.is_ascii_digit()) {
+        if upper.starts_with("MXFP") && upper.len() > 4 && upper.chars().nth(4).is_some_and(|c| c.is_ascii_digit()) {
             // Make sure there's no underscore with additional suffix
-            if !upper.contains('_') || upper.chars().nth(5).map_or(false, |c| c == '_' && upper.len() == 6) {
+            if !upper.contains('_') || upper.chars().nth(5).is_some_and(|c| c == '_' && upper.len() == 6) {
                 return true;
             }
         }

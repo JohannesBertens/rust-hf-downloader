@@ -10,22 +10,39 @@ use ratatui::{
 use std::collections::HashMap;
 use tui_input::Input;
 
-pub fn render_ui(
-    frame: &mut Frame,
-    input: &Input,
-    input_mode: InputMode,
-    models: &[ModelInfo],
-    list_state: &mut ListState,
-    loading: bool,
-    quantizations: &[QuantizationInfo],
-    quant_list_state: &mut ListState,
-    loading_quants: bool,
-    focused_pane: FocusedPane,
-    error: &Option<String>,
-    status: &str,
-    selection_info: &str,
-    complete_downloads: &HashMap<String, crate::models::DownloadMetadata>,
-) {
+/// Parameters for rendering the UI
+pub struct RenderParams<'a> {
+    pub input: &'a Input,
+    pub input_mode: InputMode,
+    pub models: &'a [ModelInfo],
+    pub list_state: &'a mut ListState,
+    pub loading: bool,
+    pub quantizations: &'a [QuantizationInfo],
+    pub quant_list_state: &'a mut ListState,
+    pub loading_quants: bool,
+    pub focused_pane: FocusedPane,
+    pub error: &'a Option<String>,
+    pub status: &'a str,
+    pub selection_info: &'a str,
+    pub complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
+}
+
+pub fn render_ui(frame: &mut Frame, params: RenderParams) {
+    let RenderParams {
+        input,
+        input_mode,
+        models,
+        list_state,
+        loading,
+        quantizations,
+        quant_list_state,
+        loading_quants,
+        focused_pane,
+        error,
+        status,
+        selection_info,
+        complete_downloads,
+    } = params;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -194,20 +211,18 @@ pub fn render_ui(
     // Status bar with 2 lines: selection_info and status message
     let line1 = if !selection_info.is_empty() {
         selection_info.to_string()
-    } else {
-        if let Some(selected) = list_state.selected() {
-            if selected < models.len() {
-                let model = &models[selected];
-                format!(
-                    "Selected: {} | URL: https://huggingface.co/{}",
-                    model.id, model.id
-                )
-            } else {
-                format!("")
-            }
+    } else if let Some(selected) = list_state.selected() {
+        if selected < models.len() {
+            let model = &models[selected];
+            format!(
+                "Selected: {} | URL: https://huggingface.co/{}",
+                model.id, model.id
+            )
         } else {
-            format!("")
+            String::new()
         }
+    } else {
+        String::new()
     };
     
     let line2 = if let Some(err) = error {
@@ -334,12 +349,10 @@ fn render_download_progress(
         let inner_area = chunks_block.inner(chunks_area);
         frame.render_widget(chunks_block, chunks_area);
         
-        let mut y_offset = 0;
-        
-        for chunk in active_chunks {
+        for (y_offset, chunk) in active_chunks.into_iter().enumerate() {
             let chunk_area = Rect {
                 x: inner_area.x,
-                y: inner_area.y + y_offset,
+                y: inner_area.y + y_offset as u16,
                 width: inner_area.width,
                 height: 1,
             };
@@ -366,7 +379,6 @@ fn render_download_progress(
                 .style(Style::default().fg(Color::Yellow));
             
             frame.render_widget(chunk_widget, chunk_area);
-            y_offset += 1;
         }
     }
 }
@@ -722,8 +734,7 @@ pub fn render_options_popup(
         
         // Render fields in this category
         let next_cat_start = category_offsets.get(cat_idx + 1).map(|(s, _)| *s).unwrap_or(fields.len());
-        for i in *field_start..next_cat_start {
-            let (label, value) = &fields[i];
+        for (label, value) in fields.iter().take(next_cat_start).skip(*field_start) {
             
             let area = Rect { 
                 x: inner.x + 2, 

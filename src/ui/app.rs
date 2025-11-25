@@ -62,17 +62,17 @@ impl App {
                     let mut queue_size = download_queue_size.lock().await;
                     *queue_size = queue_size.saturating_sub(1);
                 }
-                start_download(
+                start_download(crate::download::DownloadParams {
                     model_id,
                     filename,
-                    path,
-                    download_progress.clone(),
-                    status_tx.clone(),
-                    complete_downloads.clone(),
-                    sha256,
-                    verification_queue.clone(),
-                    verification_queue_size.clone(),
-                ).await;
+                    base_path: path,
+                    progress: download_progress.clone(),
+                    status_tx: status_tx.clone(),
+                    complete_downloads: complete_downloads.clone(),
+                    expected_sha256: sha256,
+                    verification_queue: verification_queue.clone(),
+                    verification_queue_size: verification_queue_size.clone(),
+                }).await;
             }
         });
         
@@ -99,22 +99,21 @@ impl App {
         });
         
         // Render main UI
-        crate::ui::render::render_ui(
-            frame,
-            &self.input,
-            self.input_mode,
-            &models,
-            &mut self.list_state,
-            self.loading,
-            &quantizations,
-            &mut self.quant_list_state,
-            self.loading_quants,
-            self.focused_pane,
-            &self.error,
-            &self.status,
-            &self.selection_info,
-            &complete_downloads,
-        );
+        crate::ui::render::render_ui(frame, crate::ui::render::RenderParams {
+            input: &self.input,
+            input_mode: self.input_mode,
+            models: &models,
+            list_state: &mut self.list_state,
+            loading: self.loading,
+            quantizations: &quantizations,
+            quant_list_state: &mut self.quant_list_state,
+            loading_quants: self.loading_quants,
+            focused_pane: self.focused_pane,
+            error: &self.error,
+            status: &self.status,
+            selection_info: &self.selection_info,
+            complete_downloads: &complete_downloads,
+        });
         
         // Render both download and verification progress bars
         let (download_progress, download_queue_size, verification_progress, verification_queue_size) = 
@@ -162,15 +161,10 @@ impl App {
         let delay = tokio::time::sleep(tokio::time::Duration::from_millis(100));
         tokio::select! {
             maybe_event = self.event_stream.next().fuse() => {
-                match maybe_event {
-                    Some(Ok(evt)) => {
-                        if let Event::Key(key) = evt {
-                            if key.kind == KeyEventKind::Press {
-                                self.on_key_event(key).await;
-                            }
-                        }
+                if let Some(Ok(Event::Key(key))) = maybe_event {
+                    if key.kind == KeyEventKind::Press {
+                        self.on_key_event(key).await;
                     }
-                    _ => {}
                 }
             }
             _ = delay => {
