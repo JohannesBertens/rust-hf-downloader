@@ -6,6 +6,7 @@ mod verification;
 mod registry;
 mod ui;
 mod utils;
+mod http_client;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {

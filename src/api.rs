@@ -1,22 +1,22 @@
-use crate::models::{ModelInfo, ModelFile, QuantizationInfo, TrendingResponse};
+use crate::models::{ModelInfo, ModelFile, QuantizationInfo, QuantizationGroup, TrendingResponse, ModelMetadata, RepoFile, FileTreeNode};
 use std::collections::HashMap;
 
-pub async fn fetch_trending_models_page(page: u32) -> Result<Vec<ModelInfo>, reqwest::Error> {
+pub async fn fetch_trending_models_page(page: u32, token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
     let url = format!(
-        "https://huggingface.co/models-json?apps=llama.cpp&p={}&sort=trending&withCount=true",
+        "https://huggingface.co/models-json?p={}&sort=trending&withCount=true",
         page
     );
     
-    let response = reqwest::get(&url).await?;
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let trending: TrendingResponse = response.json().await?;
     
     Ok(trending.models)
 }
 
-pub async fn fetch_trending_models() -> Result<Vec<ModelInfo>, reqwest::Error> {
+pub async fn fetch_trending_models(token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
     // Fetch both page 0 and page 1 to get ~60 trending models
-    let page0_future = fetch_trending_models_page(0);
-    let page1_future = fetch_trending_models_page(1);
+    let page0_future = fetch_trending_models_page(0, token);
+    let page1_future = fetch_trending_models_page(1, token);
     
     // Fetch both pages in parallel
     let (page0_result, page1_result) = tokio::join!(page0_future, page1_future);
@@ -27,25 +27,179 @@ pub async fn fetch_trending_models() -> Result<Vec<ModelInfo>, reqwest::Error> {
     Ok(all_models)
 }
 
-pub async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
+pub async fn fetch_models(query: &str, token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
     let url = format!(
         "https://huggingface.co/api/models?search={}&limit=50&sort=downloads&direction=-1",
         urlencoding::encode(query)
     );
     
-    let response = reqwest::get(&url).await?;
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let models: Vec<ModelInfo> = response.json().await?;
     
     Ok(models)
 }
 
-pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, reqwest::Error> {
+/// Fetch detailed model metadata from /api/models/{model_id}
+pub async fn fetch_model_metadata(
+    model_id: &str,
+    token: Option<&String>,
+) -> Result<ModelMetadata, reqwest::Error> {
+    let url = format!("https://huggingface.co/api/models/{}", model_id);
+    
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    let mut metadata: ModelMetadata = response.json().await?;
+    
+    // Fetch the complete file tree recursively
+    let all_files = fetch_recursive_tree(model_id, "", token).await?;
+    
+    // Convert ModelFile to RepoFile with proper size information
+    metadata.siblings = all_files.into_iter().map(|f| RepoFile {
+        rfilename: f.path,
+        size: Some(f.size),
+        lfs: f.lfs,
+    }).collect();
+    
+    Ok(metadata)
+}
+
+/// Recursively fetch all files from a repository, including subdirectories
+fn fetch_recursive_tree<'a>(
+    model_id: &'a str,
+    path: &'a str,
+    token: Option<&'a String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<ModelFile>, reqwest::Error>> + 'a>> {
+    Box::pin(async move {
+        let tree_url = if path.is_empty() {
+            format!("https://huggingface.co/api/models/{}/tree/main", model_id)
+        } else {
+            format!("https://huggingface.co/api/models/{}/tree/main/{}", model_id, path)
+        };
+        
+        let response = crate::http_client::get_with_optional_token(&tree_url, token).await?;
+        let items: Vec<ModelFile> = response.json().await?;
+        
+        let mut all_files = Vec::new();
+        
+        for item in items {
+            if item.file_type == "directory" {
+                // Recursively fetch contents of this directory
+                if let Ok(subdir_files) = fetch_recursive_tree(model_id, &item.path, token).await {
+                    all_files.extend(subdir_files);
+                }
+            } else {
+                // It's a file, add it to the list
+                all_files.push(item);
+            }
+        }
+        
+        Ok(all_files)
+    })
+}
+
+/// Check if model has GGUF files
+pub fn has_gguf_files(metadata: &ModelMetadata) -> bool {
+    metadata.siblings.iter().any(|file| {
+        file.rfilename.ends_with(".gguf") || file.rfilename.contains(".gguf.part")
+    })
+}
+
+/// Build tree structure from flat file list
+pub fn build_file_tree(files: Vec<RepoFile>) -> FileTreeNode {
+    let mut root = FileTreeNode {
+        name: String::new(),
+        path: String::new(),
+        is_dir: true,
+        size: None,
+        children: Vec::new(),
+        expanded: true, // Root is always expanded
+        depth: 0,
+    };
+    
+    for file in files {
+        let parts: Vec<&str> = file.rfilename.split('/').collect();
+        insert_into_tree(&mut root, &parts, 0, &file);
+    }
+    
+    // Sort children at each level (directories first, then alphabetically)
+    sort_tree_recursive(&mut root);
+    
+    // Calculate directory sizes (sum of all files within)
+    calculate_directory_sizes(&mut root);
+    
+    root
+}
+
+/// Calculate total size for each directory recursively
+fn calculate_directory_sizes(node: &mut FileTreeNode) -> u64 {
+    if node.is_dir {
+        let total: u64 = node.children.iter_mut()
+            .map(calculate_directory_sizes)
+            .sum();
+        node.size = Some(total);
+        total
+    } else {
+        node.size.unwrap_or(0)
+    }
+}
+
+fn insert_into_tree(node: &mut FileTreeNode, parts: &[&str], depth: usize, file: &RepoFile) {
+    if parts.is_empty() {
+        return;
+    }
+    
+    let current_part = parts[0];
+    let is_last = parts.len() == 1;
+    
+    // Find or create child node
+    let child_pos = node.children.iter().position(|child| child.name == current_part);
+    
+    let child = if let Some(pos) = child_pos {
+        &mut node.children[pos]
+    } else {
+        let new_node = FileTreeNode {
+            name: current_part.to_string(),
+            path: if node.path.is_empty() {
+                current_part.to_string()
+            } else {
+                format!("{}/{}", node.path, current_part)
+            },
+            is_dir: !is_last,
+            size: if is_last { file.size } else { None },
+            children: Vec::new(),
+            expanded: false,
+            depth: depth + 1,
+        };
+        node.children.push(new_node);
+        node.children.last_mut().unwrap()
+    };
+    
+    if !is_last {
+        insert_into_tree(child, &parts[1..], depth + 1, file);
+    }
+}
+
+fn sort_tree_recursive(node: &mut FileTreeNode) {
+    node.children.sort_by(|a, b| {
+        // Directories before files
+        match (a.is_dir, b.is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        }
+    });
+    
+    for child in &mut node.children {
+        sort_tree_recursive(child);
+    }
+}
+
+pub async fn fetch_model_files(model_id: &str, token: Option<&String>) -> Result<Vec<QuantizationGroup>, reqwest::Error> {
     let url = format!(
         "https://huggingface.co/api/models/{}/tree/main",
         model_id
     );
     
-    let response = reqwest::get(&url).await?;
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;
     
     let mut quantizations = Vec::new();
@@ -65,7 +219,7 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
             if let Some((_, _)) = parse_multipart_filename(&file.path) {
                 // Group multi-part files by their base name
                 let base_name = get_multipart_base_name(&file.path);
-                multi_part_groups.entry(base_name).or_insert_with(Vec::new).push(file.clone());
+                multi_part_groups.entry(base_name).or_default().push(file.clone());
             } else {
                 // Single file
                 if let Some(quant_type) = extract_quantization_type(&file.path) {
@@ -79,83 +233,82 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
             }
         }
         // Handle subdirectories named by quantization type (e.g., Q4_K_M/, Q8_0/)
-        else if file.file_type == "directory" {
-            if is_quantization_directory(&file.path) {
+        else if file.file_type == "directory"
+            && is_quantization_directory(&file.path) {
                 // Fetch files from this subdirectory
                 let subdir_url = format!(
                     "https://huggingface.co/api/models/{}/tree/main/{}",
                     model_id, file.path
                 );
                 
-                if let Ok(subdir_response) = reqwest::get(&subdir_url).await {
+                if let Ok(subdir_response) = crate::http_client::get_with_optional_token(&subdir_url, token).await {
                     if let Ok(subdir_files) = subdir_response.json::<Vec<ModelFile>>().await {
-                        // Calculate total size of all GGUF files in this directory
-                        // Match both .gguf and .gguf.partNofM patterns
-                        let total_size: u64 = subdir_files
-                            .iter()
-                            .filter(|f| f.file_type == "file" && 
-                                       (f.path.ends_with(".gguf") || f.path.contains(".gguf.part")))
-                            .map(|f| f.size)
-                            .sum();
+                        let quant_type = extract_quantization_type_from_dirname(&file.path);
                         
-                        if total_size > 0 {
-                            // Get first GGUF file as representative filename and its SHA256
-                            let first_file = subdir_files
-                                .iter()
-                                .find(|f| f.file_type == "file" && 
-                                         (f.path.ends_with(".gguf") || f.path.contains(".gguf.part")));
-                            
-                            let filename = first_file
-                                .map(|f| f.path.clone())
-                                .unwrap_or_else(|| format!("{}/model.gguf", file.path));
-                            
-                            // Extract SHA256 from first file's lfs.oid
-                            let sha256 = first_file
-                                .and_then(|f| f.lfs.as_ref())
-                                .map(|lfs| lfs.oid.clone());
-                            
-                            quantizations.push(QuantizationInfo {
-                                quant_type: extract_quantization_type_from_dirname(&file.path),
-                                filename,
-                                size: total_size,
-                                sha256,
-                            });
+                        // Add each individual file in the directory as a separate QuantizationInfo
+                        for subdir_file in subdir_files {
+                            if subdir_file.file_type == "file" && 
+                               (subdir_file.path.ends_with(".gguf") || subdir_file.path.contains(".gguf.part")) {
+                                
+                                let sha256 = subdir_file.lfs.as_ref().map(|lfs| lfs.oid.clone());
+                                
+                                quantizations.push(QuantizationInfo {
+                                    quant_type: quant_type.clone(),
+                                    filename: subdir_file.path.clone(),
+                                    size: subdir_file.size,
+                                    sha256,
+                                });
+                            }
                         }
                     }
                 }
             }
-        }
     }
     
-    // Process multi-part groups
+    // Process multi-part groups - keep all individual files
     // Note: Multi-part files are separate complete files, each with their own SHA256
     // They are NOT downloaded as chunks and concatenated
     for (base_name, parts) in multi_part_groups {
-        let total_size: u64 = parts.iter().map(|f| f.size).sum();
         if let Some(quant_type) = extract_quantization_type(&base_name) {
-            // Use the first part's filename as representative
-            let first_part = parts.first();
-            let filename = first_part.map(|f| f.path.clone()).unwrap_or(base_name);
-            
-            // Extract SHA256 from first part's lfs.oid
-            // Each part is a separate file with its own hash
-            let sha256 = first_part
-                .and_then(|f| f.lfs.as_ref())
-                .map(|lfs| lfs.oid.clone());
-            
-            quantizations.push(QuantizationInfo {
-                quant_type,
-                filename,
-                size: total_size,
-                sha256,
-            });
+            // Add each individual part as a separate QuantizationInfo
+            for part in parts {
+                let sha256 = part.lfs.as_ref().map(|lfs| lfs.oid.clone());
+                quantizations.push(QuantizationInfo {
+                    quant_type: quant_type.clone(),
+                    filename: part.path.clone(),
+                    size: part.size,
+                    sha256,
+                });
+            }
         }
     }
     
-    // Sort by file size (largest first)
-    quantizations.sort_by(|a, b| b.size.cmp(&a.size));
+    // Group quantizations by type
+    let mut grouped: HashMap<String, Vec<QuantizationInfo>> = HashMap::new();
     
-    Ok(quantizations)
+    for quant in quantizations {
+        grouped
+            .entry(quant.quant_type.clone())
+            .or_default()
+            .push(quant);
+    }
+    
+    // Convert to QuantizationGroups and sort by total size (largest first)
+    let mut quantization_groups: Vec<QuantizationGroup> = grouped
+        .into_iter()
+        .map(|(quant_type, files)| {
+            let total_size: u64 = files.iter().map(|f| f.size).sum();
+            QuantizationGroup {
+                quant_type,
+                files,
+                total_size,
+            }
+        })
+        .collect();
+    
+    quantization_groups.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    
+    Ok(quantization_groups)
 }
 
 /// Fetch SHA256 hashes for multiple files in a single API call
@@ -163,6 +316,7 @@ pub async fn fetch_model_files(model_id: &str) -> Result<Vec<QuantizationInfo>, 
 pub async fn fetch_multipart_sha256s(
     model_id: &str,
     filenames: &[String],
+    token: Option<&String>,
 ) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
     // Single API call to get all files
     let url = format!(
@@ -170,7 +324,7 @@ pub async fn fetch_multipart_sha256s(
         model_id
     );
     
-    let response = reqwest::get(&url).await?;
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;
     
     // Create lookup map for fast matching
@@ -237,11 +391,11 @@ pub fn is_quantization_directory(dirname: &str) -> bool {
     if let Some(&last_part) = parts.last() {
         // Check if last part looks like a quantization type
         // Q followed by digit (Q4, Q5, Q8, etc.)
-        if last_part.starts_with('Q') && last_part.len() > 1 && last_part.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+        if last_part.starts_with('Q') && last_part.len() > 1 && last_part.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // IQ followed by digit (IQ4, IQ3, etc.)
-        if last_part.starts_with("IQ") && last_part.len() > 2 && last_part.chars().nth(2).map_or(false, |c| c.is_ascii_digit()) {
+        if last_part.starts_with("IQ") && last_part.len() > 2 && last_part.chars().nth(2).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // Special formats
@@ -323,18 +477,18 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
         let upper = s.to_uppercase();
         // Check for common quantization patterns
         // Q followed by digit (Q4, Q5, Q8, etc.)
-        if upper.starts_with('Q') && upper.len() > 1 && upper.chars().nth(1).map_or(false, |c| c.is_ascii_digit()) {
+        if upper.starts_with('Q') && upper.len() > 1 && upper.chars().nth(1).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // IQ followed by digit (IQ4_XS, IQ3_M, etc.)
-        if upper.starts_with("IQ") && upper.len() > 2 && upper.chars().nth(2).map_or(false, |c| c.is_ascii_digit()) {
+        if upper.starts_with("IQ") && upper.len() > 2 && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
         // MXFP followed by digit (MXFP4, MXFP6, MXFP8, etc.)
         // But not MXFP4_MOE (that should be split to MXFP4)
-        if upper.starts_with("MXFP") && upper.len() > 4 && upper.chars().nth(4).map_or(false, |c| c.is_ascii_digit()) {
+        if upper.starts_with("MXFP") && upper.len() > 4 && upper.chars().nth(4).is_some_and(|c| c.is_ascii_digit()) {
             // Make sure there's no underscore with additional suffix
-            if !upper.contains('_') || upper.chars().nth(5).map_or(false, |c| c == '_' && upper.len() == 6) {
+            if !upper.contains('_') || upper.chars().nth(5).is_some_and(|c| c == '_' && upper.len() == 6) {
                 return true;
             }
         }

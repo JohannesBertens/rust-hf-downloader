@@ -14,6 +14,7 @@ Enable users to discover, explore, and download HuggingFace models directly from
 - Multi-part GGUF file handling
 - Organized folder structure by publisher and model
 - Visual tracking of completed downloads
+- HuggingFace authentication for gated models (v0.9.5)
 
 ### Key Technologies
 - **Language**: Rust (Edition 2021, compatible with Ubuntu 22.04)
@@ -29,7 +30,7 @@ Enable users to discover, explore, and download HuggingFace models directly from
 
 ## Architecture
 
-### Modular Design (v0.7.0+)
+### Modular Design (v0.7.0+, Enhanced v0.9.5)
 The application follows a modular architecture with clear separation of concerns:
 
 ```
@@ -37,22 +38,30 @@ src/
 ├── main.rs           # Entry point (~20 lines)
 ├── models.rs         # Data structures and types
 ├── config.rs         # Configuration persistence (v0.9.0)
-├── api.rs            # HuggingFace API client
+├── api.rs            # HuggingFace API client with authentication (v0.9.5)
+├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
 ├── registry.rs       # Download metadata management
-├── download.rs       # Download orchestration
+├── download.rs       # Download orchestration with auth (v0.9.5)
 ├── verification.rs   # SHA256 verification (v0.8.0)
 ├── utils.rs          # Helper functions
 └── ui/
     ├── mod.rs        # UI module exports
-    ├── app.rs        # Application state and logic
+    ├── app.rs        # Module re-exports (~48 lines, v0.9.5)
+    ├── app/          # App submodules (v0.9.5)
+    │   ├── state.rs      # AppState and initialization (~158 lines)
+    │   ├── events.rs     # Event handling (~709 lines)
+    │   ├── models.rs     # Model browsing logic (~253 lines)
+    │   ├── downloads.rs  # Download management (~460 lines)
+    │   └── verification.rs # Verification UI (~77 lines)
     └── render.rs     # UI rendering functions
 ```
 
 **Benefits of modular design:**
-- Clear separation of concerns (API, UI, downloads, verification, config)
+- Clear separation of concerns (API, UI, downloads, verification, config, auth)
 - Easier to test individual components
-- Better code organization (~240 lines per module average)
+- Better code organization (~250 lines per module average)
 - Simpler to maintain and extend
+- Focused submodules for complex features (v0.9.5 app/* refactoring)
 
 ### Core Components
 
@@ -211,34 +220,56 @@ async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
 
 ### Key Functions
 
-#### Core Application (`src/ui/app.rs`)
+#### Core Application (`src/ui/app/state.rs`, v0.9.5)
 | Function | Purpose |
 |----------|---------|
-| `App::new()` | Initialize application state, load config |
-| `App::run()` | Main event loop, spawn workers, load trending models |
-| `App::draw()` | Render UI components (4 panels) |
-| `App::handle_crossterm_events()` | Process terminal events |
-| `App::on_key_event()` | Handle keyboard input |
+| `AppState::new()` | Initialize application state, load config |
+| `AppState::run()` | Main event loop, spawn workers, load trending models |
+| `AppState::draw()` | Render UI components (4 panels) |
 
-#### Model Management
+#### Event Handling (`src/ui/app/events.rs`, v0.9.5)
 | Function | Purpose |
 |----------|---------|
-| `App::load_trending_models()` | Fetch and display 60 trending models on startup (v0.9.0) |
-| `App::search_models()` | Execute API search with user query |
-| `App::load_quantizations()` | Fetch quantized file info for selected model (with cache check) |
-| `App::start_background_prefetch()` | Spawn async task to prefetch all model quantizations |
-| `App::show_model_details()` | Display full model info in status bar |
-| `App::show_quantization_details()` | Display quantization info in status bar |
+| `AppState::handle_crossterm_events()` | Process terminal events |
+| `AppState::on_key_event()` | Handle keyboard input (routing to mode handlers) |
+| `AppState::handle_normal_mode()` | Normal mode keybindings (navigation, download, verify) |
+| `AppState::handle_editing_mode()` | Editing mode keybindings (search input) |
+| `AppState::handle_options_mode()` | Options popup keybindings (settings navigation) |
+
+#### Model Management (`src/ui/app/models.rs`, v0.9.5)
+| Function | Purpose |
+|----------|---------|
+| `AppState::load_trending_models()` | Fetch and display 60 trending models on startup (v0.9.0) |
+| `AppState::search_models()` | Execute API search with user query |
+| `AppState::load_quantizations()` | Fetch quantized file info for selected model (with cache check) |
+| `AppState::start_background_prefetch()` | Spawn async task to prefetch all model quantizations |
+| `AppState::show_model_details()` | Display full model info in status bar |
+| `AppState::show_quantization_details()` | Display quantization info in status bar |
+
+#### Download Management (`src/ui/app/downloads.rs`, v0.9.5)
+| Function | Purpose |
+|----------|---------|
+| `AppState::confirm_download()` | Show download path popup and queue downloads |
+| `AppState::start_download()` | Queue downloads to worker with authentication token |
+| `AppState::resume_incomplete_downloads()` | Resume interrupted downloads from registry |
+| `AppState::delete_incomplete_downloads()` | Cleanup incomplete files and registry entries |
+| `AppState::scan_incomplete_downloads()` | Load and display incomplete download popup |
+
+#### Verification (`src/ui/app/verification.rs`, v0.9.5)
+| Function | Purpose |
+|----------|---------|
+| `AppState::verify_file()` | Trigger SHA256 verification for file |
+| `AppState::verify_selected_file()` | Verify currently selected quantization |
 
 #### Navigation & UI
 | Function | Purpose |
 |----------|---------|
-| `App::toggle_focus()` | Switch focus between Models and Quantizations panes |
-| `App::next_quant()` | Navigate to next quantization in list |
-| `App::previous_quant()` | Navigate to previous quantization in list |
-| `App::toggle_options_popup()` | Open/close options screen (v0.9.0) |
-| `App::next_option()` / `previous_option()` | Navigate options fields (v0.9.0) |
-| `App::increment_option()` / `decrement_option()` | Adjust numeric settings (v0.9.0) |
+| `AppState::toggle_focus()` | Switch focus between Models and Quantizations panes |
+| `AppState::next_quant()` | Navigate to next quantization in list |
+| `AppState::previous_quant()` | Navigate to previous quantization in list |
+| `AppState::toggle_options_popup()` | Open/close options screen (v0.9.0) |
+| `AppState::next_option()` / `previous_option()` | Navigate options fields (v0.9.0) |
+| `AppState::increment_option()` / `decrement_option()` | Adjust numeric settings (v0.9.0) |
 
 #### Configuration (`src/config.rs`, v0.9.0)
 | Function | Purpose |
@@ -247,14 +278,19 @@ async fn fetch_models(query: &str) -> Result<Vec<ModelInfo>, reqwest::Error> {
 | `save_config()` | Serialize and save settings to disk |
 | `get_config_path()` | Return path to configuration file |
 
-#### API Client (`src/api.rs`)
+#### API Client (`src/api.rs`, Authentication v0.9.5)
 | Function | Purpose |
 |----------|---------|
 | `fetch_trending_models()` | Fetch pages 0 and 1 in parallel, return 60 models (v0.9.0) |
 | `fetch_trending_models_page()` | Fetch specific page of trending models (v0.9.0) |
 | `fetch_models()` | HTTP request to HuggingFace search API |
-| `fetch_model_files()` | Get model file tree, handles both single files and directories |
-| `fetch_multipart_sha256s()` | Batch fetch SHA256 hashes for multi-part files (v0.8.0) |
+| `fetch_model_files()` | Get model file tree with optional token auth (v0.9.5) |
+| `fetch_multipart_sha256s()` | Batch fetch SHA256 hashes with optional token (v0.8.0, v0.9.5) |
+
+#### HTTP Client (`src/http_client.rs`, v0.9.5)
+| Function | Purpose |
+|----------|---------|
+| `make_authenticated_request()` | Create HTTP client with optional Bearer token authentication |
 
 #### Utility Functions (`src/api.rs`, `src/utils.rs`)
 | Function | Purpose |
@@ -691,7 +727,22 @@ let response = client
 
 ## Version History
 
-- **v0.9.0** (Current): Configuration system and trending models
+- **v0.9.5** (Current): Authentication support and code refactoring
+  - **HuggingFace authentication**: Token-based authentication for gated models
+  - **401 error popup**: Clear guidance when authentication is required
+  - **New module**: `src/http_client.rs` for authenticated HTTP requests
+  - **App refactoring**: Split `src/ui/app.rs` (~1107 lines) into focused submodules:
+    - `src/ui/app/state.rs`: AppState struct and initialization (~158 lines)
+    - `src/ui/app/events.rs`: Event handling and keyboard input (~709 lines)
+    - `src/ui/app/models.rs`: Model browsing and search logic (~253 lines)
+    - `src/ui/app/downloads.rs`: Download management (~460 lines)
+    - `src/ui/app/verification.rs`: Verification UI and logic (~77 lines)
+  - **Token configuration**: HF token stored in `~/.config/jreb/config.toml`
+  - **Options screen**: New "HuggingFace Token" field for token management
+  - **Authenticated downloads**: Token passed through download pipeline to all API calls
+  - **Code quality**: Clippy warnings resolved, better code organization
+
+- **v0.9.0**: Configuration system and trending models
   - **Persistent configuration**: Settings saved to `~/.config/jreb/config.toml`
   - **Options screen**: Press 'o' to customize all settings interactively
   - **Trending models on startup**: Automatically loads 60 trending models (2 pages in parallel)
