@@ -1,4 +1,4 @@
-use crate::models::{FocusedPane, InputMode, ModelInfo, QuantizationInfo, DownloadProgress, VerificationProgress};
+use crate::models::{FocusedPane, InputMode, ModelInfo, QuantizationInfo, QuantizationGroup, DownloadProgress, VerificationProgress, ModelDisplayMode, ModelMetadata, FileTreeNode};
 use crate::utils::{format_number, format_size};
 use ratatui::{
     Frame,
@@ -17,7 +17,8 @@ pub struct RenderParams<'a> {
     pub models: &'a [ModelInfo],
     pub list_state: &'a mut ListState,
     pub loading: bool,
-    pub quantizations: &'a [QuantizationInfo],
+    pub quantizations: &'a [QuantizationGroup],
+    pub quant_file_list_state: &'a mut ListState,
     pub quant_list_state: &'a mut ListState,
     pub loading_quants: bool,
     pub focused_pane: FocusedPane,
@@ -25,6 +26,11 @@ pub struct RenderParams<'a> {
     pub status: &'a str,
     pub selection_info: &'a str,
     pub complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
+    // Non-GGUF model support
+    pub display_mode: ModelDisplayMode,
+    pub model_metadata: &'a Option<ModelMetadata>,
+    pub file_tree: &'a Option<FileTreeNode>,
+    pub file_tree_state: &'a mut ListState,
 }
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
@@ -35,6 +41,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         list_state,
         loading,
         quantizations,
+        quant_file_list_state,
         quant_list_state,
         loading_quants,
         focused_pane,
@@ -42,6 +49,10 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         status,
         selection_info,
         complete_downloads,
+        display_mode,
+        model_metadata,
+        file_tree,
+        file_tree_state,
     } = params;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -150,63 +161,39 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
 
     frame.render_stateful_widget(list, chunks[1], list_state);
 
-    // Quantization details panel
-    let quant_title = if loading_quants {
-        "Quantization Details [Loading...]"
-    } else if quantizations.is_empty() {
-        "Quantization Details [Select a model to view]"
-    } else {
-        "Quantization Details"
-    };
+    // Split bottom panel into left and right sections
+    let bottom_panel_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(50),
+            Constraint::Percentage(50),
+        ])
+        .split(chunks[2]);
 
-    let quant_items: Vec<ListItem> = quantizations
-        .iter()
-        .map(|q| {
-            let size_str = format_size(q.size);
-            let is_downloaded = complete_downloads.contains_key(&q.filename);
-            
-            let mut spans = vec![
-                Span::raw(format!("{:>10}  ", size_str)),
-                Span::styled(
-                    format!("{:<14} ", q.quant_type),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-            ];
-            
-            if is_downloaded {
-                spans.push(Span::styled(&q.filename, Style::default().fg(Color::Green)));
-                spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
-            } else {
-                spans.push(Span::styled(&q.filename, Style::default().fg(Color::White)));
-            }
-            
-            let content = Line::from(spans);
-            ListItem::new(content)
-        })
-        .collect();
-
-    let quant_list = List::new(quant_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(quant_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::Quantizations {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }
-                ),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
-
-    frame.render_stateful_widget(quant_list, chunks[2], quant_list_state);
+    // Render based on display mode
+    match display_mode {
+        ModelDisplayMode::Gguf => {
+            render_gguf_panels(frame, bottom_panel_chunks, GgufPanelContext {
+                quantizations,
+                quant_list_state,
+                quant_file_list_state,
+                loading_quants,
+                input_mode,
+                focused_pane,
+                complete_downloads,
+            });
+        }
+        ModelDisplayMode::Standard => {
+            render_standard_panels(frame, bottom_panel_chunks, StandardPanelContext {
+                model_metadata,
+                file_tree,
+                file_tree_state,
+                loading: loading_quants,
+                input_mode,
+                focused_pane,
+            });
+        }
+    }
 
     // Status bar with 2 lines: selection_info and status message
     let line1 = if !selection_info.is_empty() {
@@ -228,7 +215,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
     let line2 = if let Some(err) = error {
         format!("Error: {}", err)
     } else {
-                status.to_string()
+        status.to_string()
     };
     
     let status_text = if !line1.is_empty() {
@@ -247,6 +234,386 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(status_widget, chunks[3]);
+}
+
+struct StandardPanelContext<'a> {
+    model_metadata: &'a Option<ModelMetadata>,
+    file_tree: &'a Option<FileTreeNode>,
+    file_tree_state: &'a mut ListState,
+    loading: bool,
+    input_mode: InputMode,
+    focused_pane: FocusedPane,
+}
+
+fn render_standard_panels(
+    frame: &mut Frame,
+    chunks: std::rc::Rc<[Rect]>,
+    ctx: StandardPanelContext,
+) {
+    let StandardPanelContext {
+        model_metadata,
+        file_tree,
+        file_tree_state,
+        loading,
+        input_mode,
+        focused_pane,
+    } = ctx;
+    // Left side: Model metadata
+    let meta_title = if loading {
+        "Model Information [Loading...]"
+    } else if model_metadata.is_none() {
+        "Model Information [Select a model to view]"
+    } else {
+        "Model Information"
+    };
+
+    let metadata_content = if let Some(metadata) = model_metadata {
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("ID: ", Style::default().fg(Color::Yellow)),
+                Span::raw(&metadata.model_id),
+            ]),
+        ];
+
+        if let Some(ref lib) = metadata.library_name {
+            lines.push(Line::from(vec![
+                Span::styled("Library: ", Style::default().fg(Color::Yellow)),
+                Span::raw(lib),
+            ]));
+        }
+
+        if let Some(ref pipeline) = metadata.pipeline_tag {
+            lines.push(Line::from(vec![
+                Span::styled("Pipeline: ", Style::default().fg(Color::Yellow)),
+                Span::raw(pipeline),
+            ]));
+        }
+
+        if let Some(ref card_data) = metadata.card_data {
+            if let Some(ref base) = card_data.base_model {
+                lines.push(Line::from(vec![
+                    Span::styled("Base Model: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(base),
+                ]));
+            }
+            if let Some(ref license) = card_data.license {
+                lines.push(Line::from(vec![
+                    Span::styled("License: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(license),
+                ]));
+            }
+            if let Some(ref languages) = card_data.language {
+                lines.push(Line::from(vec![
+                    Span::styled("Languages: ", Style::default().fg(Color::Yellow)),
+                    Span::raw(languages.join(", ")),
+                ]));
+            }
+        }
+
+        let file_count = metadata.siblings.len();
+        let total_size: u64 = metadata.siblings.iter().filter_map(|f| f.size).sum();
+        lines.push(Line::from(vec![
+            Span::styled("Files: ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("{} ({})", file_count, format_size(total_size))),
+        ]));
+
+        if !metadata.tags.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Tags:", Style::default().fg(Color::Yellow)),
+            ]));
+            let tags_str = metadata.tags.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+            lines.push(Line::from(Span::raw(tags_str)));
+        }
+
+        lines
+    } else {
+        vec![Line::from("No model selected")]
+    };
+
+    let metadata_widget = Paragraph::new(metadata_content)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(meta_title)
+                .border_style(
+                    if input_mode == InputMode::Normal 
+                        && focused_pane == FocusedPane::ModelMetadata {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    }
+                ),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(metadata_widget, chunks[0]);
+
+    // Right side: File tree
+    render_file_tree_panel(frame, chunks[1], file_tree, file_tree_state, input_mode, focused_pane);
+}
+
+fn render_file_tree_panel(
+    frame: &mut Frame,
+    area: Rect,
+    file_tree: &Option<FileTreeNode>,
+    file_tree_state: &mut ListState,
+    input_mode: InputMode,
+    focused_pane: FocusedPane,
+) {
+    let tree_title = if file_tree.is_none() {
+        "Repository Files [Select a model to view]"
+    } else {
+        "Repository Files"
+    };
+
+    let tree_items: Vec<ListItem> = if let Some(tree) = file_tree {
+        flatten_tree(tree)
+            .into_iter()
+            .map(|node| {
+                let indent = "  ".repeat(node.depth);
+                let icon = if node.is_dir {
+                    if node.expanded { "▾ " } else { "▸ " }
+                } else {
+                    "  "
+                };
+
+                let mut spans = vec![
+                    Span::raw(indent),
+                    Span::styled(icon, Style::default().fg(Color::Cyan)),
+                ];
+
+                if node.is_dir {
+                    // Directory: show name, size, and file count
+                    spans.push(Span::styled(
+                        format!("{}/", node.name),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ));
+                    
+                    let size_str = node.size.map(format_size).unwrap_or_else(|| String::from("-"));
+                    let file_count = count_files(&node);
+                    
+                    spans.push(Span::raw(format!("  {}", size_str)));
+                    spans.push(Span::styled(
+                        format!(" ({} files)", file_count),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                } else {
+                    // File: show name and size
+                    let size_str = node.size.map(format_size).unwrap_or_else(|| String::from("-"));
+                    spans.push(Span::raw(node.name.clone()));
+                    spans.push(Span::raw(format!("  {}", size_str)));
+                }
+
+                ListItem::new(Line::from(spans))
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let tree_list = List::new(tree_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(tree_title)
+                .border_style(
+                    if input_mode == InputMode::Normal 
+                        && focused_pane == FocusedPane::FileTree {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    }
+                ),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(tree_list, area, file_tree_state);
+}
+
+/// Count total number of files within a node (recursive)
+fn count_files(node: &FileTreeNode) -> usize {
+    if node.is_dir {
+        node.children.iter().map(count_files).sum()
+    } else {
+        1
+    }
+}
+
+/// Flatten tree into a list for rendering
+fn flatten_tree(node: &FileTreeNode) -> Vec<FileTreeNode> {
+    let mut result = Vec::new();
+    flatten_tree_recursive(node, &mut result);
+    result
+}
+
+fn flatten_tree_recursive(node: &FileTreeNode, result: &mut Vec<FileTreeNode>) {
+    for child in &node.children {
+        result.push(child.clone());
+        if child.is_dir && child.expanded {
+            flatten_tree_recursive(child, result);
+        }
+    }
+}
+
+/// Public helper for flattening tree (used by events.rs for navigation)
+pub fn flatten_tree_for_navigation(node: &FileTreeNode) -> Vec<FileTreeNode> {
+    flatten_tree(node)
+}
+
+struct GgufPanelContext<'a> {
+    quantizations: &'a [QuantizationGroup],
+    quant_list_state: &'a mut ListState,
+    quant_file_list_state: &'a mut ListState,
+    loading_quants: bool,
+    input_mode: InputMode,
+    focused_pane: FocusedPane,
+    complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
+}
+
+fn render_gguf_panels(
+    frame: &mut Frame,
+    chunks: std::rc::Rc<[Rect]>,
+    ctx: GgufPanelContext,
+) {
+    let GgufPanelContext {
+        quantizations,
+        quant_list_state,
+        quant_file_list_state,
+        loading_quants,
+        input_mode,
+        focused_pane,
+        complete_downloads,
+    } = ctx;
+    // Left side: Quantization types
+    let quant_title = if loading_quants {
+        "Quantization Types [Loading...]"
+    } else if quantizations.is_empty() {
+        "Quantization Types [Select a model to view]"
+    } else {
+        "Quantization Types"
+    };
+
+    let quant_items: Vec<ListItem> = quantizations
+        .iter()
+        .map(|group| {
+            let size_str = format_size(group.total_size);
+            let is_downloaded = complete_downloads.contains_key(&group.files[0].filename);
+            
+            let mut spans = vec![
+                Span::raw(format!("{:>10}  ", size_str)),
+                Span::styled(
+                    format!("{:<14} ", group.quant_type),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+            ];
+            
+            if is_downloaded {
+                spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
+            } else {
+                let file_count = if group.files.len() > 1 {
+                    format!(" ({} files)", group.files.len())
+                } else {
+                    String::new()
+                };
+                spans.push(Span::styled(file_count, Style::default().fg(Color::DarkGray)));
+            }
+            
+            let content = Line::from(spans);
+            ListItem::new(content)
+        })
+        .collect();
+
+    let quant_list = List::new(quant_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(quant_title)
+                .border_style(
+                    if input_mode == InputMode::Normal 
+                        && focused_pane == FocusedPane::QuantizationGroups {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    }
+                ),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(quant_list, chunks[0], quant_list_state);
+
+    // Right side: Files for selected quantization
+    let selected_quant_idx = quant_list_state.selected();
+    let files_for_selected: Vec<QuantizationInfo> = if let Some(idx) = selected_quant_idx {
+        if idx < quantizations.len() {
+            quantizations[idx].files.clone()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let file_title = if files_for_selected.is_empty() {
+        "Files [Select a quantization type]"
+    } else {
+        "Files"
+    };
+
+    let file_items: Vec<ListItem> = files_for_selected
+        .iter()
+        .map(|file| {
+            let size_str = format_size(file.size);
+            let is_downloaded = complete_downloads.contains_key(&file.filename);
+            
+            let mut spans = vec![
+                Span::raw(format!("{:>10}  ", size_str)),
+            ];
+            
+            if is_downloaded {
+                spans.push(Span::styled(&file.filename, Style::default().fg(Color::Green)));
+                spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
+            } else {
+                spans.push(Span::styled(&file.filename, Style::default().fg(Color::White)));
+            }
+            
+            let content = Line::from(spans);
+            ListItem::new(content)
+        })
+        .collect();
+
+    let file_list = List::new(file_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(file_title)
+                .border_style(
+                    if input_mode == InputMode::Normal 
+                        && focused_pane == FocusedPane::QuantizationFiles {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    }
+                ),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+
+    frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
 }
 
 /// Render both download and verification progress bars
@@ -651,10 +1018,105 @@ pub fn render_download_path_popup(
     frame.render_widget(instructions, instructions_area);
 }
 
+pub fn render_auth_error_popup(
+    frame: &mut Frame,
+    model_url: &str,
+    has_token: bool,
+) {
+    // Calculate centered popup area
+    let popup_width = 70.min(frame.area().width.saturating_sub(4));
+    let popup_height = if has_token { 13 } else { 17 };
+    let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
+    let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
+    
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+    
+    // Clear the popup area first to remove any underlying content
+    frame.render_widget(Clear, popup_area);
+    
+    // Render popup background
+    let popup_block = Block::default()
+        .borders(Borders::ALL)
+        .title("Authentication Required")
+        .style(Style::default().fg(Color::Yellow).bg(Color::Black));
+    
+    frame.render_widget(popup_block, popup_area);
+    
+    // Render message
+    let message_area = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(4),
+        height: popup_area.height.saturating_sub(3),
+    };
+    
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "This model requires authentication to download.",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("Steps to access this model:", Style::default().fg(Color::Cyan))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("1. ", Style::default().fg(Color::Yellow)),
+            Span::raw("Visit: "),
+            Span::styled(model_url, Style::default().fg(Color::Blue)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("2. ", Style::default().fg(Color::Yellow)),
+            Span::raw("Sign the model usage agreement/waiver"),
+        ]),
+        Line::from(""),
+    ];
+    
+    if has_token {
+        lines.push(Line::from(vec![
+            Span::styled("3. ", Style::default().fg(Color::Yellow)),
+            Span::raw("Ensure your token has access to this model"),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("3. ", Style::default().fg(Color::Yellow)),
+            Span::raw("Create a HuggingFace token at:"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled("https://huggingface.co/settings/tokens", Style::default().fg(Color::Blue)),
+        ]));
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("4. ", Style::default().fg(Color::Yellow)),
+            Span::raw("Press "),
+            Span::styled("'o'", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(" and add token in Options"),
+        ]));
+    }
+    
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press ESC or Enter to dismiss",
+        Style::default().fg(Color::DarkGray),
+    )));
+    
+    let message = Paragraph::new(lines)
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: false });
+    
+    frame.render_widget(message, message_area);
+}
+
 pub fn render_options_popup(
     frame: &mut Frame,
     options: &crate::models::AppOptions,
     directory_input: &tui_input::Input,
+    token_input: &tui_input::Input,
 ) {
     let popup_width = 64.min(frame.area().width.saturating_sub(4));
     let popup_height = 26;
@@ -675,15 +1137,26 @@ pub fn render_options_popup(
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
     
-    // Render 13 fields with category headers
+    // Render 14 fields with category headers
     let fields = vec![
-        // General (index 0)
+        // General (indices 0-1)
         ("Default Directory:", if options.editing_directory { 
             directory_input.value().to_string() 
         } else { 
             options.default_directory.clone() 
         }),
-        // Download (indices 1-8)
+        ("HF Token (optional):", if options.editing_token {
+            token_input.value().to_string()
+        } else if let Some(token) = &options.hf_token {
+            if token.is_empty() {
+                "[Not set]".to_string()
+            } else {
+                "•".repeat(token.len().min(20))
+            }
+        } else {
+            "[Not set]".to_string()
+        }),
+        // Download (indices 2-9)
         ("Concurrent Threads:", options.concurrent_threads.to_string()),
         ("Target Number of Chunks:", options.num_chunks.to_string()),
         ("Min Chunk Size:", format_size(options.min_chunk_size)),
@@ -692,7 +1165,7 @@ pub fn render_options_popup(
         ("Download Timeout (sec):", options.download_timeout_secs.to_string()),
         ("Retry Delay (sec):", options.retry_delay_secs.to_string()),
         ("Progress Update Interval (ms):", options.progress_update_interval_ms.to_string()),
-        // Verification (indices 9-12)
+        // Verification (indices 10-13)
         ("Enable Verification:", if options.verification_on_completion { "Enabled".to_string() } else { "Disabled".to_string() }),
         ("Concurrent Verifications:", options.concurrent_verifications.to_string()),
         ("Verification Buffer Size:", format_size(options.verification_buffer_size as u64)),
@@ -702,8 +1175,8 @@ pub fn render_options_popup(
     // Render category headers
     let category_offsets = [
         (0, "General"),
-        (1, "Download"),
-        (9, "Verification"),
+        (2, "Download"),
+        (10, "Verification"),
     ];
     
     let mut y_offset = 1u16;
@@ -753,9 +1226,12 @@ pub fn render_options_popup(
             let widget = Paragraph::new(text).style(style);
             frame.render_widget(widget, area);
             
-            // Show cursor when editing directory
+            // Show cursor when editing directory or token
             if options.editing_directory && field_idx == 0 {
                 let cursor_x = area.x + label.len() as u16 + 1 + directory_input.visual_cursor() as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            } else if options.editing_token && field_idx == 1 {
+                let cursor_x = area.x + label.len() as u16 + 1 + token_input.visual_cursor() as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             }
             
@@ -770,6 +1246,13 @@ pub fn render_options_popup(
         vec![
             "",
             "Type to edit directory path",
+            "Enter: Save | ESC: Cancel",
+            "",
+        ]
+    } else if options.editing_token {
+        vec![
+            "",
+            "Type to edit HF token (or clear to remove)",
             "Enter: Save | ESC: Cancel",
             "",
         ]

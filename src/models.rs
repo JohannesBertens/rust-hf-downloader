@@ -21,6 +21,58 @@ pub struct TrendingResponse {
     pub models: Vec<ModelInfo>,
 }
 
+/// Extended model metadata from /api/models/{model_id}
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelMetadata {
+    #[serde(rename = "id")]
+    pub model_id: String,
+    #[serde(default)]
+    pub library_name: Option<String>,
+    #[serde(default)]
+    pub pipeline_tag: Option<String>,
+    #[serde(default)]
+    pub card_data: Option<ModelCardData>,
+    #[serde(default)]
+    pub siblings: Vec<RepoFile>,  // All files in the repo
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelCardData {
+    #[serde(default)]
+    pub base_model: Option<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub language: Option<Vec<String>>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub datasets: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoFile {
+    pub rfilename: String,  // API uses 'rfilename' for relative path
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub lfs: Option<LfsInfo>,  // Reuse existing LfsInfo struct
+}
+
+/// Tree node for hierarchical file display
+#[derive(Debug, Clone)]
+pub struct FileTreeNode {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: Option<u64>,
+    pub children: Vec<FileTreeNode>,
+    pub expanded: bool,
+    pub depth: usize,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LfsInfo {
     pub oid: String,
@@ -46,6 +98,13 @@ pub struct QuantizationInfo {
     pub filename: String,
     pub size: u64,
     pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuantizationGroup {
+    pub quant_type: String,
+    pub files: Vec<QuantizationInfo>,  // All files in this quantization type
+    pub total_size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -98,12 +157,13 @@ pub struct DownloadRegistry {
     pub downloads: Vec<DownloadMetadata>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PopupMode {
     None,
     DownloadPath,
     ResumeDownload,
     Options,
+    AuthError { model_url: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,10 +175,20 @@ pub enum InputMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusedPane {
     Models,
-    Quantizations,
+    QuantizationGroups,
+    QuantizationFiles,
+    ModelMetadata,
+    FileTree,
 }
 
-pub type QuantizationCache = HashMap<String, Vec<QuantizationInfo>>;
+/// Model display mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelDisplayMode {
+    Gguf,      // Show quantizations (current behavior)
+    Standard,  // Show metadata + file tree
+}
+
+pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
 pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
 
 /// Progress tracking for an active verification operation
@@ -148,6 +218,7 @@ pub struct VerificationQueueItem {
 pub struct AppOptions {
     // General
     pub default_directory: String,
+    pub hf_token: Option<String>,
     
     // Download Settings
     pub concurrent_threads: usize,
@@ -170,13 +241,17 @@ pub struct AppOptions {
     pub selected_field: usize,
     #[serde(skip)]
     pub editing_directory: bool,
+    #[serde(skip)]
+    pub editing_token: bool,
 }
 
 impl Default for AppOptions {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let hf_token = std::env::var("HF_TOKEN").ok().filter(|s| !s.is_empty());
         Self {
             default_directory: format!("{}/models", home),
+            hf_token,
             concurrent_threads: 8,
             num_chunks: 20,
             min_chunk_size: 5 * 1024 * 1024,
@@ -191,6 +266,7 @@ impl Default for AppOptions {
             verification_update_interval: 100,
             selected_field: 0,
             editing_directory: false,
+            editing_token: false,
         }
     }
 }

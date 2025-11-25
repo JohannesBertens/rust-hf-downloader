@@ -5,15 +5,16 @@ impl App {
     /// Manually verify a downloaded file's SHA256 hash
     pub async fn verify_downloaded_file(&mut self) {
         let models = self.models.lock().await.clone();
-        let quantizations = self.quantizations.lock().await.clone();
+        let quant_groups = self.quantizations.lock().await.clone();
         let complete_downloads = self.complete_downloads.lock().await.clone();
         
         let model_selected = self.list_state.selected();
         let quant_selected = self.quant_list_state.selected();
         
         if let (Some(model_idx), Some(quant_idx)) = (model_selected, quant_selected) {
-            if model_idx < models.len() && quant_idx < quantizations.len() {
-                let quant = &quantizations[quant_idx];
+            if model_idx < models.len() && quant_idx < quant_groups.len() {
+                let group = &quant_groups[quant_idx];
+                let quant = &group.files[0]; // Get first file from group
                 
                 // Check if file is marked as downloaded
                 if !complete_downloads.contains_key(&quant.filename) {

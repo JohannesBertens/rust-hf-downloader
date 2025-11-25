@@ -26,6 +26,10 @@ impl App {
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
         
+        // Set initial status and render UI once before loading models
+        self.status = "Loading trending models...".to_string();
+        terminal.draw(|frame| self.draw(frame))?;
+        
         // Load trending models on startup
         self.load_trending_models().await;
         
@@ -56,7 +60,7 @@ impl App {
         let verification_queue_size = self.verification_queue_size.clone();
         tokio::spawn(async move {
             let mut rx = download_rx.lock().await;
-            while let Some((model_id, filename, path, sha256)) = rx.recv().await {
+            while let Some((model_id, filename, path, sha256, hf_token)) = rx.recv().await {
                 // Decrement queue size when we start processing
                 {
                     let mut queue_size = download_queue_size.lock().await;
@@ -72,12 +76,26 @@ impl App {
                     expected_sha256: sha256,
                     verification_queue: verification_queue.clone(),
                     verification_queue_size: verification_queue_size.clone(),
+                    hf_token,
                 }).await;
             }
         });
         
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
+            
+            // Check if we need to search for models after UI render
+            if self.needs_search_models {
+                self.needs_search_models = false;
+                self.search_models().await;
+            }
+            
+            // Check if we need to load quantizations after UI render
+            if self.needs_load_quantizations {
+                self.needs_load_quantizations = false;
+                self.load_quantizations().await;
+            }
+            
             self.handle_crossterm_events().await?;
         }
         Ok(())
@@ -98,6 +116,14 @@ impl App {
             self.complete_downloads.lock().await.clone()
         });
         
+        let model_metadata = futures::executor::block_on(async {
+            self.model_metadata.lock().await.clone()
+        });
+        
+        let file_tree = futures::executor::block_on(async {
+            self.file_tree.lock().await.clone()
+        });
+        
         // Render main UI
         crate::ui::render::render_ui(frame, crate::ui::render::RenderParams {
             input: &self.input,
@@ -106,6 +132,7 @@ impl App {
             list_state: &mut self.list_state,
             loading: self.loading,
             quantizations: &quantizations,
+            quant_file_list_state: &mut self.quant_file_list_state,
             quant_list_state: &mut self.quant_list_state,
             loading_quants: self.loading_quants,
             focused_pane: self.focused_pane,
@@ -113,6 +140,10 @@ impl App {
             status: &self.status,
             selection_info: &self.selection_info,
             complete_downloads: &complete_downloads,
+            display_mode: self.display_mode,
+            model_metadata: &model_metadata,
+            file_tree: &file_tree,
+            file_tree_state: &mut self.file_tree_state,
         });
         
         // Render both download and verification progress bars
@@ -142,7 +173,11 @@ impl App {
                 crate::ui::render::render_download_path_popup(frame, &self.download_path_input);
             }
             PopupMode::Options => {
-                crate::ui::render::render_options_popup(frame, &self.options, &self.options_directory_input);
+                crate::ui::render::render_options_popup(frame, &self.options, &self.options_directory_input, &self.options_token_input);
+            }
+            PopupMode::AuthError { ref model_url } => {
+                let has_token = self.options.hf_token.as_ref().is_some_and(|t| !t.is_empty());
+                crate::ui::render::render_auth_error_popup(frame, model_url, has_token);
             }
             PopupMode::None => {}
         }
@@ -154,7 +189,14 @@ impl App {
         {
             let mut rx = self.status_rx.lock().await;
             while let Ok(msg) = rx.try_recv() {
-                self.status = msg;
+                // Check for authentication error
+                if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
+                    let model_url = format!("https://huggingface.co/{}", model_id);
+                    self.popup_mode = PopupMode::AuthError { model_url };
+                    self.status = format!("Authentication required for {}", model_id);
+                } else {
+                    self.status = msg;
+                }
             }
         }
         

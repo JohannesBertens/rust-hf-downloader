@@ -18,6 +18,7 @@ pub struct DownloadParams {
     pub expected_sha256: Option<String>,
     pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     pub verification_queue_size: Arc<Mutex<usize>>,
+    pub hf_token: Option<String>,
 }
 
 /// Parameters for chunked download
@@ -30,6 +31,7 @@ struct ChunkedDownloadParams<'a> {
     complete_downloads: &'a Arc<Mutex<CompleteDownloads>>,
     filename: &'a str,
     expected_sha256: &'a Option<String>,
+    hf_token: &'a Option<String>,
 }
 
 pub fn sanitize_path_component(component: &str) -> Option<String> {
@@ -43,8 +45,9 @@ pub fn sanitize_path_component(component: &str) -> Option<String> {
         return None;
     }
     
-    // Remove any leading/trailing whitespace and dots
-    let trimmed = component.trim().trim_start_matches('.').trim_end_matches('.');
+    // Remove leading/trailing whitespace, but preserve leading dots (for dotfiles like .gitattributes)
+    // Only trim trailing dots (can cause issues on Windows)
+    let trimmed = component.trim().trim_end_matches('.');
     
     if trimmed.is_empty() {
         return None;
@@ -133,6 +136,7 @@ pub async fn start_download(params: DownloadParams) {
         expected_sha256,
         verification_queue,
         verification_queue_size,
+        hf_token,
     } = params;
     
     // Notify user that download is starting
@@ -244,17 +248,19 @@ pub async fn start_download(params: DownloadParams) {
             complete_downloads: &complete_downloads,
             filename: &filename,
             expected_sha256: &expected_sha256,
+            hf_token: &hf_token,
         };
         
         match download_chunked(chunked_params, &model_id).await {
-            Ok((final_size, expected_size, verification_item)) => {
+            Ok((final_size, expected_size, verification_item, successful_url)) => {
                 // Verify the download is complete
                 if final_size == expected_size && expected_size > 0 {
-                    // Update registry: mark as complete
+                    // Update registry: mark as complete and update URL if it changed (raw fallback)
                     let mut registry = registry::load_registry();
-                    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url || d.url == successful_url) {
                         entry.status = DownloadStatus::Complete;
                         entry.downloaded_size = final_size;
+                        entry.url = successful_url.clone(); // Update with successful URL
                         
                         // Update in-memory complete downloads map
                         let mut complete = complete_downloads.lock().await;
@@ -296,6 +302,30 @@ pub async fn start_download(params: DownloadParams) {
                 continue;
             }
             Err(e) => {
+                // Check for 401 Unauthorized errors
+                if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
+                    if reqwest_err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+                        let _ = status_tx.send(format!("AUTH_ERROR:{}", model_id));
+                        
+                        // Delete incomplete file
+                        if incomplete_path.exists() {
+                            let _ = tokio::fs::remove_file(&incomplete_path).await;
+                        }
+                        
+                        // Update registry with failed state
+                        let mut registry = registry::load_registry();
+                        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                            entry.status = DownloadStatus::Incomplete;
+                            entry.downloaded_size = 0;
+                        }
+                        registry::save_registry(&registry);
+                        
+                        let mut prog = progress.lock().await;
+                        *prog = None;
+                        return;
+                    }
+                }
+                
                 let _ = status_tx.send(format!("Error: Download failed after retries: {}", e));
                 
                 // Delete incomplete file
@@ -375,31 +405,54 @@ fn calculate_chunk_size(file_size: u64) -> usize {
 async fn download_chunked(
     params: ChunkedDownloadParams<'_>,
     model_id: &str,
-) -> Result<(u64, u64, Option<VerificationQueueItem>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(u64, u64, Option<VerificationQueueItem>, String), Box<dyn std::error::Error + Send + Sync>> {
     let ChunkedDownloadParams {
         url,
         incomplete_path,
         final_path,
         progress,
-        status_tx: _status_tx,
+        status_tx,
         complete_downloads: _complete_downloads,
         filename,
         expected_sha256,
+        hf_token,
     } = params;
     
     let local_path_str = final_path.to_string_lossy().to_string();
     let timeout_secs = DOWNLOAD_CONFIG.download_timeout_secs.load(Ordering::Relaxed);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()?;
+    let client = crate::http_client::build_client_with_token(
+        hf_token.as_ref(),
+        Some(std::time::Duration::from_secs(timeout_secs))
+    )?;
     
     // Step 1: Get file size using a range request
-    let response = client
+    // Try the primary URL first, fallback to raw endpoint on 404
+    let (response, final_url) = match client
         .get(url)
         .header("Range", "bytes=0-0")
         .send()
-        .await?
-        .error_for_status()?;
+        .await
+    {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(r) => (r, url.to_string()),
+            Err(e) if e.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
+                // Try raw endpoint as fallback
+                let raw_url = url.replace("/resolve/main/", "/raw/main/");
+                let _ = status_tx.send(format!("404 error, trying raw endpoint for: {}", filename));
+                
+                let raw_response = client
+                    .get(&raw_url)
+                    .header("Range", "bytes=0-0")
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                
+                (raw_response, raw_url)
+            }
+            Err(e) => return Err(Box::new(e)),
+        }
+        Err(e) => return Err(Box::new(e)),
+    };
     
     let total_size = if let Some(content_range) = response.headers().get("content-range") {
         // Parse "bytes 0-0/TOTAL" to get TOTAL
@@ -488,7 +541,7 @@ async fn download_chunked(
         let start = chunk_id as u64 * chunk_size as u64;
         let stop = std::cmp::min(start + chunk_size as u64 - 1, total_size - 1);
         let client = client.clone();
-        let url = url.to_string();
+        let download_url = final_url.clone();
         let incomplete_path = incomplete_path.clone();
         let semaphore = semaphore.clone();
         let progress_downloaded = progress_downloaded.clone();
@@ -524,7 +577,7 @@ async fn download_chunked(
             // Download this chunk with progress tracking
             let result = download_chunk_with_progress(
                 &client,
-                &url,
+                &download_url,
                 &incomplete_path,
                 start,
                 stop,
@@ -590,7 +643,7 @@ async fn download_chunked(
             is_manual: false,
         });
     
-    Ok((total_size, total_size, verification_item))
+    Ok((total_size, total_size, verification_item, final_url))
 }
 
 #[allow(clippy::too_many_arguments)]

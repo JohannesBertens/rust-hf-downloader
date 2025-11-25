@@ -7,8 +7,12 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tui_input::Input;
 
+/// Type alias for download message tuple
+/// Tuple: (model_id, filename, path, sha256, hf_token)
+pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>);
+
 /// Type alias for download receiver to reduce complexity
-pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<(String, String, PathBuf, Option<String>)>>>;
+pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
 
 /// Main application state container
 #[derive(Debug)]
@@ -25,13 +29,14 @@ pub struct App {
     pub error: Option<String>,
     pub status: String,  // Status messages (downloads, verification, etc.)
     pub selection_info: String,  // Model selection info (name + URL)
-    pub quantizations: Arc<Mutex<Vec<QuantizationInfo>>>,
+    pub quantizations: Arc<Mutex<Vec<QuantizationGroup>>>,
+    pub quant_file_list_state: ListState,
     pub loading_quants: bool,
     pub quant_cache: Arc<Mutex<QuantizationCache>>,
     pub popup_mode: PopupMode,
     pub download_path_input: Input,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub download_tx: mpsc::UnboundedSender<(String, String, PathBuf, Option<String>)>,
+    pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
     pub download_rx: DownloadReceiver,
     pub download_queue_size: Arc<Mutex<usize>>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
@@ -44,6 +49,15 @@ pub struct App {
     pub verification_queue_size: Arc<Mutex<usize>>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
+    pub options_token_input: Input,
+    // Non-GGUF model support
+    pub model_metadata: Arc<Mutex<Option<crate::models::ModelMetadata>>>,
+    pub file_tree: Arc<Mutex<Option<crate::models::FileTreeNode>>>,
+    pub file_tree_state: ListState,
+    pub display_mode: crate::models::ModelDisplayMode,
+    // Flags to trigger deferred loading on next loop iteration
+    pub needs_load_quantizations: bool,
+    pub needs_search_models: bool,
 }
 
 impl Default for App {
@@ -60,6 +74,8 @@ impl App {
         
         let quant_list_state = ListState::default();
         
+        let quant_file_list_state = ListState::default();
+        
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         
@@ -67,6 +83,8 @@ impl App {
         let options = crate::config::load_config();
         let mut download_path_input = Input::default();
         download_path_input = download_path_input.with_value(options.default_directory.clone());
+        
+        let file_tree_state = ListState::default();
         
         Self {
             running: false,
@@ -79,9 +97,10 @@ impl App {
             quant_list_state,
             loading: false,
             error: None,
-            status: "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string(),
+            status: "Press '/' to search, Tab to switch panes, ←/→ for sub-lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string(),
             selection_info: String::new(),
             quantizations: Arc::new(Mutex::new(Vec::new())),
+            quant_file_list_state,
             loading_quants: false,
             quant_cache: Arc::new(Mutex::new(HashMap::new())),
             popup_mode: PopupMode::None,
@@ -100,6 +119,14 @@ impl App {
             verification_queue_size: Arc::new(Mutex::new(0)),
             options,
             options_directory_input: Input::default(),
+            options_token_input: Input::default(),
+            // Non-GGUF model support
+            model_metadata: Arc::new(Mutex::new(None)),
+            file_tree: Arc::new(Mutex::new(None)),
+            file_tree_state,
+            display_mode: crate::models::ModelDisplayMode::Gguf,
+            needs_load_quantizations: false,
+            needs_search_models: false,
         }
     }
 
