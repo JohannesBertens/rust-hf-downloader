@@ -727,7 +727,12 @@ let response = client
 
 ## Version History
 
-- **v0.9.5** (Current): Authentication support and code refactoring
+- **v0.9.6** (Current): Rust 1.75.0 compatibility fix
+  - **Compatibility fix**: Replaced `is_multiple_of()` with modulo operator for Rust 1.75.0 support
+  - **Target platform**: Ubuntu 22.04 LTS with default Rust toolchain
+  - **Impact**: Fixes compilation error in verification module
+
+- **v0.9.5**: Authentication support and code refactoring
   - **HuggingFace authentication**: Token-based authentication for gated models
   - **401 error popup**: Clear guidance when authentication is required
   - **New module**: `src/http_client.rs` for authenticated HTTP requests
@@ -908,5 +913,5 @@ while let Some(item) = stream.next().await {
 ---
 
 **Last Updated**: 2025-11-25  
-**Version**: 0.9.0  
+**Version**: 0.9.6  
 **Maintainer**: Johannes Bertens
