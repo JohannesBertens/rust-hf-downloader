@@ -1,4 +1,4 @@
-use crate::api::{fetch_models, fetch_model_files, fetch_multipart_sha256s, parse_multipart_filename};
+use crate::api::{fetch_models, fetch_model_files, fetch_multipart_sha256s, parse_multipart_filename, fetch_trending_models};
 use crate::download::{start_download, validate_and_sanitize_path};
 use crate::models::*;
 use crate::registry;
@@ -73,7 +73,7 @@ impl App {
             running: false,
             event_stream: EventStream::default(),
             input: Input::default(),
-            input_mode: InputMode::Editing,  // Start in editing mode for immediate search
+            input_mode: InputMode::Normal,  // Start in normal mode
             focused_pane: FocusedPane::Models,
             models: Arc::new(Mutex::new(Vec::new())),
             list_state,
@@ -140,6 +140,9 @@ impl App {
         
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
+        
+        // Load trending models on startup
+        self.load_trending_models().await;
         
         // Spawn verification worker
         let verification_queue = self.verification_queue.clone();
@@ -564,6 +567,35 @@ impl App {
             None => 0,
         };
         self.quant_list_state.select(Some(i));
+    }
+
+    async fn load_trending_models(&mut self) {
+        self.loading = true;
+        self.error = None;
+        
+        let models = self.models.clone();
+        
+        match fetch_trending_models().await {
+            Ok(results) => {
+                let mut models_lock = models.lock().await;
+                *models_lock = results;
+                self.loading = false;
+                self.list_state.select(Some(0));
+                self.status = format!("Loaded {} trending models", models_lock.len());
+                drop(models_lock);
+                
+                // Load quantizations for first result
+                self.load_quantizations().await;
+                
+                // Start background prefetch for all models
+                self.start_background_prefetch();
+            }
+            Err(e) => {
+                self.loading = false;
+                self.error = Some(format!("Failed to fetch trending models: {}", e));
+                self.status = "Failed to load trending models".to_string();
+            }
+        }
     }
 
     async fn search_models(&mut self) {

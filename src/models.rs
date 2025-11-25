@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
-    #[serde(rename = "modelId")]
+    #[serde(alias = "modelId")]
     pub id: String,
     pub author: Option<String>,
     #[serde(default)]
@@ -14,6 +14,12 @@ pub struct ModelInfo {
     pub tags: Vec<String>,
     #[serde(rename = "lastModified", default)]
     pub last_modified: Option<String>,
+}
+
+/// Response wrapper for trending models API
+#[derive(Debug, Clone, Deserialize)]
+pub struct TrendingResponse {
+    pub models: Vec<ModelInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
