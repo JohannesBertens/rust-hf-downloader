@@ -175,11 +175,9 @@ pub async fn start_download(params: DownloadParams) {
         }
     };
     
-    // Extract just the filename (last part) for local storage
-    // This prevents duplicate quantization folders when the remote file is in "Q2_K_L/model.gguf"
-    // but we want to store it locally as "base_path/model.gguf" since base_path already includes the quantization folder
-    let local_filename = sanitized_filename.rsplit('/').next().unwrap_or(&sanitized_filename);
-    let final_path = canonical_base.join(local_filename);
+    // Build the final path preserving the directory structure from the filename
+    // The filename may contain subdirectories (e.g., "tokenizer/config.json", "Q2_K_L/model.gguf")
+    let final_path = canonical_base.join(&sanitized_filename);
     
     // Ensure final path is still under base directory
     if let Some(parent) = final_path.parent() {

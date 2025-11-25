@@ -164,6 +164,7 @@ async fn calculate_sha256_with_progress(
         
         // Update progress at configured interval to avoid excessive mutex locks
         let update_interval = VERIFICATION_CONFIG.update_interval_iterations.load(Ordering::Relaxed);
+        #[allow(clippy::manual_is_multiple_of)] // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
         if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(last_update).as_secs_f64();

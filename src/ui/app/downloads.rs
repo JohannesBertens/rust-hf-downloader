@@ -419,14 +419,16 @@ impl App {
                     *queue_size += num_files;
                 }
                 
-                // Calculate model path (parent directory where all files will be saved)
-                let model_path = if let Ok(path) = validate_and_sanitize_path(&base_path, &model.id, &files_to_download[0].rfilename) {
-                    path.parent().unwrap_or(&path).to_path_buf()
+                // Calculate the model root directory (base/author/model_name)
+                // This is where all files will be organized with their subdirectory structure
+                let model_parts: Vec<&str> = model.id.split('/').collect();
+                let model_root = if model_parts.len() == 2 {
+                    PathBuf::from(&base_path).join(model_parts[0]).join(model_parts[1])
                 } else {
                     PathBuf::from(&base_path)
                 };
                 
-                // Send all download requests
+                // Send all download requests - each file will preserve its subdirectory structure
                 let mut success_count = 0;
                 let hf_token = self.options.hf_token.clone();
                 for file in &files_to_download {
@@ -435,7 +437,7 @@ impl App {
                     if self.download_tx.send((
                         model.id.clone(),
                         file.rfilename.clone(),
-                        model_path.clone(),
+                        model_root.clone(),
                         sha256,
                         hf_token.clone(),
                     )).is_ok() {
@@ -444,7 +446,7 @@ impl App {
                 }
                 
                 if success_count > 0 {
-                    self.status = format!("Queued {} files from {} to {}", success_count, model.id, model_path.display());
+                    self.status = format!("Queued {} files from {} to {}", success_count, model.id, model_root.display());
                 } else {
                     self.error = Some("Failed to start downloads".to_string());
                 }

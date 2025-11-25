@@ -270,6 +270,15 @@ Key security features in v0.6.0:
 
 ## Changelog
 
+### Version 0.9.7 (2025-11-25)
+- **Critical Fix**: Fixed file path handling bugs causing incorrect file locations
+- **Bug Fix #1**: Download worker now preserves subdirectory structure in filenames
+- **Bug Fix #2**: Repository downloads calculate correct base path for each file
+- **Compatibility**: Added clippy allow attribute for Rust 1.75.0 (Ubuntu 22.04)
+- Files now save to correct locations: root files in model root, subdirectory files in subdirectories
+- Example: `tokenizer/config.json` → `maya1/tokenizer/config.json` (not `maya1/config.json`)
+- See [changelog/RELEASE_NOTES_0.9.7.md](changelog/RELEASE_NOTES_0.9.7.md) for full details
+
 ### Version 0.9.5 (2025-11-25)
 - **Feature**: HuggingFace token authentication for gated models
 - **401 Error Popup**: Clear guidance when authentication is required with model URL and setup instructions
