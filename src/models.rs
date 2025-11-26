@@ -164,12 +164,32 @@ pub enum PopupMode {
     ResumeDownload,
     Options,
     AuthError { model_url: String },
+    SearchPopup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
+    #[allow(dead_code)]  // Kept for potential future use (inline editing)
     Editing,
+}
+
+/// Sort field options for model search
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SortField {
+    #[default]
+    Downloads,
+    Likes,
+    Modified,
+    Name,
+}
+
+/// Sort direction (ascending or descending)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SortDirection {
+    Ascending,
+    #[default]
+    Descending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 use super::state::App;
-use crate::api::{fetch_models, fetch_model_files, fetch_trending_models, fetch_model_metadata, has_gguf_files, build_file_tree};
+use crate::api::{fetch_model_files, fetch_trending_models, fetch_model_metadata, has_gguf_files, build_file_tree};
 use crate::models::ModelDisplayMode;
 
 impl App {
@@ -47,15 +47,35 @@ impl App {
         
         let models = self.models.clone();
         let token = self.options.hf_token.as_ref();
+        let sort_field = self.sort_field;
+        let sort_direction = self.sort_direction;
+        let min_downloads = self.filter_min_downloads;
+        let min_likes = self.filter_min_likes;
         
-        match fetch_models(&query, token).await {
+        // Use fetch_models_filtered with current sort and filter settings
+        match crate::api::fetch_models_filtered(
+            &query,
+            sort_field,
+            sort_direction,
+            min_downloads,
+            min_likes,
+            token
+        ).await {
             Ok(results) => {
                 let has_results = !results.is_empty();
                 let mut models_lock = models.lock().await;
                 *models_lock = results;
                 self.loading = false;
                 self.list_state.select(Some(0));
-                self.status = format!("Found {} models", models_lock.len());
+                
+                // Show filter count in status if filters are active
+                let filter_status = if min_downloads > 0 || min_likes > 0 {
+                    " (filtered from 100)".to_string()
+                } else {
+                    String::new()
+                };
+                self.status = format!("Found {} models{}", models_lock.len(), filter_status);
+                
                 drop(models_lock);
                 
                 // Trigger load for first result if we have results

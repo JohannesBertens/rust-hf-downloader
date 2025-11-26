@@ -9,7 +9,10 @@ impl App {
         self.error = None;
 
         // Handle popup input separately
-        if self.popup_mode == PopupMode::Options {
+        if self.popup_mode == PopupMode::SearchPopup {
+            self.handle_search_popup_input(key).await;
+            return;
+        } else if self.popup_mode == PopupMode::Options {
             self.handle_options_popup_input(key).await;
             return;
         } else if self.popup_mode == PopupMode::ResumeDownload {
@@ -35,8 +38,10 @@ impl App {
             (_, KeyCode::Char('q'))
             | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
             (_, KeyCode::Char('/')) => {
-                self.input_mode = InputMode::Editing;
-                self.status = "Enter search query, press Enter to search, ESC to cancel".to_string();
+                // Open search popup instead of inline editing
+                self.popup_mode = PopupMode::SearchPopup;
+                self.input.reset(); // Clear previous search
+                self.status = "Search Models".to_string();
             }
             (_, KeyCode::Char('d')) => {
                 // Allow download from Models pane (for non-GGUF), QuantizationGroups, or QuantizationFiles
@@ -53,6 +58,71 @@ impl App {
             }
             (_, KeyCode::Char('o')) => {
                 self.popup_mode = PopupMode::Options;
+            }
+            (_, KeyCode::Char('s')) => {
+                // Cycle sort field: Downloads → Likes → Modified → Name → Downloads
+                self.sort_field = match self.sort_field {
+                    crate::models::SortField::Downloads => crate::models::SortField::Likes,
+                    crate::models::SortField::Likes => crate::models::SortField::Modified,
+                    crate::models::SortField::Modified => crate::models::SortField::Name,
+                    crate::models::SortField::Name => crate::models::SortField::Downloads,
+                };
+                
+                // Re-fetch with new sort
+                self.clear_search_results();
+                self.needs_search_models = true;
+                
+                self.status = format!("Sort by: {:?}", self.sort_field);
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+                // Toggle sort direction
+                self.sort_direction = match self.sort_direction {
+                    crate::models::SortDirection::Ascending => crate::models::SortDirection::Descending,
+                    crate::models::SortDirection::Descending => crate::models::SortDirection::Ascending,
+                };
+                
+                // Re-fetch with new direction
+                self.clear_search_results();
+                self.needs_search_models = true;
+                
+                let arrow = match self.sort_direction {
+                    crate::models::SortDirection::Ascending => "▲",
+                    crate::models::SortDirection::Descending => "▼",
+                };
+                self.status = format!("Sort direction: {:?} {}", self.sort_direction, arrow);
+            }
+            (_, KeyCode::Char('f')) => {
+                // Cycle focused filter field
+                self.focused_filter_field = (self.focused_filter_field + 1) % 3;
+                let field_name = match self.focused_filter_field {
+                    0 => "Sort",
+                    1 => "Min Downloads",
+                    2 => "Min Likes",
+                    _ => unreachable!(),
+                };
+                self.status = format!("Focused filter: {}", field_name);
+            }
+            (_, KeyCode::Char('+')) if self.focused_pane == FocusedPane::Models => {
+                // Increment focused filter (only in Models pane to avoid conflicts)
+                self.modify_focused_filter(1);
+            }
+            (_, KeyCode::Char('-')) if self.focused_pane == FocusedPane::Models => {
+                // Decrement focused filter (only in Models pane to avoid conflicts)
+                self.modify_focused_filter(-1);
+            }
+            (_, KeyCode::Char('r')) => {
+                // Reset all filters to defaults
+                self.sort_field = crate::models::SortField::default();
+                self.sort_direction = crate::models::SortDirection::default();
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 0;
+                self.focused_filter_field = 0;
+                
+                // Re-fetch with reset filters
+                self.clear_search_results();
+                self.needs_search_models = true;
+                
+                self.status = "Filters reset to defaults".to_string();
             }
             (_, KeyCode::Tab) => {
                 self.toggle_focus();
@@ -137,6 +207,45 @@ impl App {
                         self.toggle_file_tree_expansion();
                     }
                 }
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle keyboard input in Search popup
+    async fn handle_search_popup_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.input_mode = InputMode::Normal;
+                self.popup_mode = PopupMode::None;
+                // Clear results immediately before searching
+                self.clear_search_results();
+                self.needs_search_models = true;
+            }
+            KeyCode::Esc => {
+                self.popup_mode = PopupMode::None;
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char(c) => {
+                self.input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+            KeyCode::Backspace => {
+                self.input.handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            KeyCode::Delete => {
+                self.input.handle(tui_input::InputRequest::DeleteNextChar);
+            }
+            KeyCode::Left => {
+                self.input.handle(tui_input::InputRequest::GoToPrevChar);
+            }
+            KeyCode::Right => {
+                self.input.handle(tui_input::InputRequest::GoToNextChar);
+            }
+            KeyCode::Home => {
+                self.input.handle(tui_input::InputRequest::GoToStart);
+            }
+            KeyCode::End => {
+                self.input.handle(tui_input::InputRequest::GoToEnd);
             }
             _ => {}
         }
@@ -526,6 +635,56 @@ impl App {
                 self.quant_file_list_state.select(Some(i));
             }
         }
+    }
+
+    /// Modify focused filter field value
+    pub fn modify_focused_filter(&mut self, delta: i32) {
+        match self.focused_filter_field {
+            0 => {
+                // Sort field cycling
+                if delta > 0 {
+                    self.sort_field = match self.sort_field {
+                        crate::models::SortField::Downloads => crate::models::SortField::Likes,
+                        crate::models::SortField::Likes => crate::models::SortField::Modified,
+                        crate::models::SortField::Modified => crate::models::SortField::Name,
+                        crate::models::SortField::Name => crate::models::SortField::Downloads,
+                    };
+                } else {
+                    // Toggle direction with -
+                    self.sort_direction = match self.sort_direction {
+                        crate::models::SortDirection::Ascending => crate::models::SortDirection::Descending,
+                        crate::models::SortDirection::Descending => crate::models::SortDirection::Ascending,
+                    };
+                }
+            }
+            1 => {
+                // Min downloads: 0, 100, 1k, 10k, 100k, 1M
+                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let new_idx = if delta > 0 {
+                    (current_idx + 1).min(steps.len() - 1)
+                } else {
+                    current_idx.saturating_sub(1)
+                };
+                self.filter_min_downloads = steps[new_idx];
+            }
+            2 => {
+                // Min likes: 0, 10, 50, 100, 500, 1k, 5k
+                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let new_idx = if delta > 0 {
+                    (current_idx + 1).min(steps.len() - 1)
+                } else {
+                    current_idx.saturating_sub(1)
+                };
+                self.filter_min_likes = steps[new_idx];
+            }
+            _ => {}
+        }
+        
+        // Re-fetch with new filters
+        self.clear_search_results();
+        self.needs_search_models = true;
     }
 
     /// Modify option value based on selected field and delta

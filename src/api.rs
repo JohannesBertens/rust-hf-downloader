@@ -27,6 +27,7 @@ pub async fn fetch_trending_models(token: Option<&String>) -> Result<Vec<ModelIn
     Ok(all_models)
 }
 
+#[allow(dead_code)]  // Kept for backward compatibility, use fetch_models_filtered instead
 pub async fn fetch_models(query: &str, token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
     let url = format!(
         "https://huggingface.co/api/models?search={}&limit=50&sort=downloads&direction=-1",
@@ -35,6 +36,69 @@ pub async fn fetch_models(query: &str, token: Option<&String>) -> Result<Vec<Mod
     
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let models: Vec<ModelInfo> = response.json().await?;
+    
+    Ok(models)
+}
+
+/// Fetch models with sorting and filtering parameters
+pub async fn fetch_models_filtered(
+    query: &str,
+    sort_field: crate::models::SortField,
+    sort_direction: crate::models::SortDirection,
+    min_downloads: u64,
+    min_likes: u64,
+    token: Option<&String>,
+) -> Result<Vec<ModelInfo>, reqwest::Error> {
+    use crate::models::{SortField, SortDirection};
+    
+    // Determine if we need client-side sorting
+    let needs_client_side_sort = matches!(sort_field, SortField::Name) 
+        || matches!(sort_direction, SortDirection::Ascending);
+    
+    // API only reliably supports descending sort (direction=-1)
+    // For name or ascending, we'll fetch descending and sort client-side
+    let sort = match sort_field {
+        SortField::Downloads => "downloads",
+        SortField::Likes => "likes",
+        SortField::Modified => "lastModified",
+        SortField::Name => "downloads",  // Use downloads for API, sort by name client-side
+    };
+    
+    // Always use descending for API call
+    let direction = "-1";
+    
+    // Request more results (100) since we'll filter client-side
+    let url = format!(
+        "https://huggingface.co/api/models?search={}&limit=100&sort={}&direction={}",
+        urlencoding::encode(query),
+        sort,
+        direction
+    );
+    
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    let mut models: Vec<ModelInfo> = response.json().await?;
+    
+    // Client-side filtering (API doesn't support these filters)
+    models.retain(|m| {
+        m.downloads >= min_downloads && m.likes >= min_likes
+    });
+    
+    // Client-side sorting when needed
+    if needs_client_side_sort {
+        models.sort_by(|a, b| {
+            let cmp = match sort_field {
+                SortField::Name => a.id.to_lowercase().cmp(&b.id.to_lowercase()),
+                SortField::Downloads => a.downloads.cmp(&b.downloads),
+                SortField::Likes => a.likes.cmp(&b.likes),
+                SortField::Modified => a.last_modified.as_ref().cmp(&b.last_modified.as_ref()),
+            };
+            
+            match sort_direction {
+                SortDirection::Ascending => cmp,
+                SortDirection::Descending => cmp.reverse(),
+            }
+        });
+    }
     
     Ok(models)
 }

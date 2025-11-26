@@ -58,6 +58,12 @@ pub struct App {
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
+    // Filter & Sort state
+    pub sort_field: crate::models::SortField,
+    pub sort_direction: crate::models::SortDirection,
+    pub filter_min_downloads: u64,
+    pub filter_min_likes: u64,
+    pub focused_filter_field: usize,  // 0=sort, 1=downloads, 2=likes
 }
 
 impl Default for App {
@@ -127,6 +133,11 @@ impl App {
             display_mode: crate::models::ModelDisplayMode::Gguf,
             needs_load_quantizations: false,
             needs_search_models: false,
+            sort_field: crate::models::SortField::default(),
+            sort_direction: crate::models::SortDirection::default(),
+            filter_min_downloads: 0,
+            filter_min_likes: 0,
+            focused_filter_field: 0,
         }
     }
 

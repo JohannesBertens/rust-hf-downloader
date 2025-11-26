@@ -144,6 +144,11 @@ impl App {
             model_metadata: &model_metadata,
             file_tree: &file_tree,
             file_tree_state: &mut self.file_tree_state,
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+            filter_min_downloads: self.filter_min_downloads,
+            filter_min_likes: self.filter_min_likes,
+            focused_filter_field: self.focused_filter_field,
         });
         
         // Render both download and verification progress bars
@@ -166,6 +171,9 @@ impl App {
         
         // Render popups (must be last to appear on top)
         match self.popup_mode {
+            PopupMode::SearchPopup => {
+                crate::ui::render::render_search_popup(frame, &self.input);
+            }
             PopupMode::ResumeDownload => {
                 crate::ui::render::render_resume_popup(frame, &self.incomplete_downloads);
             }
