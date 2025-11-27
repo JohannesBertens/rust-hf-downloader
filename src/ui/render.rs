@@ -104,6 +104,22 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 format!(" [{}]", model.tags.iter().take(3).cloned().collect::<Vec<_>>().join(", "))
             };
 
+            let last_modified_str = if let Some(ref modified) = model.last_modified {
+                if !modified.is_empty() {
+                    // Parse and format date in short format (YYYY-MM-DD)
+                    let date_part: &str = modified.split('T').next().unwrap_or("");
+                    if date_part.len() >= 10 {
+                        format!(" [{}]", &date_part[..10])
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
             let content = Line::from(vec![
                 Span::styled(
                     format!("{:3}. ", idx + 1),
@@ -116,6 +132,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 Span::raw(" by "),
                 Span::styled(author, Style::default().fg(Color::Green)),
                 Span::raw(format!(" ↓{} ♥{}", downloads, likes)),
+                Span::styled(last_modified_str, Style::default().fg(Color::Cyan)),
                 Span::styled(tags_str, Style::default().fg(Color::Yellow)),
             ]);
 
@@ -988,7 +1005,6 @@ pub fn render_search_popup(frame: &mut Frame, input: &Input) {
     let help = [
         "",
         "Enter search query and press Enter to search",
-        "",
         "ESC: Cancel",
     ];
     
@@ -1184,7 +1200,7 @@ pub fn render_options_popup(
     token_input: &tui_input::Input,
 ) {
     let popup_width = 64.min(frame.area().width.saturating_sub(4));
-    let popup_height = 26;
+    let popup_height = 27;
     let popup_area = Rect {
         x: (frame.area().width.saturating_sub(popup_width)) / 2,
         y: (frame.area().height.saturating_sub(popup_height)) / 2,

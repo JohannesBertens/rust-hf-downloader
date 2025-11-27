@@ -29,8 +29,9 @@ pub async fn fetch_models_filtered(
     let direction = "-1";
     
     // Request more results (100) since we'll filter client-side
+    // Use full=true to get complete metadata including lastModified
     let url = format!(
-        "https://huggingface.co/api/models?search={}&limit=100&sort={}&direction={}",
+        "https://huggingface.co/api/models?search={}&limit=100&sort={}&direction={}&full=true",
         urlencoding::encode(query),
         sort,
         direction
