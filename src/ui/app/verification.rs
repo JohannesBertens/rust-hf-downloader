@@ -4,8 +4,8 @@ use crate::models::*;
 impl App {
     /// Manually verify a downloaded file's SHA256 hash
     pub async fn verify_downloaded_file(&mut self) {
-        let models = self.models.lock().await.clone();
-        let quant_groups = self.quantizations.lock().await.clone();
+        let models = self.models.read().unwrap().clone();
+        let quant_groups = self.quantizations.read().unwrap().clone();
         let complete_downloads = self.complete_downloads.lock().await.clone();
         
         let model_selected = self.list_state.selected();
@@ -18,7 +18,7 @@ impl App {
                 
                 // Check if file is marked as downloaded
                 if !complete_downloads.contains_key(&quant.filename) {
-                    self.status = format!("File {} is not marked as downloaded", quant.filename);
+                    *self.status.write().unwrap() = format!("File {} is not marked as downloaded", quant.filename);
                     return;
                 }
                 
@@ -26,7 +26,7 @@ impl App {
                 let metadata = match complete_downloads.get(&quant.filename) {
                     Some(m) => m,
                     None => {
-                        self.status = format!("Could not find metadata for {}", quant.filename);
+                        *self.status.write().unwrap() = format!("Could not find metadata for {}", quant.filename);
                         return;
                     }
                 };
@@ -35,7 +35,7 @@ impl App {
                 let expected_hash = match &metadata.expected_sha256 {
                     Some(hash) => hash.clone(),
                     None => {
-                        self.status = format!("No SHA256 hash available for {}, cannot verify", quant.filename);
+                        *self.status.write().unwrap() = format!("No SHA256 hash available for {}, cannot verify", quant.filename);
                         return;
                     }
                 };
@@ -44,8 +44,8 @@ impl App {
                 
                 // Check if file exists
                 if !local_path.exists() {
-                    self.status = format!("File not found: {}", local_path.display());
-                    self.error = Some(format!("File marked as downloaded but not found at {}", local_path.display()));
+                    *self.status.write().unwrap() = format!("File not found: {}", local_path.display());
+                    *self.error.write().unwrap() = Some(format!("File marked as downloaded but not found at {}", local_path.display()));
                     return;
                 }
                 
@@ -70,7 +70,7 @@ impl App {
                     item,
                 ).await;
                 
-                self.status = format!("Queued {} for verification", quant.filename);
+                *self.status.write().unwrap() = format!("Queued {} for verification", quant.filename);
             }
         }
     }

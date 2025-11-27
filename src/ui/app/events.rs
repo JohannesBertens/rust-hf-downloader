@@ -6,7 +6,7 @@ use tui_input::backend::crossterm::EventHandler;
 impl App {
     /// Main keyboard event dispatcher
     pub async fn on_key_event(&mut self, key: KeyEvent) {
-        self.error = None;
+        *self.error.write().unwrap() = None;
 
         // Handle popup input separately
         if self.popup_mode == PopupMode::SearchPopup {
@@ -41,7 +41,7 @@ impl App {
                 // Open search popup instead of inline editing
                 self.popup_mode = PopupMode::SearchPopup;
                 self.input.reset(); // Clear previous search
-                self.status = "Search Models".to_string();
+                *self.status.write().unwrap() = "Search Models".to_string();
             }
             (_, KeyCode::Char('d')) => {
                 // Allow download from Models pane (for non-GGUF), QuantizationGroups, or QuantizationFiles
@@ -76,7 +76,7 @@ impl App {
                 self.clear_search_results();
                 self.needs_search_models = true;
                 
-                self.status = format!("Sort by: {:?}", self.sort_field);
+                *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
             }
             (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
                 // Toggle sort direction
@@ -93,7 +93,7 @@ impl App {
                     crate::models::SortDirection::Ascending => "▲",
                     crate::models::SortDirection::Descending => "▼",
                 };
-                self.status = format!("Sort direction: {:?} {}", self.sort_direction, arrow);
+                *self.status.write().unwrap() = format!("Sort direction: {:?} {}", self.sort_direction, arrow);
             }
             (_, KeyCode::Char('f')) => {
                 // Cycle focused filter field
@@ -104,7 +104,7 @@ impl App {
                     2 => "Min Likes",
                     _ => unreachable!(),
                 };
-                self.status = format!("Focused filter: {}", field_name);
+                *self.status.write().unwrap() = format!("Focused filter: {}", field_name);
             }
             (_, KeyCode::Char('+')) if self.focused_pane == FocusedPane::Models => {
                 // Increment focused filter (only in Models pane to avoid conflicts)
@@ -126,14 +126,14 @@ impl App {
                 self.clear_search_results();
                 self.needs_search_models = true;
                 
-                self.status = "Filters reset to defaults".to_string();
+                *self.status.write().unwrap() = "Filters reset to defaults".to_string();
             }
             (_, KeyCode::Char('1')) => {
                 // Preset 1: No Filters (default)
                 if self.would_change_settings(FilterPreset::NoFilters) {
                     self.apply_filter_preset(FilterPreset::NoFilters);
                 } else {
-                    self.status = "Already using No Filters preset".to_string();
+                    *self.status.write().unwrap() = "Already using No Filters preset".to_string();
                 }
             }
             (_, KeyCode::Char('2')) => {
@@ -141,7 +141,7 @@ impl App {
                 if self.would_change_settings(FilterPreset::Popular) {
                     self.apply_filter_preset(FilterPreset::Popular);
                 } else {
-                    self.status = "Already using Popular preset".to_string();
+                    *self.status.write().unwrap() = "Already using Popular preset".to_string();
                 }
             }
             (_, KeyCode::Char('3')) => {
@@ -149,7 +149,7 @@ impl App {
                 if self.would_change_settings(FilterPreset::HighlyRated) {
                     self.apply_filter_preset(FilterPreset::HighlyRated);
                 } else {
-                    self.status = "Already using Highly Rated preset".to_string();
+                    *self.status.write().unwrap() = "Already using Highly Rated preset".to_string();
                 }
             }
             (_, KeyCode::Char('4')) => {
@@ -157,7 +157,7 @@ impl App {
                 if self.would_change_settings(FilterPreset::Recent) {
                     self.apply_filter_preset(FilterPreset::Recent);
                 } else {
-                    self.status = "Already using Recent preset".to_string();
+                    *self.status.write().unwrap() = "Already using Recent preset".to_string();
                 }
             }
             (_, KeyCode::Tab) => {
@@ -299,7 +299,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
-                self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string();
+                *self.status.write().unwrap() = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string();
             }
             _ => {
                 self.input.handle_event(&Event::Key(key));
@@ -324,7 +324,7 @@ impl App {
                     
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
-                        self.status = format!("Failed to save config: {}", e);
+                        *self.status.write().unwrap() = format!("Failed to save config: {}", e);
                     }
                 }
                 KeyCode::Esc => {
@@ -344,7 +344,7 @@ impl App {
                     
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
-                        self.status = format!("Failed to save config: {}", e);
+                        *self.status.write().unwrap() = format!("Failed to save config: {}", e);
                     }
                 }
                 KeyCode::Esc => {
@@ -404,7 +404,7 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.popup_mode = PopupMode::None;
                 self.incomplete_downloads.clear();
-                self.status = "Skipped incomplete downloads".to_string();
+                *self.status.write().unwrap() = "Skipped incomplete downloads".to_string();
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 self.delete_incomplete_downloads().await;
@@ -423,7 +423,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.popup_mode = PopupMode::None;
-                self.status = "Download cancelled".to_string();
+                *self.status.write().unwrap() = "Download cancelled".to_string();
             }
             _ => {
                 self.download_path_input.handle_event(&Event::Key(key));
@@ -448,7 +448,7 @@ impl App {
     /// Navigate to next model in list
     pub fn next(&mut self) {
         let models_len = futures::executor::block_on(async {
-            self.models.lock().await.len()
+            self.models.read().unwrap().len()
         });
         
         if models_len == 0 {
@@ -471,7 +471,7 @@ impl App {
     /// Navigate to previous model in list
     pub fn previous(&mut self) {
         let models_len = futures::executor::block_on(async {
-            self.models.lock().await.len()
+            self.models.read().unwrap().len()
         });
         
         if models_len == 0 {
@@ -500,7 +500,7 @@ impl App {
                     FocusedPane::Models => {
                         // When switching to quantization groups, select first item if available
                         let quants_len = futures::executor::block_on(async {
-                            self.quantizations.lock().await.len()
+                            self.quantizations.read().unwrap().len()
                         });
                         if quants_len > 0 {
                             self.quant_list_state.select(Some(0));
@@ -511,7 +511,7 @@ impl App {
                         // When switching to quantization files, select first file if available
                         if let Some(selected_group) = self.quant_list_state.selected() {
                             let quantizations = futures::executor::block_on(async {
-                                self.quantizations.lock().await.clone()
+                                self.quantizations.read().unwrap().clone()
                             });
                             if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
                                 self.quant_file_list_state.select(Some(0));
@@ -530,7 +530,7 @@ impl App {
                     FocusedPane::Models => {
                         // Skip directly to FileTree, select first item if available
                         let tree_has_items = futures::executor::block_on(async {
-                            self.file_tree.lock().await.as_ref()
+                            self.file_tree.read().unwrap().as_ref()
                                 .map(|t| !t.children.is_empty())
                                 .unwrap_or(false)
                         });
@@ -554,7 +554,7 @@ impl App {
                 // When switching to quantization files, select first file if available
                 if let Some(selected_group) = self.quant_list_state.selected() {
                     let quantizations = futures::executor::block_on(async {
-                        self.quantizations.lock().await.clone()
+                        self.quantizations.read().unwrap().clone()
                     });
                     if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
                         self.quant_file_list_state.select(Some(0));
@@ -572,7 +572,7 @@ impl App {
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
         let quants_len = futures::executor::block_on(async {
-            self.quantizations.lock().await.len()
+            self.quantizations.read().unwrap().len()
         });
         
         if quants_len == 0 {
@@ -595,7 +595,7 @@ impl App {
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
         let quants_len = futures::executor::block_on(async {
-            self.quantizations.lock().await.len()
+            self.quantizations.read().unwrap().len()
         });
         
         if quants_len == 0 {
@@ -619,7 +619,7 @@ impl App {
     pub fn next_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
             let quantizations = futures::executor::block_on(async {
-                self.quantizations.lock().await.clone()
+                self.quantizations.read().unwrap().clone()
             });
             
             if selected_group < quantizations.len() {
@@ -648,7 +648,7 @@ impl App {
     pub fn previous_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
             let quantizations = futures::executor::block_on(async {
-                self.quantizations.lock().await.clone()
+                self.quantizations.read().unwrap().clone()
             });
             
             if selected_group < quantizations.len() {
@@ -760,7 +760,7 @@ impl App {
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 0;
                 self.filter_min_likes = 0;
-                self.status = "Preset: No Filters".to_string();
+                *self.status.write().unwrap() = "Preset: No Filters".to_string();
             }
             FilterPreset::Popular => {
                 // Popular models: 10k+ downloads, 100+ likes
@@ -768,7 +768,7 @@ impl App {
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 10_000;
                 self.filter_min_likes = 100;
-                self.status = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
+                *self.status.write().unwrap() = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
             }
             FilterPreset::HighlyRated => {
                 // Highly rated: 1k+ likes, sorted by likes
@@ -776,7 +776,7 @@ impl App {
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 0;
                 self.filter_min_likes = 1_000;
-                self.status = "Preset: Highly Rated (1k+ likes)".to_string();
+                *self.status.write().unwrap() = "Preset: Highly Rated (1k+ likes)".to_string();
             }
             FilterPreset::Recent => {
                 // Recently updated
@@ -784,7 +784,7 @@ impl App {
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 0;
                 self.filter_min_likes = 0;
-                self.status = "Preset: Recent".to_string();
+                *self.status.write().unwrap() = "Preset: Recent".to_string();
             }
         }
         
@@ -801,9 +801,9 @@ impl App {
         self.options.default_min_likes = self.filter_min_likes;
         
         if let Err(e) = crate::config::save_config(&self.options) {
-            self.status = format!("Failed to save filter settings: {}", e);
+            *self.status.write().unwrap() = format!("Failed to save filter settings: {}", e);
         } else {
-            self.status = "Filter settings saved".to_string();
+            *self.status.write().unwrap() = "Filter settings saved".to_string();
         }
     }
 
@@ -881,14 +881,14 @@ impl App {
         
         // Save to disk
         if let Err(e) = crate::config::save_config(&self.options) {
-            self.status = format!("Failed to save config: {}", e);
+            *self.status.write().unwrap() = format!("Failed to save config: {}", e);
         }
     }
 
     /// Navigate to next item in file tree
     pub fn next_file_tree_item(&mut self) {
         let tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         if let Some(tree) = tree {
@@ -916,7 +916,7 @@ impl App {
     /// Navigate to previous item in file tree
     pub fn previous_file_tree_item(&mut self) {
         let tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         if let Some(tree) = tree {
@@ -949,7 +949,7 @@ impl App {
         };
         
         let mut tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         if let Some(ref mut tree) = tree {
@@ -963,7 +963,7 @@ impl App {
                 
                 // Update the tree
                 futures::executor::block_on(async {
-                    *self.file_tree.lock().await = Some(tree.clone());
+                    *self.file_tree.write().unwrap() = Some(tree.clone());
                 });
             }
         }

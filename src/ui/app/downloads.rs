@@ -33,7 +33,7 @@ impl App {
         // Show popup if incomplete downloads found
         if !self.incomplete_downloads.is_empty() {
             self.popup_mode = PopupMode::ResumeDownload;
-            self.status = format!("Found {} incomplete download(s)", self.incomplete_downloads.len());
+            *self.status.write().unwrap() = format!("Found {} incomplete download(s)", self.incomplete_downloads.len());
         }
     }
 
@@ -45,7 +45,7 @@ impl App {
                 // Download entire model repository (non-GGUF models in Standard mode)
                 if self.display_mode == crate::models::ModelDisplayMode::Standard {
                     let metadata = futures::executor::block_on(async {
-                        self.model_metadata.lock().await.clone()
+                        self.model_metadata.read().unwrap().clone()
                     });
                     
                     if let Some(meta) = metadata {
@@ -53,14 +53,14 @@ impl App {
                         self.download_path_input = Input::default()
                             .with_value(self.options.default_directory.clone());
                         self.popup_mode = PopupMode::DownloadPath;
-                        self.status = format!("Download all {} files from repository", file_count);
+                        *self.status.write().unwrap() = format!("Download all {} files from repository", file_count);
                     }
                 }
             }
             FocusedPane::QuantizationGroups => {
                 // Download entire quantization group
                 let quantizations = futures::executor::block_on(async {
-                    self.quantizations.lock().await.clone()
+                    self.quantizations.read().unwrap().clone()
                 });
                 
                 if let Some(selected) = self.quant_list_state.selected() {
@@ -69,7 +69,7 @@ impl App {
                         self.download_path_input = Input::default()
                             .with_value(self.options.default_directory.clone());
                         self.popup_mode = PopupMode::DownloadPath;
-                        self.status = format!("Download all {} files in quantization group", quantizations[selected].files.len());
+                        *self.status.write().unwrap() = format!("Download all {} files in quantization group", quantizations[selected].files.len());
                     }
                 }
             }
@@ -80,7 +80,7 @@ impl App {
                         self.download_path_input = Input::default()
                             .with_value(self.options.default_directory.clone());
                         self.popup_mode = PopupMode::DownloadPath;
-                        self.status = "Download single selected file".to_string();
+                        *self.status.write().unwrap() = "Download single selected file".to_string();
                     }
                 }
             }
@@ -97,8 +97,8 @@ impl App {
             return;
         }
         
-        let models = self.models.lock().await.clone();
-        let quant_groups = self.quantizations.lock().await.clone();
+        let models = self.models.read().unwrap().clone();
+        let quant_groups = self.quantizations.read().unwrap().clone();
         
         let model_selected = self.list_state.selected();
         let quant_selected = self.quant_list_state.selected();
@@ -129,7 +129,7 @@ impl App {
                 };
                 
                 if files_to_download.is_empty() {
-                    self.error = Some("No files selected for download".to_string());
+                    *self.error.write().unwrap() = Some("No files selected for download".to_string());
                     return;
                 }
                 
@@ -141,8 +141,8 @@ impl App {
                 let model_path = match validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
                     Ok(path) => path.parent().unwrap_or(&path).to_path_buf(),
                     Err(e) => {
-                        self.error = Some(format!("Invalid path: {}", e));
-                        self.status = "Download cancelled due to invalid path".to_string();
+                        *self.error.write().unwrap() = Some(format!("Invalid path: {}", e));
+                        *self.status.write().unwrap() = "Download cancelled due to invalid path".to_string();
                         return;
                     }
                 };
@@ -160,7 +160,7 @@ impl App {
                     match fetch_multipart_sha256s(&model.id, &filenames_to_download, token).await {
                         Ok(map) => map,
                         Err(e) => {
-                            self.status = format!("Warning: Failed to fetch SHA256 hashes: {}. Downloads will proceed without verification.", e);
+                            *self.status.write().unwrap() = format!("Warning: Failed to fetch SHA256 hashes: {}. Downloads will proceed without verification.", e);
                             HashMap::new()
                         }
                     }
@@ -179,7 +179,7 @@ impl App {
                     let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
                         Ok(path) => path,
                         Err(e) => {
-                            self.error = Some(format!("Invalid filename '{}': {}", filename, e));
+                            *self.error.write().unwrap() = Some(format!("Invalid filename '{}': {}", filename, e));
                             continue;
                         }
                     };
@@ -250,12 +250,12 @@ impl App {
                 
                 if success_count > 0 {
                     if num_files > 1 {
-                        self.status = format!("Queued {} parts of {} to {}", num_files, quant.filename, model_path.display());
+                        *self.status.write().unwrap() = format!("Queued {} parts of {} to {}", num_files, quant.filename, model_path.display());
                     } else {
-                        self.status = format!("Starting download of {} to {}", quant.filename, model_path.display());
+                        *self.status.write().unwrap() = format!("Starting download of {} to {}", quant.filename, model_path.display());
                     }
                 } else {
-                    self.error = Some("Failed to start download".to_string());
+                    *self.error.write().unwrap() = Some("Failed to start download".to_string());
                 }
                 
                 // Adjust queue size if some sends failed
@@ -293,7 +293,7 @@ impl App {
             *queue_size += count;
         }
         
-        self.status = format!("Resuming {} incomplete download(s)", count);
+        *self.status.write().unwrap() = format!("Resuming {} incomplete download(s)", count);
         self.incomplete_downloads.clear();
     }
 
@@ -332,17 +332,17 @@ impl App {
         }
         
         if errors.is_empty() {
-            self.status = format!("Deleted {} incomplete file(s)", deleted);
+            *self.status.write().unwrap() = format!("Deleted {} incomplete file(s)", deleted);
         } else {
-            self.status = format!("Deleted {} file(s), {} error(s): {}", deleted, errors.len(), errors.join(", "));
+            *self.status.write().unwrap() = format!("Deleted {} file(s), {} error(s): {}", deleted, errors.len(), errors.join(", "));
         }
         self.incomplete_downloads.clear();
     }
 
     /// Download entire repository (non-GGUF models)
     pub async fn confirm_repository_download(&mut self) {
-        let models = self.models.lock().await.clone();
-        let metadata = self.model_metadata.lock().await.clone();
+        let models = self.models.read().unwrap().clone();
+        let metadata = self.model_metadata.read().unwrap().clone();
         
         let model_selected = self.list_state.selected();
         
@@ -360,7 +360,7 @@ impl App {
                     .collect();
                 
                 if files_to_download.is_empty() {
-                    self.error = Some("No files to download in this repository".to_string());
+                    *self.error.write().unwrap() = Some("No files to download in this repository".to_string());
                     return;
                 }
                 
@@ -380,7 +380,7 @@ impl App {
                     let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
                         Ok(path) => path,
                         Err(e) => {
-                            self.error = Some(format!("Invalid filename '{}': {}", filename, e));
+                            *self.error.write().unwrap() = Some(format!("Invalid filename '{}': {}", filename, e));
                             continue;
                         }
                     };
@@ -446,9 +446,9 @@ impl App {
                 }
                 
                 if success_count > 0 {
-                    self.status = format!("Queued {} files from {} to {}", success_count, model.id, model_root.display());
+                    *self.status.write().unwrap() = format!("Queued {} files from {} to {}", success_count, model.id, model_root.display());
                 } else {
-                    self.error = Some("Failed to start downloads".to_string());
+                    *self.error.write().unwrap() = Some("Failed to start downloads".to_string());
                 }
                 
                 // Adjust queue size if some sends failed

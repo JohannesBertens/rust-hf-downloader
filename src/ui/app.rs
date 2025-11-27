@@ -27,7 +27,7 @@ impl App {
         self.scan_incomplete_downloads().await;
         
         // Set initial status for empty screen
-        self.status = "Welcome! Press '/' to search for models".to_string();
+        *self.status.write().unwrap() = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
         
         // Spawn verification worker
@@ -102,11 +102,11 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         // Get all the data we need for rendering
         let models = futures::executor::block_on(async {
-            self.models.lock().await.clone()
+            self.models.read().unwrap().clone()
         });
         
         let quantizations = futures::executor::block_on(async {
-            self.quantizations.lock().await.clone()
+            self.quantizations.read().unwrap().clone()
         });
         
         let complete_downloads = futures::executor::block_on(async {
@@ -114,11 +114,11 @@ impl App {
         });
         
         let model_metadata = futures::executor::block_on(async {
-            self.model_metadata.lock().await.clone()
+            self.model_metadata.read().unwrap().clone()
         });
         
         let file_tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         // Render main UI
@@ -127,15 +127,15 @@ impl App {
             input_mode: self.input_mode,
             models: &models,
             list_state: &mut self.list_state,
-            loading: self.loading,
+            loading: *self.loading.read().unwrap(),
             quantizations: &quantizations,
             quant_file_list_state: &mut self.quant_file_list_state,
             quant_list_state: &mut self.quant_list_state,
-            loading_quants: self.loading_quants,
+            loading_quants: *self.loading_quants.read().unwrap(),
             focused_pane: self.focused_pane,
-            error: &self.error,
-            status: &self.status,
-            selection_info: &self.selection_info,
+            error: &*self.error.read().unwrap(),
+            status: &*self.status.read().unwrap(),
+            selection_info: &*self.selection_info.read().unwrap(),
             complete_downloads: &complete_downloads,
             display_mode: self.display_mode,
             model_metadata: &model_metadata,
@@ -198,9 +198,9 @@ impl App {
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
-                    self.status = format!("Authentication required for {}", model_id);
+                    *self.status.write().unwrap() = format!("Authentication required for {}", model_id);
                 } else {
-                    self.status = msg;
+                    *self.status.write().unwrap() = msg;
                 }
             }
         }
