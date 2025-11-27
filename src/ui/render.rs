@@ -31,6 +31,12 @@ pub struct RenderParams<'a> {
     pub model_metadata: &'a Option<ModelMetadata>,
     pub file_tree: &'a Option<FileTreeNode>,
     pub file_tree_state: &'a mut ListState,
+    // Filter & Sort
+    pub sort_field: crate::models::SortField,
+    pub sort_direction: crate::models::SortDirection,
+    pub filter_min_downloads: u64,
+    pub filter_min_likes: u64,
+    pub focused_filter_field: usize,
 }
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
@@ -53,6 +59,11 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         model_metadata,
         file_tree,
         file_tree_state,
+        sort_field,
+        sort_direction,
+        filter_min_downloads,
+        filter_min_likes,
+        focused_filter_field,
     } = params;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -64,32 +75,16 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         ])
         .split(frame.area());
 
-    // Search input box
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Search HuggingFace Models")
-        .border_style(if input_mode == InputMode::Editing {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        });
-
-    let width = input_block.inner(chunks[0]).width.max(3) - 1;
-    let scroll = input.visual_scroll(width as usize);
-    
-    let input_widget = Paragraph::new(input.value())
-        .style(Style::default())
-        .block(input_block)
-        .scroll((0, scroll as u16));
-    
-    frame.render_widget(input_widget, chunks[0]);
-
-    if input_mode == InputMode::Editing {
-        frame.set_cursor_position((
-            chunks[0].x + ((input.visual_cursor()).max(scroll) - scroll) as u16 + 1,
-            chunks[0].y + 1,
-        ));
-    }
+    // Render filter toolbar
+    render_filter_toolbar(
+        frame,
+        chunks[0],
+        sort_field,
+        sort_direction,
+        filter_min_downloads,
+        filter_min_likes,
+        focused_filter_field,
+    );
 
     // Results list
     let items: Vec<ListItem> = models
@@ -109,6 +104,22 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 format!(" [{}]", model.tags.iter().take(3).cloned().collect::<Vec<_>>().join(", "))
             };
 
+            let last_modified_str = if let Some(ref modified) = model.last_modified {
+                if !modified.is_empty() {
+                    // Parse and format date in short format (YYYY-MM-DD)
+                    let date_part: &str = modified.split('T').next().unwrap_or("");
+                    if date_part.len() >= 10 {
+                        format!(" [{}]", &date_part[..10])
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+
             let content = Line::from(vec![
                 Span::styled(
                     format!("{:3}. ", idx + 1),
@@ -121,6 +132,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 Span::raw(" by "),
                 Span::styled(author, Style::default().fg(Color::Green)),
                 Span::raw(format!(" ↓{} ♥{}", downloads, likes)),
+                Span::styled(last_modified_str, Style::default().fg(Color::Cyan)),
                 Span::styled(tags_str, Style::default().fg(Color::Yellow)),
             ]);
 
@@ -212,10 +224,22 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         String::new()
     };
     
-    let line2 = if let Some(err) = error {
+    // Check if any filters are non-default
+    let has_filters = filter_min_downloads > 0 
+        || filter_min_likes > 0 
+        || sort_field != crate::models::SortField::Downloads 
+        || sort_direction != crate::models::SortDirection::Descending;
+    
+    let base_line2 = if let Some(err) = error {
         format!("Error: {}", err)
     } else {
         status.to_string()
+    };
+    
+    let line2 = if has_filters {
+        format!("{} [Filters Active]", base_line2)
+    } else {
+        base_line2
     };
     
     let status_text = if !line1.is_empty() {
@@ -940,6 +964,63 @@ pub fn render_resume_popup(
     frame.render_widget(instructions, instructions_area);
 }
 
+/// Render search popup dialog
+pub fn render_search_popup(frame: &mut Frame, input: &Input) {
+    let popup_width = 60.min(frame.area().width.saturating_sub(4));
+    let popup_height = 8;
+    let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
+    let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
+    let area = Rect { x: popup_x, y: popup_y, width: popup_width, height: popup_height };
+    
+    // Clear the area
+    frame.render_widget(Clear, area);
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Search HuggingFace Models ")
+        .style(Style::default().fg(Color::Cyan));
+    
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    
+    // Input field
+    let input_area = Rect {
+        x: inner.x + 2,
+        y: inner.y + 1,
+        width: inner.width - 4,
+        height: 1,
+    };
+    
+    let input_widget = Paragraph::new(input.value())
+        .style(Style::default().fg(Color::Yellow));
+    frame.render_widget(input_widget, input_area);
+    
+    // Show cursor
+    frame.set_cursor_position((
+        input_area.x + input.visual_cursor() as u16,
+        input_area.y,
+    ));
+    
+    // Help text
+    let help = [
+        "",
+        "Enter search query and press Enter to search",
+        "ESC: Cancel",
+    ];
+    
+    for (i, line) in help.iter().enumerate() {
+        let area = Rect {
+            x: inner.x + 2,
+            y: inner.y + 3 + i as u16,
+            width: inner.width - 4,
+            height: 1,
+        };
+        let widget = Paragraph::new(*line)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(widget, area);
+    }
+}
+
 pub fn render_download_path_popup(
     frame: &mut Frame,
     download_path_input: &Input,
@@ -1119,7 +1200,7 @@ pub fn render_options_popup(
     token_input: &tui_input::Input,
 ) {
     let popup_width = 64.min(frame.area().width.saturating_sub(4));
-    let popup_height = 26;
+    let popup_height = 27;
     let popup_area = Rect {
         x: (frame.area().width.saturating_sub(popup_width)) / 2,
         y: (frame.area().height.saturating_sub(popup_height)) / 2,
@@ -1276,4 +1357,108 @@ pub fn render_options_popup(
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(widget, area);
     }
+}
+
+/// Render filter and sort toolbar
+pub fn render_filter_toolbar(
+    frame: &mut Frame,
+    area: Rect,
+    sort_field: crate::models::SortField,
+    sort_direction: crate::models::SortDirection,
+    min_downloads: u64,
+    min_likes: u64,
+    focused_field: usize,
+) {
+    use crate::models::{SortField, SortDirection};
+    
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Filters  [/: Search | 1-4: Presets | f: Focus | +/-: Modify | r: Reset | Ctrl+S: Save]")
+        .style(Style::default().fg(Color::Cyan));
+    
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    
+    // Sort arrow
+    let sort_arrow = match sort_direction {
+        SortDirection::Ascending => "▲",
+        SortDirection::Descending => "▼",
+    };
+    
+    // Sort name
+    let sort_name = match sort_field {
+        SortField::Downloads => "Downloads",
+        SortField::Likes => "Likes",
+        SortField::Modified => "Modified",
+        SortField::Name => "Name",
+    };
+    
+    // Build display line with highlighting for focused field
+    let sort_style = if focused_field == 0 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
+    
+    let downloads_style = if focused_field == 1 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    
+    let likes_style = if focused_field == 2 {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    
+    // Detect which preset is active (if any)
+    let preset_name = if sort_field == SortField::Modified 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 0 
+        && min_likes == 0 {
+        Some("Recent")
+    } else if sort_field == SortField::Likes 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 0 
+        && min_likes == 1_000 {
+        Some("Highly Rated")
+    } else if sort_field == SortField::Downloads 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 10_000 
+        && min_likes == 100 {
+        Some("Popular")
+    } else if sort_field == SortField::Downloads 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 0 
+        && min_likes == 0 {
+        Some("No Filters")
+    } else {
+        None
+    };
+    
+    let mut line_parts = vec![
+        Span::styled("Sort: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} {}", sort_name, sort_arrow), sort_style),
+        Span::raw("  |  "),
+        Span::styled("Min Downloads: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(crate::utils::format_number(min_downloads), downloads_style),
+        Span::raw("  |  "),
+        Span::styled("Min Likes: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(crate::utils::format_number(min_likes), likes_style),
+    ];
+    
+    // Add preset indicator if a preset is active
+    if let Some(preset) = preset_name {
+        line_parts.push(Span::raw("  |  "));
+        line_parts.push(Span::styled(
+            format!("[{}]", preset),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        ));
+    }
+    
+    let line = Line::from(line_parts);
+    
+    let paragraph = Paragraph::new(line);
+    frame.render_widget(paragraph, inner);
 }

@@ -26,12 +26,9 @@ impl App {
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
         
-        // Set initial status and render UI once before loading models
-        self.status = "Loading trending models...".to_string();
+        // Set initial status for empty screen
+        *self.status.write().unwrap() = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
-        
-        // Load trending models on startup
-        self.load_trending_models().await;
         
         // Spawn verification worker
         let verification_queue = self.verification_queue.clone();
@@ -93,7 +90,8 @@ impl App {
             // Check if we need to load quantizations after UI render
             if self.needs_load_quantizations {
                 self.needs_load_quantizations = false;
-                self.load_quantizations().await;
+                self.spawn_load_quantizations();
+                self.prefetch_adjacent_models();
             }
             
             self.handle_crossterm_events().await?;
@@ -105,11 +103,11 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         // Get all the data we need for rendering
         let models = futures::executor::block_on(async {
-            self.models.lock().await.clone()
+            self.models.read().unwrap().clone()
         });
         
         let quantizations = futures::executor::block_on(async {
-            self.quantizations.lock().await.clone()
+            self.quantizations.read().unwrap().clone()
         });
         
         let complete_downloads = futures::executor::block_on(async {
@@ -117,11 +115,11 @@ impl App {
         });
         
         let model_metadata = futures::executor::block_on(async {
-            self.model_metadata.lock().await.clone()
+            self.model_metadata.read().unwrap().clone()
         });
         
         let file_tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         // Render main UI
@@ -130,20 +128,25 @@ impl App {
             input_mode: self.input_mode,
             models: &models,
             list_state: &mut self.list_state,
-            loading: self.loading,
+            loading: *self.loading.read().unwrap(),
             quantizations: &quantizations,
             quant_file_list_state: &mut self.quant_file_list_state,
             quant_list_state: &mut self.quant_list_state,
-            loading_quants: self.loading_quants,
+            loading_quants: *self.loading_quants.read().unwrap(),
             focused_pane: self.focused_pane,
-            error: &self.error,
-            status: &self.status,
-            selection_info: &self.selection_info,
+            error: &self.error.read().unwrap(),
+            status: &self.status.read().unwrap(),
+            selection_info: &self.selection_info.read().unwrap(),
             complete_downloads: &complete_downloads,
-            display_mode: self.display_mode,
+            display_mode: *self.display_mode.read().unwrap(),
             model_metadata: &model_metadata,
             file_tree: &file_tree,
             file_tree_state: &mut self.file_tree_state,
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+            filter_min_downloads: self.filter_min_downloads,
+            filter_min_likes: self.filter_min_likes,
+            focused_filter_field: self.focused_filter_field,
         });
         
         // Render both download and verification progress bars
@@ -166,6 +169,9 @@ impl App {
         
         // Render popups (must be last to appear on top)
         match self.popup_mode {
+            PopupMode::SearchPopup => {
+                crate::ui::render::render_search_popup(frame, &self.input);
+            }
             PopupMode::ResumeDownload => {
                 crate::ui::render::render_resume_popup(frame, &self.incomplete_downloads);
             }
@@ -193,9 +199,9 @@ impl App {
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
-                    self.status = format!("Authentication required for {}", model_id);
+                    *self.status.write().unwrap() = format!("Authentication required for {}", model_id);
                 } else {
-                    self.status = msg;
+                    *self.status.write().unwrap() = msg;
                 }
             }
         }

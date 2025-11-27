@@ -15,11 +15,6 @@ pub struct ModelInfo {
     pub last_modified: Option<String>,
 }
 
-/// Response wrapper for trending models API
-#[derive(Debug, Clone, Deserialize)]
-pub struct TrendingResponse {
-    pub models: Vec<ModelInfo>,
-}
 
 /// Extended model metadata from /api/models/{model_id}
 #[derive(Debug, Clone, Deserialize)]
@@ -164,12 +159,41 @@ pub enum PopupMode {
     ResumeDownload,
     Options,
     AuthError { model_url: String },
+    SearchPopup,
+}
+
+/// Filter presets for quick filter combinations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterPreset {
+    NoFilters,
+    Popular,
+    HighlyRated,
+    Recent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
+    #[allow(dead_code)]  // Kept for potential future use (inline editing)
     Editing,
+}
+
+/// Sort field options for model search
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SortField {
+    #[default]
+    Downloads,
+    Likes,
+    Modified,
+    Name,
+}
+
+/// Sort direction (ascending or descending)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum SortDirection {
+    Ascending,
+    #[default]
+    Descending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +214,30 @@ pub enum ModelDisplayMode {
 
 pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
 pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
+
+// Additional cache types for comprehensive API caching
+pub type MetadataCache = HashMap<String, ModelMetadata>;
+pub type FileTreeCache = HashMap<String, FileTreeNode>;
+pub type SearchCache = HashMap<SearchKey, Vec<ModelInfo>>;
+
+/// Search cache key that includes all filter parameters
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct SearchKey {
+    pub query: String,
+    pub sort_field: SortField,
+    pub sort_direction: SortDirection,
+    pub min_downloads: u64,
+    pub min_likes: u64,
+}
+
+/// Unified API cache container for all cached data
+#[derive(Debug, Default)]
+pub struct ApiCache {
+    pub metadata: MetadataCache,
+    pub quantizations: QuantizationCache,
+    pub file_trees: FileTreeCache,
+    pub searches: SearchCache,
+}
 
 /// Progress tracking for an active verification operation
 #[derive(Debug, Clone)]
@@ -243,6 +291,16 @@ pub struct AppOptions {
     pub editing_directory: bool,
     #[serde(skip)]
     pub editing_token: bool,
+    
+    // Filter & Sort Settings (NEW)
+    #[serde(default)]
+    pub default_sort_field: SortField,
+    #[serde(default)]
+    pub default_sort_direction: SortDirection,
+    #[serde(default)]
+    pub default_min_downloads: u64,
+    #[serde(default)]
+    pub default_min_likes: u64,
 }
 
 impl Default for AppOptions {
@@ -267,6 +325,11 @@ impl Default for AppOptions {
             selected_field: 0,
             editing_directory: false,
             editing_token: false,
+            // Filter & Sort defaults
+            default_sort_field: SortField::Downloads,
+            default_sort_direction: SortDirection::Descending,
+            default_min_downloads: 0,
+            default_min_likes: 0,
         }
     }
 }

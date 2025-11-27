@@ -4,6 +4,7 @@ use ratatui::widgets::ListState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::{Mutex, mpsc};
 use tui_input::Input;
 
@@ -22,17 +23,17 @@ pub struct App {
     pub input: Input,
     pub input_mode: InputMode,
     pub focused_pane: FocusedPane,
-    pub models: Arc<Mutex<Vec<ModelInfo>>>,
+    pub models: Arc<RwLock<Vec<ModelInfo>>>,
     pub list_state: ListState,
     pub quant_list_state: ListState,
-    pub loading: bool,
-    pub error: Option<String>,
-    pub status: String,  // Status messages (downloads, verification, etc.)
-    pub selection_info: String,  // Model selection info (name + URL)
-    pub quantizations: Arc<Mutex<Vec<QuantizationGroup>>>,
+    pub loading: Arc<RwLock<bool>>,
+    pub error: Arc<RwLock<Option<String>>>,
+    pub status: Arc<RwLock<String>>,  // Status messages (downloads, verification, etc.)
+    pub selection_info: Arc<RwLock<String>>,  // Model selection info (name + URL)
+    pub quantizations: Arc<RwLock<Vec<QuantizationGroup>>>,
     pub quant_file_list_state: ListState,
-    pub loading_quants: bool,
-    pub quant_cache: Arc<Mutex<QuantizationCache>>,
+    pub loading_quants: Arc<RwLock<bool>>,
+    pub api_cache: Arc<RwLock<crate::models::ApiCache>>,
     pub popup_mode: PopupMode,
     pub download_path_input: Input,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
@@ -51,13 +52,21 @@ pub struct App {
     pub options_directory_input: Input,
     pub options_token_input: Input,
     // Non-GGUF model support
-    pub model_metadata: Arc<Mutex<Option<crate::models::ModelMetadata>>>,
-    pub file_tree: Arc<Mutex<Option<crate::models::FileTreeNode>>>,
+    pub model_metadata: Arc<RwLock<Option<ModelMetadata>>>,
+    pub file_tree: Arc<RwLock<Option<FileTreeNode>>>,
     pub file_tree_state: ListState,
-    pub display_mode: crate::models::ModelDisplayMode,
+    pub display_mode: Arc<RwLock<crate::models::ModelDisplayMode>>,
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
+    // Prefetch debounce timer
+    pub last_prefetch_time: Arc<Mutex<std::time::Instant>>,
+    // Filter & Sort state
+    pub sort_field: crate::models::SortField,
+    pub sort_direction: crate::models::SortDirection,
+    pub filter_min_downloads: u64,
+    pub filter_min_likes: u64,
+    pub focused_filter_field: usize,  // 0=sort, 1=downloads, 2=likes
 }
 
 impl Default for App {
@@ -81,6 +90,13 @@ impl App {
         
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
+        
+        // Extract filter settings before moving options
+        let default_sort_field = options.default_sort_field;
+        let default_sort_direction = options.default_sort_direction;
+        let default_min_downloads = options.default_min_downloads;
+        let default_min_likes = options.default_min_likes;
+        
         let mut download_path_input = Input::default();
         download_path_input = download_path_input.with_value(options.default_directory.clone());
         
@@ -92,17 +108,17 @@ impl App {
             input: Input::default(),
             input_mode: InputMode::Normal,  // Start in normal mode
             focused_pane: FocusedPane::Models,
-            models: Arc::new(Mutex::new(Vec::new())),
+            models: Arc::new(RwLock::new(Vec::new())),
             list_state,
             quant_list_state,
-            loading: false,
-            error: None,
-            status: "Press '/' to search, Tab to switch panes, ←/→ for sub-lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string(),
-            selection_info: String::new(),
-            quantizations: Arc::new(Mutex::new(Vec::new())),
+            loading: Arc::new(RwLock::new(false)),
+            error: Arc::new(RwLock::new(None)),
+            status: Arc::new(RwLock::new("Welcome! Press '/' to search for models".to_string())),
+            selection_info: Arc::new(RwLock::new(String::new())),
+            quantizations: Arc::new(RwLock::new(Vec::new())),
             quant_file_list_state,
-            loading_quants: false,
-            quant_cache: Arc::new(Mutex::new(HashMap::new())),
+            loading_quants: Arc::new(RwLock::new(false)),
+            api_cache: Arc::new(RwLock::new(crate::models::ApiCache::default())),
             popup_mode: PopupMode::None,
             download_path_input,
             download_progress: Arc::new(Mutex::new(None)),
@@ -121,12 +137,18 @@ impl App {
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
             // Non-GGUF model support
-            model_metadata: Arc::new(Mutex::new(None)),
-            file_tree: Arc::new(Mutex::new(None)),
+            model_metadata: Arc::new(RwLock::new(None)),
+            file_tree: Arc::new(RwLock::new(None)),
             file_tree_state,
-            display_mode: crate::models::ModelDisplayMode::Gguf,
+            display_mode: Arc::new(RwLock::new(crate::models::ModelDisplayMode::Gguf)),
             needs_load_quantizations: false,
             needs_search_models: false,
+            last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),
+            sort_field: default_sort_field,
+            sort_direction: default_sort_direction,
+            filter_min_downloads: default_min_downloads,
+            filter_min_likes: default_min_likes,
+            focused_filter_field: 0,
         }
     }
 

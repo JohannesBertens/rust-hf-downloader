@@ -4,8 +4,10 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 
 ## Features
 
-- 🔥 **Trending Models on Startup**: Instantly browse 60 trending models when app starts
-- 🔍 **Interactive Search**: Search through thousands of HuggingFace models
+- 🔍 **Interactive Search**: Search through thousands of HuggingFace models with popup dialog
+- 🎯 **Advanced Filtering**: Sort and filter models by downloads, likes, or last modified
+- ⚡ **Filter Presets**: Quick access to no-filter, popular, highly-rated, or recent models
+- 💾 **Filter Persistence**: Save your preferred filter settings
 - 🔐 **Gated Model Support**: Download restricted models with HuggingFace token authentication
   - Token configuration in Options screen
   - Clear error messages with helpful guidance
@@ -82,19 +84,34 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 | Key | Action |
 |-----|--------|
-| `/` | Enter search mode |
+| `/` | Open search popup |
 | `o` | Toggle options screen (configure settings) |
 | `Tab` | Switch focus between Models and Quantizations lists |
 | `d` | Download selected quantization (when Quantizations list is focused) |
 | `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
-| `Enter` | Execute search (in search mode) / Show details (in browse mode) / Edit directory (in options) |
-| `Esc` | Return to browse mode from search mode / Cancel popup / Close options |
+| `Enter` | Execute search (in search popup) / Show details (in browse mode) / Edit directory (in options) |
+| `Esc` | Close search popup / Cancel popup / Close options |
 | `j` or `↓` | Move selection down in focused list / Navigate options down |
 | `k` or `↑` | Move selection up in focused list / Navigate options up |
-| `+` | Increment numeric option value (in options screen) |
-| `-` | Decrement numeric option value (in options screen) |
+| `+` | Increment numeric option value (in options screen) / Increment focused filter |
+| `-` | Decrement numeric option value (in options screen) / Decrement focused filter |
 | `Space` | Toggle boolean option (in options screen) |
 | `q` or `Ctrl+C` | Quit application |
+
+#### Filter & Sort Controls
+| Key | Action |
+|-----|--------|
+| `s` | Cycle sort field (Downloads → Likes → Modified → Name) |
+| `S` (Shift+s) | Toggle sort direction (Ascending ↔ Descending) |
+| `f` | Cycle focus between filter fields |
+| `+` or `→` | Increment focused filter value |
+| `-`, `_` or `←` | Decrement focused filter value |
+| `r` | Reset all filters to defaults |
+| `1` | Preset: No Filters (default) |
+| `2` | Preset: Popular (10k+ downloads, 100+ likes) |
+| `3` | Preset: Highly Rated (1k+ likes) |
+| `4` | Preset: Recent (sorted by last modified) |
+| `Ctrl+S` | Save current filter settings as defaults |
 
 #### Resume Download Popup (on startup)
 | Key | Action |
@@ -105,14 +122,14 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 ### How to Use
 
-1. **Start the application** 
-   - 60 trending models load automatically (no search needed!)
+1. **Start the application**
+   - App starts with empty screen - press '/' to search for models
    - If incomplete downloads exist, you'll see a resume popup first
      - Press `Y` to resume incomplete downloads
      - Press `N` to skip and continue
      - Press `D` to delete incomplete files
    
-2. **Browse trending models** with `j`/`k` or arrow keys, or press `/` to search
+2. **Search for models** - Press '/' to search
 
 3. **Configure settings (optional)** - Press `o` to open options screen
    - Navigate with `j`/`k`
@@ -128,22 +145,20 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
    - Press `o` to open options, navigate to "HuggingFace Token", press Enter, paste token, press Enter again
    - Token is saved and will be used for all future downloads
 
-5. **Search for specific models** - Press `/` to enter search mode (search box highlighted in yellow)
+5. **Type your query** (e.g., "gpt", "llama", "mistral")
 
-6. **Type your query** (e.g., "gpt", "llama", "mistral")
+6. **Press Enter** to search
 
-7. **Press Enter** to search
+7. **Navigate model results** with `j`/`k` or arrow keys (Models list is focused by default, yellow border)
 
-8. **Navigate model results** with `j`/`k` or arrow keys (Models list is focused by default, yellow border)
-
-9. **View quantization details** automatically as you select different models
+8. **View quantization details** automatically as you select different models
    - Green `[downloaded]` indicator shows files you already have
 
-10. **Press Tab** to switch focus to the Quantizations list (yellow border moves)
+9. **Press Tab** to switch focus to the Quantizations list (yellow border moves)
 
-11. **Navigate quantizations** with `j`/`k` or arrow keys
+10. **Navigate quantizations** with `j`/`k` or arrow keys
 
-12. **Press `d`** to download the selected quantization:
+11. **Press `d`** to download the selected quantization:
    - A popup will appear with the default path `~/models`
    - Edit the path if needed
    - Press Enter to confirm and start download
@@ -155,16 +170,16 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
      - Download speed (MB/s)
      - Queue count if multiple downloads pending
 
-13. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
+12. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
    - Verification runs in background with progress bar
    - Shows verification speed and percentage
    - Status shows success (✓) or hash mismatch (✗)
 
-14. **Press Enter** to see full details of the selected item in the status bar
+13. **Press Enter** to see full details of the selected item in the status bar
 
-15. **Press Tab** again to return focus to the Models list
+14. **Press Tab** again to return focus to the Models list
 
-16. **Press `/`** to start a new search
+15. **Press `/`** to start a new search
 
 The **Quantization Details** section shows all available GGUF quantized versions with:
 - **Left**: Combined file size (formatted as GB/MB/KB) - sum of all parts for multi-part files
@@ -269,6 +284,17 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 1.0.0 (2025-11-27)
+- **Major Change**: Removed trending models automatic loading on startup
+- **Empty Screen**: App now starts with empty screen instead of 60 trending models
+- **Search-Only**: Only normal API used for retrieving results (no special trending endpoint)
+- **Faster Startup**: No network calls during application initialization
+- **Updated UX**: Welcome message prompts user to search for models
+- **Code Cleanup**: Removed all trending-related dead code (~58 lines)
+- **Documentation**: Updated README and user guide
+- **No Breaking Changes**: All existing features and configurations preserved
+- See [changelog/RELEASE_NOTES_1.0.0.md](changelog/RELEASE_NOTES_1.0.0.md) for full details
 
 ### Version 0.9.7 (2025-11-25)
 - **Critical Fix**: Fixed file path handling bugs causing incorrect file locations

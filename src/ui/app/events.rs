@@ -6,10 +6,13 @@ use tui_input::backend::crossterm::EventHandler;
 impl App {
     /// Main keyboard event dispatcher
     pub async fn on_key_event(&mut self, key: KeyEvent) {
-        self.error = None;
+        *self.error.write().unwrap() = None;
 
         // Handle popup input separately
-        if self.popup_mode == PopupMode::Options {
+        if self.popup_mode == PopupMode::SearchPopup {
+            self.handle_search_popup_input(key).await;
+            return;
+        } else if self.popup_mode == PopupMode::Options {
             self.handle_options_popup_input(key).await;
             return;
         } else if self.popup_mode == PopupMode::ResumeDownload {
@@ -35,8 +38,10 @@ impl App {
             (_, KeyCode::Char('q'))
             | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
             (_, KeyCode::Char('/')) => {
-                self.input_mode = InputMode::Editing;
-                self.status = "Enter search query, press Enter to search, ESC to cancel".to_string();
+                // Open search popup instead of inline editing
+                self.popup_mode = PopupMode::SearchPopup;
+                self.input.reset(); // Clear previous search
+                *self.status.write().unwrap() = "Search Models".to_string();
             }
             (_, KeyCode::Char('d')) => {
                 // Allow download from Models pane (for non-GGUF), QuantizationGroups, or QuantizationFiles
@@ -53,6 +58,107 @@ impl App {
             }
             (_, KeyCode::Char('o')) => {
                 self.popup_mode = PopupMode::Options;
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('s') | KeyCode::Char('S')) => {
+                // Save current filter settings as defaults
+                self.save_filter_settings();
+            }
+            (_, KeyCode::Char('s')) => {
+                // Cycle sort field: Downloads → Likes → Modified → Name → Downloads
+                self.sort_field = match self.sort_field {
+                    crate::models::SortField::Downloads => crate::models::SortField::Likes,
+                    crate::models::SortField::Likes => crate::models::SortField::Modified,
+                    crate::models::SortField::Modified => crate::models::SortField::Name,
+                    crate::models::SortField::Name => crate::models::SortField::Downloads,
+                };
+                
+                // Re-fetch with new sort
+                self.clear_search_results();
+                self.needs_search_models = true;
+                
+                *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
+            }
+            (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+                // Toggle sort direction
+                self.sort_direction = match self.sort_direction {
+                    crate::models::SortDirection::Ascending => crate::models::SortDirection::Descending,
+                    crate::models::SortDirection::Descending => crate::models::SortDirection::Ascending,
+                };
+                
+                // Re-fetch with new direction
+                self.clear_search_results();
+                self.needs_search_models = true;
+                
+                let arrow = match self.sort_direction {
+                    crate::models::SortDirection::Ascending => "▲",
+                    crate::models::SortDirection::Descending => "▼",
+                };
+                *self.status.write().unwrap() = format!("Sort direction: {:?} {}", self.sort_direction, arrow);
+            }
+            (_, KeyCode::Char('f')) => {
+                // Cycle focused filter field
+                self.focused_filter_field = (self.focused_filter_field + 1) % 3;
+                let field_name = match self.focused_filter_field {
+                    0 => "Sort",
+                    1 => "Min Downloads",
+                    2 => "Min Likes",
+                    _ => unreachable!(),
+                };
+                *self.status.write().unwrap() = format!("Focused filter: {}", field_name);
+            }
+            (_, KeyCode::Char('+')) if self.focused_pane == FocusedPane::Models => {
+                // Increment focused filter (only in Models pane to avoid conflicts)
+                self.modify_focused_filter(1);
+            }
+            (_, KeyCode::Char('-') | KeyCode::Char('_')) if self.focused_pane == FocusedPane::Models => {
+                // Decrement focused filter (only in Models pane to avoid conflicts)
+                self.modify_focused_filter(-1);
+            }
+            (_, KeyCode::Char('r')) => {
+                // Reset all filters to defaults
+                self.sort_field = crate::models::SortField::default();
+                self.sort_direction = crate::models::SortDirection::default();
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 0;
+                self.focused_filter_field = 0;
+                
+                // Re-fetch with reset filters
+                self.clear_search_results();
+                self.needs_search_models = true;
+                
+                *self.status.write().unwrap() = "Filters reset to defaults".to_string();
+            }
+            (_, KeyCode::Char('1')) => {
+                // Preset 1: No Filters (default)
+                if self.would_change_settings(FilterPreset::NoFilters) {
+                    self.apply_filter_preset(FilterPreset::NoFilters);
+                } else {
+                    *self.status.write().unwrap() = "Already using No Filters preset".to_string();
+                }
+            }
+            (_, KeyCode::Char('2')) => {
+                // Preset 2: Popular (10k+ downloads, 100+ likes)
+                if self.would_change_settings(FilterPreset::Popular) {
+                    self.apply_filter_preset(FilterPreset::Popular);
+                } else {
+                    *self.status.write().unwrap() = "Already using Popular preset".to_string();
+                }
+            }
+            (_, KeyCode::Char('3')) => {
+                // Preset 3: Highly Rated (1k+ likes, sort by likes)
+                if self.would_change_settings(FilterPreset::HighlyRated) {
+                    self.apply_filter_preset(FilterPreset::HighlyRated);
+                } else {
+                    *self.status.write().unwrap() = "Already using Highly Rated preset".to_string();
+                }
+            }
+            (_, KeyCode::Char('4')) => {
+                // Preset 4: Recent (sort by modified)
+                if self.would_change_settings(FilterPreset::Recent) {
+                    self.apply_filter_preset(FilterPreset::Recent);
+                } else {
+                    *self.status.write().unwrap() = "Already using Recent preset".to_string();
+                }
             }
             (_, KeyCode::Tab) => {
                 self.toggle_focus();
@@ -142,6 +248,45 @@ impl App {
         }
     }
 
+    /// Handle keyboard input in Search popup
+    async fn handle_search_popup_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                self.input_mode = InputMode::Normal;
+                self.popup_mode = PopupMode::None;
+                // Clear results immediately before searching
+                self.clear_search_results();
+                self.needs_search_models = true;
+            }
+            KeyCode::Esc => {
+                self.popup_mode = PopupMode::None;
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char(c) => {
+                self.input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+            KeyCode::Backspace => {
+                self.input.handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            KeyCode::Delete => {
+                self.input.handle(tui_input::InputRequest::DeleteNextChar);
+            }
+            KeyCode::Left => {
+                self.input.handle(tui_input::InputRequest::GoToPrevChar);
+            }
+            KeyCode::Right => {
+                self.input.handle(tui_input::InputRequest::GoToNextChar);
+            }
+            KeyCode::Home => {
+                self.input.handle(tui_input::InputRequest::GoToStart);
+            }
+            KeyCode::End => {
+                self.input.handle(tui_input::InputRequest::GoToEnd);
+            }
+            _ => {}
+        }
+    }
+
     /// Handle keyboard input in Editing mode
     async fn handle_editing_mode_input(&mut self, key: KeyEvent) {
         match key.code {
@@ -154,7 +299,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
-                self.status = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string();
+                *self.status.write().unwrap() = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string();
             }
             _ => {
                 self.input.handle_event(&Event::Key(key));
@@ -179,7 +324,7 @@ impl App {
                     
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
-                        self.status = format!("Failed to save config: {}", e);
+                        *self.status.write().unwrap() = format!("Failed to save config: {}", e);
                     }
                 }
                 KeyCode::Esc => {
@@ -199,7 +344,7 @@ impl App {
                     
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
-                        self.status = format!("Failed to save config: {}", e);
+                        *self.status.write().unwrap() = format!("Failed to save config: {}", e);
                     }
                 }
                 KeyCode::Esc => {
@@ -259,7 +404,7 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.popup_mode = PopupMode::None;
                 self.incomplete_downloads.clear();
-                self.status = "Skipped incomplete downloads".to_string();
+                *self.status.write().unwrap() = "Skipped incomplete downloads".to_string();
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 self.delete_incomplete_downloads().await;
@@ -278,7 +423,7 @@ impl App {
             }
             KeyCode::Esc => {
                 self.popup_mode = PopupMode::None;
-                self.status = "Download cancelled".to_string();
+                *self.status.write().unwrap() = "Download cancelled".to_string();
             }
             _ => {
                 self.download_path_input.handle_event(&Event::Key(key));
@@ -303,7 +448,7 @@ impl App {
     /// Navigate to next model in list
     pub fn next(&mut self) {
         let models_len = futures::executor::block_on(async {
-            self.models.lock().await.len()
+            self.models.read().unwrap().len()
         });
         
         if models_len == 0 {
@@ -326,7 +471,7 @@ impl App {
     /// Navigate to previous model in list
     pub fn previous(&mut self) {
         let models_len = futures::executor::block_on(async {
-            self.models.lock().await.len()
+            self.models.read().unwrap().len()
         });
         
         if models_len == 0 {
@@ -348,14 +493,14 @@ impl App {
 
     /// Toggle focus between panes based on display mode
     pub fn toggle_focus(&mut self) {
-        self.focused_pane = match self.display_mode {
+        self.focused_pane = match *self.display_mode.read().unwrap() {
             ModelDisplayMode::Gguf => {
                 // GGUF mode: cycle Models → QuantizationGroups → QuantizationFiles → Models
                 match self.focused_pane {
                     FocusedPane::Models => {
                         // When switching to quantization groups, select first item if available
                         let quants_len = futures::executor::block_on(async {
-                            self.quantizations.lock().await.len()
+                            self.quantizations.read().unwrap().len()
                         });
                         if quants_len > 0 {
                             self.quant_list_state.select(Some(0));
@@ -366,7 +511,7 @@ impl App {
                         // When switching to quantization files, select first file if available
                         if let Some(selected_group) = self.quant_list_state.selected() {
                             let quantizations = futures::executor::block_on(async {
-                                self.quantizations.lock().await.clone()
+                                self.quantizations.read().unwrap().clone()
                             });
                             if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
                                 self.quant_file_list_state.select(Some(0));
@@ -385,7 +530,7 @@ impl App {
                     FocusedPane::Models => {
                         // Skip directly to FileTree, select first item if available
                         let tree_has_items = futures::executor::block_on(async {
-                            self.file_tree.lock().await.as_ref()
+                            self.file_tree.read().unwrap().as_ref()
                                 .map(|t| !t.children.is_empty())
                                 .unwrap_or(false)
                         });
@@ -409,7 +554,7 @@ impl App {
                 // When switching to quantization files, select first file if available
                 if let Some(selected_group) = self.quant_list_state.selected() {
                     let quantizations = futures::executor::block_on(async {
-                        self.quantizations.lock().await.clone()
+                        self.quantizations.read().unwrap().clone()
                     });
                     if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
                         self.quant_file_list_state.select(Some(0));
@@ -427,7 +572,7 @@ impl App {
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
         let quants_len = futures::executor::block_on(async {
-            self.quantizations.lock().await.len()
+            self.quantizations.read().unwrap().len()
         });
         
         if quants_len == 0 {
@@ -450,7 +595,7 @@ impl App {
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
         let quants_len = futures::executor::block_on(async {
-            self.quantizations.lock().await.len()
+            self.quantizations.read().unwrap().len()
         });
         
         if quants_len == 0 {
@@ -474,7 +619,7 @@ impl App {
     pub fn next_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
             let quantizations = futures::executor::block_on(async {
-                self.quantizations.lock().await.clone()
+                self.quantizations.read().unwrap().clone()
             });
             
             if selected_group < quantizations.len() {
@@ -503,7 +648,7 @@ impl App {
     pub fn previous_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
             let quantizations = futures::executor::block_on(async {
-                self.quantizations.lock().await.clone()
+                self.quantizations.read().unwrap().clone()
             });
             
             if selected_group < quantizations.len() {
@@ -525,6 +670,140 @@ impl App {
                 };
                 self.quant_file_list_state.select(Some(i));
             }
+        }
+    }
+
+    /// Modify focused filter field value
+    pub fn modify_focused_filter(&mut self, delta: i32) {
+        match self.focused_filter_field {
+            0 => {
+                // Sort field cycling
+                if delta > 0 {
+                    self.sort_field = match self.sort_field {
+                        crate::models::SortField::Downloads => crate::models::SortField::Likes,
+                        crate::models::SortField::Likes => crate::models::SortField::Modified,
+                        crate::models::SortField::Modified => crate::models::SortField::Name,
+                        crate::models::SortField::Name => crate::models::SortField::Downloads,
+                    };
+                } else {
+                    // Toggle direction with -
+                    self.sort_direction = match self.sort_direction {
+                        crate::models::SortDirection::Ascending => crate::models::SortDirection::Descending,
+                        crate::models::SortDirection::Descending => crate::models::SortDirection::Ascending,
+                    };
+                }
+            }
+            1 => {
+                // Min downloads: 0, 100, 1k, 10k, 100k, 1M
+                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let new_idx = if delta > 0 {
+                    (current_idx + 1).min(steps.len() - 1)
+                } else {
+                    current_idx.saturating_sub(1)
+                };
+                self.filter_min_downloads = steps[new_idx];
+            }
+            2 => {
+                // Min likes: 0, 10, 50, 100, 500, 1k, 5k
+                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let new_idx = if delta > 0 {
+                    (current_idx + 1).min(steps.len() - 1)
+                } else {
+                    current_idx.saturating_sub(1)
+                };
+                self.filter_min_likes = steps[new_idx];
+            }
+            _ => {}
+        }
+        
+        // Re-fetch with new filters
+        self.clear_search_results();
+        self.needs_search_models = true;
+    }
+
+    /// Check if applying a preset would change the current settings
+    /// Returns true if the preset settings differ from current settings
+    fn would_change_settings(&self, preset: crate::models::FilterPreset) -> bool {
+        use crate::models::FilterPreset;
+        
+        let (target_sort_field, target_sort_direction, target_min_downloads, target_min_likes) = match preset {
+            FilterPreset::NoFilters => {
+                (SortField::Downloads, SortDirection::Descending, 0, 0)
+            }
+            FilterPreset::Popular => {
+                (SortField::Downloads, SortDirection::Descending, 10_000, 100)
+            }
+            FilterPreset::HighlyRated => {
+                (SortField::Likes, SortDirection::Descending, 0, 1_000)
+            }
+            FilterPreset::Recent => {
+                (SortField::Modified, SortDirection::Descending, 0, 0)
+            }
+        };
+        
+        self.sort_field != target_sort_field ||
+        self.sort_direction != target_sort_direction ||
+        self.filter_min_downloads != target_min_downloads ||
+        self.filter_min_likes != target_min_likes
+    }
+
+    /// Apply a filter preset
+    pub fn apply_filter_preset(&mut self, preset: crate::models::FilterPreset) {
+        use crate::models::FilterPreset;
+        
+        match preset {
+            FilterPreset::NoFilters => {
+                // Default: downloads descending, no filters
+                self.sort_field = SortField::Downloads;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 0;
+                *self.status.write().unwrap() = "Preset: No Filters".to_string();
+            }
+            FilterPreset::Popular => {
+                // Popular models: 10k+ downloads, 100+ likes
+                self.sort_field = SortField::Downloads;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 10_000;
+                self.filter_min_likes = 100;
+                *self.status.write().unwrap() = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
+            }
+            FilterPreset::HighlyRated => {
+                // Highly rated: 1k+ likes, sorted by likes
+                self.sort_field = SortField::Likes;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 1_000;
+                *self.status.write().unwrap() = "Preset: Highly Rated (1k+ likes)".to_string();
+            }
+            FilterPreset::Recent => {
+                // Recently updated
+                self.sort_field = SortField::Modified;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 0;
+                *self.status.write().unwrap() = "Preset: Recent".to_string();
+            }
+        }
+        
+        // Apply preset by re-searching
+        self.clear_search_results();
+        self.needs_search_models = true;
+    }
+
+    /// Save current filter settings to config
+    pub fn save_filter_settings(&mut self) {
+        self.options.default_sort_field = self.sort_field;
+        self.options.default_sort_direction = self.sort_direction;
+        self.options.default_min_downloads = self.filter_min_downloads;
+        self.options.default_min_likes = self.filter_min_likes;
+        
+        if let Err(e) = crate::config::save_config(&self.options) {
+            *self.status.write().unwrap() = format!("Failed to save filter settings: {}", e);
+        } else {
+            *self.status.write().unwrap() = "Filter settings saved".to_string();
         }
     }
 
@@ -602,14 +881,14 @@ impl App {
         
         // Save to disk
         if let Err(e) = crate::config::save_config(&self.options) {
-            self.status = format!("Failed to save config: {}", e);
+            *self.status.write().unwrap() = format!("Failed to save config: {}", e);
         }
     }
 
     /// Navigate to next item in file tree
     pub fn next_file_tree_item(&mut self) {
         let tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         if let Some(tree) = tree {
@@ -637,7 +916,7 @@ impl App {
     /// Navigate to previous item in file tree
     pub fn previous_file_tree_item(&mut self) {
         let tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         if let Some(tree) = tree {
@@ -670,7 +949,7 @@ impl App {
         };
         
         let mut tree = futures::executor::block_on(async {
-            self.file_tree.lock().await.clone()
+            self.file_tree.read().unwrap().clone()
         });
         
         if let Some(ref mut tree) = tree {
@@ -684,7 +963,7 @@ impl App {
                 
                 // Update the tree
                 futures::executor::block_on(async {
-                    *self.file_tree.lock().await = Some(tree.clone());
+                    *self.file_tree.write().unwrap() = Some(tree.clone());
                 });
             }
         }
