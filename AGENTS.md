@@ -32,3 +32,10 @@ src/
     └── render.rs     # UI rendering functions
 ```
 Check `README.md` for more information.
+
+### Filter & Sort System (v1.0.0)
+- **Filter State**: `src/ui/app/state.rs` - sort_field, sort_direction, filter_min_*
+- **Filter Logic**: `src/ui/app/events.rs` - keyboard controls and presets
+- **Filter UI**: `src/ui/render.rs` - toolbar rendering with focus highlighting
+- **Filter API**: `src/api.rs` - fetch_models_filtered() with client-side filtering
+- **Filter Config**: `src/config.rs` - default_sort_*, default_min_* persistence

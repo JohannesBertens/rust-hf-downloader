@@ -207,10 +207,22 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         String::new()
     };
     
-    let line2 = if let Some(err) = error {
+    // Check if any filters are non-default
+    let has_filters = filter_min_downloads > 0 
+        || filter_min_likes > 0 
+        || sort_field != crate::models::SortField::Downloads 
+        || sort_direction != crate::models::SortDirection::Descending;
+    
+    let base_line2 = if let Some(err) = error {
         format!("Error: {}", err)
     } else {
         status.to_string()
+    };
+    
+    let line2 = if has_filters {
+        format!("{} [Filters Active]", base_line2)
+    } else {
+        base_line2
     };
     
     let status_text = if !line1.is_empty() {
@@ -1345,7 +1357,7 @@ pub fn render_filter_toolbar(
     
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Filters & Sort  [/: Search | f: Focus | +/-: Modify | r: Reset | s/S: Sort]")
+        .title("Filters  [/: Search | 1-4: Presets | f: Focus | +/-: Modify | r: Reset | Ctrl+S: Save]")
         .style(Style::default().fg(Color::Cyan));
     
     let inner = block.inner(area);
@@ -1384,7 +1396,32 @@ pub fn render_filter_toolbar(
         Style::default().fg(Color::White)
     };
     
-    let line = Line::from(vec![
+    // Detect which preset is active (if any)
+    let preset_name = if sort_field == SortField::Modified 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 0 
+        && min_likes == 0 {
+        Some("Recent")
+    } else if sort_field == SortField::Likes 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 0 
+        && min_likes == 1_000 {
+        Some("Highly Rated")
+    } else if sort_field == SortField::Downloads 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 10_000 
+        && min_likes == 100 {
+        Some("Popular")
+    } else if sort_field == SortField::Downloads 
+        && sort_direction == SortDirection::Descending 
+        && min_downloads == 0 
+        && min_likes == 0 {
+        Some("Trending")
+    } else {
+        None
+    };
+    
+    let mut line_parts = vec![
         Span::styled("Sort: ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("{} {}", sort_name, sort_arrow), sort_style),
         Span::raw("  |  "),
@@ -1393,7 +1430,18 @@ pub fn render_filter_toolbar(
         Span::raw("  |  "),
         Span::styled("Min Likes: ", Style::default().fg(Color::DarkGray)),
         Span::styled(crate::utils::format_number(min_likes), likes_style),
-    ]);
+    ];
+    
+    // Add preset indicator if a preset is active
+    if let Some(preset) = preset_name {
+        line_parts.push(Span::raw("  |  "));
+        line_parts.push(Span::styled(
+            format!("[{}]", preset),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        ));
+    }
+    
+    let line = Line::from(line_parts);
     
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);

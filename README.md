@@ -5,7 +5,10 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 ## Features
 
 - 🔥 **Trending Models on Startup**: Instantly browse 60 trending models when app starts
-- 🔍 **Interactive Search**: Search through thousands of HuggingFace models
+- 🔍 **Interactive Search**: Search through thousands of HuggingFace models with popup dialog
+- 🎯 **Advanced Filtering**: Sort and filter models by downloads, likes, or last modified
+- ⚡ **Filter Presets**: Quick access to trending, popular, highly-rated, or recent models
+- 💾 **Filter Persistence**: Save your preferred filter settings
 - 🔐 **Gated Model Support**: Download restricted models with HuggingFace token authentication
   - Token configuration in Options screen
   - Clear error messages with helpful guidance
@@ -82,19 +85,34 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 | Key | Action |
 |-----|--------|
-| `/` | Enter search mode |
+| `/` | Open search popup |
 | `o` | Toggle options screen (configure settings) |
 | `Tab` | Switch focus between Models and Quantizations lists |
 | `d` | Download selected quantization (when Quantizations list is focused) |
 | `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
-| `Enter` | Execute search (in search mode) / Show details (in browse mode) / Edit directory (in options) |
-| `Esc` | Return to browse mode from search mode / Cancel popup / Close options |
+| `Enter` | Execute search (in search popup) / Show details (in browse mode) / Edit directory (in options) |
+| `Esc` | Close search popup / Cancel popup / Close options |
 | `j` or `↓` | Move selection down in focused list / Navigate options down |
 | `k` or `↑` | Move selection up in focused list / Navigate options up |
-| `+` | Increment numeric option value (in options screen) |
-| `-` | Decrement numeric option value (in options screen) |
+| `+` | Increment numeric option value (in options screen) / Increment focused filter |
+| `-` | Decrement numeric option value (in options screen) / Decrement focused filter |
 | `Space` | Toggle boolean option (in options screen) |
 | `q` or `Ctrl+C` | Quit application |
+
+#### Filter & Sort Controls
+| Key | Action |
+|-----|--------|
+| `s` | Cycle sort field (Downloads → Likes → Modified → Name) |
+| `S` (Shift+s) | Toggle sort direction (Ascending ↔ Descending) |
+| `f` | Cycle focus between filter fields |
+| `+` or `→` | Increment focused filter value |
+| `-`, `_` or `←` | Decrement focused filter value |
+| `r` | Reset all filters to defaults |
+| `1` | Preset: Trending (default) |
+| `2` | Preset: Popular (10k+ downloads, 100+ likes) |
+| `3` | Preset: Highly Rated (1k+ likes) |
+| `4` | Preset: Recent (sorted by last modified) |
+| `Ctrl+S` | Save current filter settings as defaults |
 
 #### Resume Download Popup (on startup)
 | Key | Action |

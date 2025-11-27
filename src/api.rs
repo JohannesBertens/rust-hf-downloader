@@ -27,19 +27,6 @@ pub async fn fetch_trending_models(token: Option<&String>) -> Result<Vec<ModelIn
     Ok(all_models)
 }
 
-#[allow(dead_code)]  // Kept for backward compatibility, use fetch_models_filtered instead
-pub async fn fetch_models(query: &str, token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
-    let url = format!(
-        "https://huggingface.co/api/models?search={}&limit=50&sort=downloads&direction=-1",
-        urlencoding::encode(query)
-    );
-    
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
-    let models: Vec<ModelInfo> = response.json().await?;
-    
-    Ok(models)
-}
-
 /// Fetch models with sorting and filtering parameters
 pub async fn fetch_models_filtered(
     query: &str,

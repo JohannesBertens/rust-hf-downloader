@@ -59,6 +59,10 @@ impl App {
             (_, KeyCode::Char('o')) => {
                 self.popup_mode = PopupMode::Options;
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('s') | KeyCode::Char('S')) => {
+                // Save current filter settings as defaults
+                self.save_filter_settings();
+            }
             (_, KeyCode::Char('s')) => {
                 // Cycle sort field: Downloads → Likes → Modified → Name → Downloads
                 self.sort_field = match self.sort_field {
@@ -106,7 +110,7 @@ impl App {
                 // Increment focused filter (only in Models pane to avoid conflicts)
                 self.modify_focused_filter(1);
             }
-            (_, KeyCode::Char('-')) if self.focused_pane == FocusedPane::Models => {
+            (_, KeyCode::Char('-') | KeyCode::Char('_')) if self.focused_pane == FocusedPane::Models => {
                 // Decrement focused filter (only in Models pane to avoid conflicts)
                 self.modify_focused_filter(-1);
             }
@@ -123,6 +127,22 @@ impl App {
                 self.needs_search_models = true;
                 
                 self.status = "Filters reset to defaults".to_string();
+            }
+            (_, KeyCode::Char('1')) => {
+                // Preset 1: Trending (default)
+                self.apply_filter_preset(FilterPreset::Trending);
+            }
+            (_, KeyCode::Char('2')) => {
+                // Preset 2: Popular (10k+ downloads, 100+ likes)
+                self.apply_filter_preset(FilterPreset::Popular);
+            }
+            (_, KeyCode::Char('3')) => {
+                // Preset 3: Highly Rated (1k+ likes, sort by likes)
+                self.apply_filter_preset(FilterPreset::HighlyRated);
+            }
+            (_, KeyCode::Char('4')) => {
+                // Preset 4: Recent (sort by modified)
+                self.apply_filter_preset(FilterPreset::Recent);
             }
             (_, KeyCode::Tab) => {
                 self.toggle_focus();
@@ -685,6 +705,64 @@ impl App {
         // Re-fetch with new filters
         self.clear_search_results();
         self.needs_search_models = true;
+    }
+
+    /// Apply a filter preset
+    pub fn apply_filter_preset(&mut self, preset: crate::models::FilterPreset) {
+        use crate::models::FilterPreset;
+        
+        match preset {
+            FilterPreset::Trending => {
+                // Default: downloads descending, no filters
+                self.sort_field = SortField::Downloads;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 0;
+                self.status = "Preset: Trending".to_string();
+            }
+            FilterPreset::Popular => {
+                // Popular models: 10k+ downloads, 100+ likes
+                self.sort_field = SortField::Downloads;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 10_000;
+                self.filter_min_likes = 100;
+                self.status = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
+            }
+            FilterPreset::HighlyRated => {
+                // Highly rated: 1k+ likes, sorted by likes
+                self.sort_field = SortField::Likes;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 1_000;
+                self.status = "Preset: Highly Rated (1k+ likes)".to_string();
+            }
+            FilterPreset::Recent => {
+                // Recently updated
+                self.sort_field = SortField::Modified;
+                self.sort_direction = SortDirection::Descending;
+                self.filter_min_downloads = 0;
+                self.filter_min_likes = 0;
+                self.status = "Preset: Recent".to_string();
+            }
+        }
+        
+        // Apply preset by re-searching
+        self.clear_search_results();
+        self.needs_search_models = true;
+    }
+
+    /// Save current filter settings to config
+    pub fn save_filter_settings(&mut self) {
+        self.options.default_sort_field = self.sort_field;
+        self.options.default_sort_direction = self.sort_direction;
+        self.options.default_min_downloads = self.filter_min_downloads;
+        self.options.default_min_likes = self.filter_min_likes;
+        
+        if let Err(e) = crate::config::save_config(&self.options) {
+            self.status = format!("Failed to save filter settings: {}", e);
+        } else {
+            self.status = "Filter settings saved".to_string();
+        }
     }
 
     /// Modify option value based on selected field and delta

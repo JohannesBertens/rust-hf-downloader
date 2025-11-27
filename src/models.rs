@@ -167,6 +167,15 @@ pub enum PopupMode {
     SearchPopup,
 }
 
+/// Filter presets for quick filter combinations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterPreset {
+    Trending,
+    Popular,
+    HighlyRated,
+    Recent,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
@@ -263,6 +272,16 @@ pub struct AppOptions {
     pub editing_directory: bool,
     #[serde(skip)]
     pub editing_token: bool,
+    
+    // Filter & Sort Settings (NEW)
+    #[serde(default)]
+    pub default_sort_field: SortField,
+    #[serde(default)]
+    pub default_sort_direction: SortDirection,
+    #[serde(default)]
+    pub default_min_downloads: u64,
+    #[serde(default)]
+    pub default_min_likes: u64,
 }
 
 impl Default for AppOptions {
@@ -287,6 +306,11 @@ impl Default for AppOptions {
             selected_field: 0,
             editing_directory: false,
             editing_token: false,
+            // Filter & Sort defaults
+            default_sort_field: SortField::Downloads,
+            default_sort_direction: SortDirection::Descending,
+            default_min_downloads: 0,
+            default_min_likes: 0,
         }
     }
 }
