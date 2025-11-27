@@ -55,7 +55,7 @@ pub struct App {
     pub model_metadata: Arc<RwLock<Option<ModelMetadata>>>,
     pub file_tree: Arc<RwLock<Option<FileTreeNode>>>,
     pub file_tree_state: ListState,
-    pub display_mode: crate::models::ModelDisplayMode,
+    pub display_mode: Arc<RwLock<crate::models::ModelDisplayMode>>,
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
@@ -138,7 +138,7 @@ impl App {
             model_metadata: Arc::new(RwLock::new(None)),
             file_tree: Arc::new(RwLock::new(None)),
             file_tree_state,
-            display_mode: crate::models::ModelDisplayMode::Gguf,
+            display_mode: Arc::new(RwLock::new(crate::models::ModelDisplayMode::Gguf)),
             needs_load_quantizations: false,
             needs_search_models: false,
             sort_field: default_sort_field,

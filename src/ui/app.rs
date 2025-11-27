@@ -90,7 +90,7 @@ impl App {
             // Check if we need to load quantizations after UI render
             if self.needs_load_quantizations {
                 self.needs_load_quantizations = false;
-                self.load_quantizations().await;
+                self.spawn_load_quantizations();
             }
             
             self.handle_crossterm_events().await?;
@@ -137,7 +137,7 @@ impl App {
             status: &*self.status.read().unwrap(),
             selection_info: &*self.selection_info.read().unwrap(),
             complete_downloads: &complete_downloads,
-            display_mode: self.display_mode,
+            display_mode: *self.display_mode.read().unwrap(),
             model_metadata: &model_metadata,
             file_tree: &file_tree,
             file_tree_state: &mut self.file_tree_state,

@@ -93,7 +93,7 @@ fn fetch_recursive_tree<'a>(
     model_id: &'a str,
     path: &'a str,
     token: Option<&'a String>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<ModelFile>, reqwest::Error>> + 'a>> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<ModelFile>, reqwest::Error>> + Send + 'a>> {
     Box::pin(async move {
         let tree_url = if path.is_empty() {
             format!("https://huggingface.co/api/models/{}/tree/main", model_id)

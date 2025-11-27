@@ -43,7 +43,7 @@ impl App {
         match self.focused_pane {
             FocusedPane::Models => {
                 // Download entire model repository (non-GGUF models in Standard mode)
-                if self.display_mode == crate::models::ModelDisplayMode::Standard {
+                if *self.display_mode.read().unwrap() == crate::models::ModelDisplayMode::Standard {
                     let metadata = futures::executor::block_on(async {
                         self.model_metadata.read().unwrap().clone()
                     });
@@ -92,7 +92,7 @@ impl App {
     pub async fn confirm_download(&mut self) {
         // Check if we're downloading a full repository (non-GGUF model)
         if self.focused_pane == FocusedPane::Models && 
-           self.display_mode == crate::models::ModelDisplayMode::Standard {
+           *self.display_mode.read().unwrap() == crate::models::ModelDisplayMode::Standard {
             self.confirm_repository_download().await;
             return;
         }

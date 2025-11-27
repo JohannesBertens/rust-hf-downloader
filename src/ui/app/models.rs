@@ -114,96 +114,105 @@ impl App {
 
     /// Load quantizations for currently selected model (with cache check)
     /// Now supports dual-mode: GGUF quantizations or standard model metadata + file tree
-    pub async fn load_quantizations(&mut self) {
+    /// Spawns a background task to avoid blocking UI thread
+    pub fn spawn_load_quantizations(&mut self) {
+        // Get selected model synchronously
         let models = self.models.read().unwrap();
-        if let Some(selected) = self.list_state.selected() {
-            if selected < models.len() {
-                let model_id = models[selected].id.clone();
-                drop(models);
-                
-                *self.loading_quants.write().unwrap() = true;
-                let token = self.options.hf_token.as_ref();
-                
-                // Fetch model metadata first to determine display mode
-                match fetch_model_metadata(&model_id, token).await {
-                    Ok(metadata) => {
-                        if has_gguf_files(&metadata) {
-                            // GGUF mode: show quantizations
-                            self.display_mode = ModelDisplayMode::Gguf;
+        let Some(selected) = self.list_state.selected() else { return };
+        if selected >= models.len() { return }
+        let model_id = models[selected].id.clone();
+        drop(models);
+        
+        // Immediate UI feedback (synchronous)
+        *self.loading_quants.write().unwrap() = true;
+        
+        // Clone Arcs for background task
+        let quantizations = self.quantizations.clone();
+        let quant_cache = self.quant_cache.clone();
+        let model_metadata = self.model_metadata.clone();
+        let file_tree = self.file_tree.clone();
+        let loading_quants = self.loading_quants.clone();
+        let error = self.error.clone();
+        let display_mode = self.display_mode.clone();
+        let token = self.options.hf_token.clone();
+        
+        // Spawn background task (non-blocking)
+        tokio::spawn(async move {
+            // Fetch model metadata first to determine display mode
+            match fetch_model_metadata(&model_id, token.as_ref()).await {
+                Ok(metadata) => {
+                    if has_gguf_files(&metadata) {
+                        // GGUF mode: show quantizations
+                        *display_mode.write().unwrap() = ModelDisplayMode::Gguf;
+                        
+                        // Check cache first
+                        let cached_result = {
+                            let cache = quant_cache.read().unwrap();
+                            cache.get(&model_id).cloned()
+                        };
+                        
+                        if let Some(cached_groups) = cached_result {
+                            let mut quants_lock = quantizations.write().unwrap();
+                            *quants_lock = cached_groups;
+                            *loading_quants.write().unwrap() = false;
                             
-                            // Check cache first
-                            let cache = self.quant_cache.read().unwrap();
-                            if let Some(cached_groups) = cache.get(&model_id) {
-                                let mut quants_lock = self.quantizations.write().unwrap();
-                                *quants_lock = cached_groups.clone();
-                                drop(cache);
-                                *self.loading_quants.write().unwrap() = false;
+                            // Reset file tree state
+                            *model_metadata.write().unwrap() = None;
+                            *file_tree.write().unwrap() = None;
+                            return;
+                        }
+                        
+                        match fetch_model_files(&model_id, token.as_ref()).await {
+                            Ok(quants) => {
+                                let mut quants_lock = quantizations.write().unwrap();
+                                *quants_lock = quants.clone();
+                                *loading_quants.write().unwrap() = false;
+                                
+                                // Store in cache
+                                let mut cache_lock = quant_cache.write().unwrap();
+                                cache_lock.insert(model_id, quants);
                                 
                                 // Reset file tree state
-                                *self.model_metadata.write().unwrap() = None;
-                                *self.file_tree.write().unwrap() = None;
-                                return;
+                                *model_metadata.write().unwrap() = None;
+                                *file_tree.write().unwrap() = None;
                             }
-                            drop(cache);
-                            
-                            let quantizations = self.quantizations.clone();
-                            let cache = self.quant_cache.clone();
-                            
-                            match fetch_model_files(&model_id, token).await {
-                                Ok(quants) => {
-                                    let mut quants_lock = quantizations.write().unwrap();
-                                    *quants_lock = quants.clone();
-                                    *self.loading_quants.write().unwrap() = false;
-                                    
-                                    // Store in cache
-                                    let mut cache_lock = cache.write().unwrap();
-                                    cache_lock.insert(model_id, quants);
-                                    
-                                    // Reset file tree state
-                                    *self.model_metadata.write().unwrap() = None;
-                                    *self.file_tree.write().unwrap() = None;
-                                }
-                                Err(_) => {
-                                    *self.loading_quants.write().unwrap() = false;
-                                    let mut quants_lock = quantizations.write().unwrap();
-                                    quants_lock.clear();
-                                }
+                            Err(_) => {
+                                *loading_quants.write().unwrap() = false;
+                                let mut quants_lock = quantizations.write().unwrap();
+                                quants_lock.clear();
                             }
-                        } else {
-                            // Standard mode: show metadata + file tree
-                            self.display_mode = ModelDisplayMode::Standard;
-                            
-                            // Clear quantizations
-                            let mut quants_lock = self.quantizations.write().unwrap();
-                            quants_lock.clear();
-                            drop(quants_lock);
-                            
-                            // Build file tree from siblings
-                            let tree = build_file_tree(metadata.siblings.clone());
-                            
-                            // Store metadata and tree
-                            *self.model_metadata.write().unwrap() = Some(metadata);
-                            *self.file_tree.write().unwrap() = Some(tree);
-                            
-                            // Reset file tree selection
-                            self.file_tree_state.select(Some(0));
-                            
-                            *self.loading_quants.write().unwrap() = false;
                         }
-                    }
-                    Err(e) => {
-                        *self.loading_quants.write().unwrap() = false;
-                        *self.error.write().unwrap() = Some(format!("Failed to fetch model metadata: {}", e));
+                    } else {
+                        // Standard mode: show metadata + file tree
+                        *display_mode.write().unwrap() = ModelDisplayMode::Standard;
                         
-                        // Clear both states on error
-                        let mut quants_lock = self.quantizations.write().unwrap();
+                        // Clear quantizations
+                        let mut quants_lock = quantizations.write().unwrap();
                         quants_lock.clear();
-                        *self.model_metadata.write().unwrap() = None;
-                        *self.file_tree.write().unwrap() = None;
+                        drop(quants_lock);
+                        
+                        // Build file tree from siblings
+                        let tree = build_file_tree(metadata.siblings.clone());
+                        
+                        // Store metadata and tree
+                        *model_metadata.write().unwrap() = Some(metadata);
+                        *file_tree.write().unwrap() = Some(tree);
+                        
+                        *loading_quants.write().unwrap() = false;
                     }
                 }
+                Err(e) => {
+                    *loading_quants.write().unwrap() = false;
+                    *error.write().unwrap() = Some(format!("Failed to fetch model metadata: {}", e));
+                    
+                    // Clear both states on error
+                    let mut quants_lock = quantizations.write().unwrap();
+                    quants_lock.clear();
+                    *model_metadata.write().unwrap() = None;
+                    *file_tree.write().unwrap() = None;
+                }
             }
-        }
+        });
     }
 
     /// Clear model details immediately (for instant UI feedback during navigation)

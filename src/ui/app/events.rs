@@ -493,7 +493,7 @@ impl App {
 
     /// Toggle focus between panes based on display mode
     pub fn toggle_focus(&mut self) {
-        self.focused_pane = match self.display_mode {
+        self.focused_pane = match *self.display_mode.read().unwrap() {
             ModelDisplayMode::Gguf => {
                 // GGUF mode: cycle Models → QuantizationGroups → QuantizationFiles → Models
                 match self.focused_pane {
