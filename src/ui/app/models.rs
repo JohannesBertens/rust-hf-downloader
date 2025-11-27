@@ -21,7 +21,45 @@ impl App {
         let min_downloads = self.filter_min_downloads;
         let min_likes = self.filter_min_likes;
         
-        // Use fetch_models_filtered with current sort and filter settings
+        // Create search key for caching
+        let search_key = crate::models::SearchKey {
+            query: query.clone(),
+            sort_field,
+            sort_direction,
+            min_downloads,
+            min_likes,
+        };
+        
+        // Check cache first
+        let cached_results = {
+            let cache = self.api_cache.read().unwrap();
+            cache.searches.get(&search_key).cloned()
+        };
+        
+        if let Some(results) = cached_results {
+            // Use cached results (instant!)
+            let has_results = !results.is_empty();
+            let mut models_lock = models.write().unwrap();
+            *models_lock = results;
+            *self.loading.write().unwrap() = false;
+            self.list_state.select(Some(0));
+            
+            let filter_status = if min_downloads > 0 || min_likes > 0 {
+                " (cached, filtered from 100)".to_string()
+            } else {
+                " (cached)".to_string()
+            };
+            *self.status.write().unwrap() = format!("Found {} models{}", models_lock.len(), filter_status);
+            
+            drop(models_lock);
+            
+            if has_results {
+                self.needs_load_quantizations = true;
+            }
+            return;
+        }
+        
+        // Fetch and cache search results
         match crate::api::fetch_models_filtered(
             &query,
             sort_field,
@@ -32,10 +70,17 @@ impl App {
         ).await {
             Ok(results) => {
                 let has_results = !results.is_empty();
+                
+                // Store in UI state
                 let mut models_lock = models.write().unwrap();
-                *models_lock = results;
+                *models_lock = results.clone();
                 *self.loading.write().unwrap() = false;
                 self.list_state.select(Some(0));
+                
+                // Store in cache
+                let mut cache = self.api_cache.write().unwrap();
+                cache.searches.insert(search_key, results);
+                drop(cache);
                 
                 // Show filter count in status if filters are active
                 let filter_status = if min_downloads > 0 || min_likes > 0 {
@@ -128,7 +173,7 @@ impl App {
         
         // Clone Arcs for background task
         let quantizations = self.quantizations.clone();
-        let quant_cache = self.quant_cache.clone();
+        let api_cache = self.api_cache.clone();
         let model_metadata = self.model_metadata.clone();
         let file_tree = self.file_tree.clone();
         let loading_quants = self.loading_quants.clone();
@@ -138,17 +183,46 @@ impl App {
         
         // Spawn background task (non-blocking)
         tokio::spawn(async move {
-            // Fetch model metadata first to determine display mode
-            match fetch_model_metadata(&model_id, token.as_ref()).await {
-                Ok(metadata) => {
+            // Check metadata cache first (avoids expensive API call)
+            let cached_metadata = {
+                let cache = api_cache.read().unwrap();
+                cache.metadata.get(&model_id).cloned()
+            };
+            
+            let metadata = if let Some(meta) = cached_metadata {
+                meta  // Use cached metadata
+            } else {
+                // Fetch and cache metadata
+                match fetch_model_metadata(&model_id, token.as_ref()).await {
+                    Ok(meta) => {
+                        let mut cache = api_cache.write().unwrap();
+                        cache.metadata.insert(model_id.clone(), meta.clone());
+                        meta
+                    }
+                    Err(e) => {
+                        *loading_quants.write().unwrap() = false;
+                        *error.write().unwrap() = Some(format!("Failed to fetch model metadata: {}", e));
+                        
+                        // Clear both states on error
+                        let mut quants_lock = quantizations.write().unwrap();
+                        quants_lock.clear();
+                        *model_metadata.write().unwrap() = None;
+                        *file_tree.write().unwrap() = None;
+                        return;
+                    }
+                }
+            };
+            
+            // Now process based on metadata
+            if true {  // Placeholder to keep structure
                     if has_gguf_files(&metadata) {
                         // GGUF mode: show quantizations
                         *display_mode.write().unwrap() = ModelDisplayMode::Gguf;
                         
-                        // Check cache first
+                        // Check quantization cache
                         let cached_result = {
-                            let cache = quant_cache.read().unwrap();
-                            cache.get(&model_id).cloned()
+                            let cache = api_cache.read().unwrap();
+                            cache.quantizations.get(&model_id).cloned()
                         };
                         
                         if let Some(cached_groups) = cached_result {
@@ -169,8 +243,8 @@ impl App {
                                 *loading_quants.write().unwrap() = false;
                                 
                                 // Store in cache
-                                let mut cache_lock = quant_cache.write().unwrap();
-                                cache_lock.insert(model_id, quants);
+                                let mut cache = api_cache.write().unwrap();
+                                cache.quantizations.insert(model_id, quants);
                                 
                                 // Reset file tree state
                                 *model_metadata.write().unwrap() = None;
@@ -191,26 +265,28 @@ impl App {
                         quants_lock.clear();
                         drop(quants_lock);
                         
-                        // Build file tree from siblings
-                        let tree = build_file_tree(metadata.siblings.clone());
+                        // Check file tree cache (avoid rebuilding)
+                        let cached_tree = {
+                            let cache = api_cache.read().unwrap();
+                            cache.file_trees.get(&model_id).cloned()
+                        };
                         
-                        // Store metadata and tree
+                        let tree = if let Some(tree) = cached_tree {
+                            tree  // Use cached tree
+                        } else {
+                            // Build and cache tree
+                            let tree = build_file_tree(metadata.siblings.clone());
+                            let mut cache = api_cache.write().unwrap();
+                            cache.file_trees.insert(model_id.clone(), tree.clone());
+                            tree
+                        };
+                        
+                        // Store metadata and tree in UI state
                         *model_metadata.write().unwrap() = Some(metadata);
                         *file_tree.write().unwrap() = Some(tree);
                         
                         *loading_quants.write().unwrap() = false;
                     }
-                }
-                Err(e) => {
-                    *loading_quants.write().unwrap() = false;
-                    *error.write().unwrap() = Some(format!("Failed to fetch model metadata: {}", e));
-                    
-                    // Clear both states on error
-                    let mut quants_lock = quantizations.write().unwrap();
-                    quants_lock.clear();
-                    *model_metadata.write().unwrap() = None;
-                    *file_tree.write().unwrap() = None;
-                }
             }
         });
     }
@@ -246,6 +322,114 @@ impl App {
         // Set loading state
         *self.loading.write().unwrap() = true;
         *self.status.write().unwrap() = "Searching...".to_string();
+    }
+
+    /// Pre-emptively load adjacent models into cache (1 before, 1 after current selection)
+    /// Loads metadata, quantizations (GGUF), and file trees (Standard) with debouncing
+    pub fn prefetch_adjacent_models(&self) {
+        const PREFETCH_DEBOUNCE_MS: u128 = 1000; // Wait 1000ms before prefetching
+        
+        // Check debounce
+        let now = std::time::Instant::now();
+        let should_prefetch = {
+            let mut last_time = futures::executor::block_on(async {
+                self.last_prefetch_time.lock().await
+            });
+            if now.duration_since(*last_time).as_millis() > PREFETCH_DEBOUNCE_MS {
+                *last_time = now;
+                true
+            } else {
+                false
+            }
+        };
+        
+        if !should_prefetch {
+            return; // Skip prefetch if navigating rapidly
+        }
+        
+        let models = self.models.read().unwrap();
+        let Some(selected) = self.list_state.selected() else { return };
+        if models.is_empty() { return }
+        
+        // Calculate adjacent indices (1 before, 1 after)
+        let mut indices_to_prefetch = Vec::new();
+        
+        if selected >= 1 {
+            indices_to_prefetch.push(selected - 1);
+        }
+        if selected + 1 < models.len() {
+            indices_to_prefetch.push(selected + 1);
+        }
+        
+        // Collect model IDs
+        let model_ids: Vec<String> = indices_to_prefetch
+            .into_iter()
+            .filter_map(|idx| models.get(idx).map(|m| m.id.clone()))
+            .collect();
+        
+        drop(models);
+        
+        if model_ids.is_empty() {
+            return;
+        }
+        
+        // Clone Arcs for background task
+        let api_cache = self.api_cache.clone();
+        let token = self.options.hf_token.clone();
+        
+        // Spawn background prefetch task (fire-and-forget)
+        tokio::spawn(async move {
+            for model_id in model_ids {
+                // Check if metadata already cached
+                let metadata_cached = {
+                    let cache = api_cache.read().unwrap();
+                    cache.metadata.get(&model_id).cloned()
+                };
+                
+                let metadata = if let Some(meta) = metadata_cached {
+                    meta // Use cached
+                } else {
+                    // Fetch and cache metadata
+                    match fetch_model_metadata(&model_id, token.as_ref()).await {
+                        Ok(meta) => {
+                            let mut cache = api_cache.write().unwrap();
+                            cache.metadata.insert(model_id.clone(), meta.clone());
+                            meta
+                        }
+                        Err(_) => continue, // Skip on error
+                    }
+                };
+                
+                // Process based on model type
+                if has_gguf_files(&metadata) {
+                    // GGUF model: prefetch quantizations
+                    let quants_cached = {
+                        let cache = api_cache.read().unwrap();
+                        cache.quantizations.contains_key(&model_id)
+                    };
+                    
+                    if !quants_cached {
+                        // Fetch and cache quantizations
+                        if let Ok(quants) = fetch_model_files(&model_id, token.as_ref()).await {
+                            let mut cache = api_cache.write().unwrap();
+                            cache.quantizations.insert(model_id.clone(), quants);
+                        }
+                    }
+                } else {
+                    // Standard model: prefetch file tree
+                    let tree_cached = {
+                        let cache = api_cache.read().unwrap();
+                        cache.file_trees.contains_key(&model_id)
+                    };
+                    
+                    if !tree_cached {
+                        let tree = build_file_tree(metadata.siblings.clone());
+                        let mut cache = api_cache.write().unwrap();
+                        cache.file_trees.insert(model_id, tree);
+                    }
+                }
+            }
+        });
     }
 
 }

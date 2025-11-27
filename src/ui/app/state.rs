@@ -33,7 +33,7 @@ pub struct App {
     pub quantizations: Arc<RwLock<Vec<QuantizationGroup>>>,
     pub quant_file_list_state: ListState,
     pub loading_quants: Arc<RwLock<bool>>,
-    pub quant_cache: Arc<RwLock<QuantizationCache>>,
+    pub api_cache: Arc<RwLock<crate::models::ApiCache>>,
     pub popup_mode: PopupMode,
     pub download_path_input: Input,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
@@ -59,6 +59,8 @@ pub struct App {
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
+    // Prefetch debounce timer
+    pub last_prefetch_time: Arc<Mutex<std::time::Instant>>,
     // Filter & Sort state
     pub sort_field: crate::models::SortField,
     pub sort_direction: crate::models::SortDirection,
@@ -116,7 +118,7 @@ impl App {
             quantizations: Arc::new(RwLock::new(Vec::new())),
             quant_file_list_state,
             loading_quants: Arc::new(RwLock::new(false)),
-            quant_cache: Arc::new(RwLock::new(HashMap::new())),
+            api_cache: Arc::new(RwLock::new(crate::models::ApiCache::default())),
             popup_mode: PopupMode::None,
             download_path_input,
             download_progress: Arc::new(Mutex::new(None)),
@@ -141,6 +143,7 @@ impl App {
             display_mode: Arc::new(RwLock::new(crate::models::ModelDisplayMode::Gguf)),
             needs_load_quantizations: false,
             needs_search_models: false,
+            last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),
             sort_field: default_sort_field,
             sort_direction: default_sort_direction,
             filter_min_downloads: default_min_downloads,
