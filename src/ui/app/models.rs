@@ -1,39 +1,8 @@
 use super::state::App;
-use crate::api::{fetch_model_files, fetch_trending_models, fetch_model_metadata, has_gguf_files, build_file_tree};
+use crate::api::{fetch_model_files, fetch_model_metadata, has_gguf_files, build_file_tree};
 use crate::models::ModelDisplayMode;
 
 impl App {
-    /// Load trending models on startup (60 models from 2 pages)
-    pub async fn load_trending_models(&mut self) {
-        self.loading = true;
-        self.error = None;
-        
-        let models = self.models.clone();
-        
-        let token = self.options.hf_token.as_ref();
-        match fetch_trending_models(token).await {
-            Ok(results) => {
-                let has_results = !results.is_empty();
-                let mut models_lock = models.lock().await;
-                *models_lock = results;
-                self.loading = false;
-                self.list_state.select(Some(0));
-                self.status = format!("Loaded {} trending models", models_lock.len());
-                drop(models_lock);
-                
-                // Trigger load for first result if we have results
-                if has_results {
-                    self.needs_load_quantizations = true;
-                }
-            }
-            Err(e) => {
-                self.loading = false;
-                self.error = Some(format!("Failed to fetch trending models: {}", e));
-                self.status = "Failed to load trending models".to_string();
-            }
-        }
-    }
-
     /// Execute search query and load results
     pub async fn search_models(&mut self) {
         let query = self.input.value().to_string();

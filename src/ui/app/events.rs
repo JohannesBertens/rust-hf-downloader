@@ -129,20 +129,36 @@ impl App {
                 self.status = "Filters reset to defaults".to_string();
             }
             (_, KeyCode::Char('1')) => {
-                // Preset 1: Trending (default)
-                self.apply_filter_preset(FilterPreset::Trending);
+                // Preset 1: No Filters (default)
+                if self.would_change_settings(FilterPreset::NoFilters) {
+                    self.apply_filter_preset(FilterPreset::NoFilters);
+                } else {
+                    self.status = "Already using No Filters preset".to_string();
+                }
             }
             (_, KeyCode::Char('2')) => {
                 // Preset 2: Popular (10k+ downloads, 100+ likes)
-                self.apply_filter_preset(FilterPreset::Popular);
+                if self.would_change_settings(FilterPreset::Popular) {
+                    self.apply_filter_preset(FilterPreset::Popular);
+                } else {
+                    self.status = "Already using Popular preset".to_string();
+                }
             }
             (_, KeyCode::Char('3')) => {
                 // Preset 3: Highly Rated (1k+ likes, sort by likes)
-                self.apply_filter_preset(FilterPreset::HighlyRated);
+                if self.would_change_settings(FilterPreset::HighlyRated) {
+                    self.apply_filter_preset(FilterPreset::HighlyRated);
+                } else {
+                    self.status = "Already using Highly Rated preset".to_string();
+                }
             }
             (_, KeyCode::Char('4')) => {
                 // Preset 4: Recent (sort by modified)
-                self.apply_filter_preset(FilterPreset::Recent);
+                if self.would_change_settings(FilterPreset::Recent) {
+                    self.apply_filter_preset(FilterPreset::Recent);
+                } else {
+                    self.status = "Already using Recent preset".to_string();
+                }
             }
             (_, KeyCode::Tab) => {
                 self.toggle_focus();
@@ -707,18 +723,44 @@ impl App {
         self.needs_search_models = true;
     }
 
+    /// Check if applying a preset would change the current settings
+    /// Returns true if the preset settings differ from current settings
+    fn would_change_settings(&self, preset: crate::models::FilterPreset) -> bool {
+        use crate::models::FilterPreset;
+        
+        let (target_sort_field, target_sort_direction, target_min_downloads, target_min_likes) = match preset {
+            FilterPreset::NoFilters => {
+                (SortField::Downloads, SortDirection::Descending, 0, 0)
+            }
+            FilterPreset::Popular => {
+                (SortField::Downloads, SortDirection::Descending, 10_000, 100)
+            }
+            FilterPreset::HighlyRated => {
+                (SortField::Likes, SortDirection::Descending, 0, 1_000)
+            }
+            FilterPreset::Recent => {
+                (SortField::Modified, SortDirection::Descending, 0, 0)
+            }
+        };
+        
+        self.sort_field != target_sort_field ||
+        self.sort_direction != target_sort_direction ||
+        self.filter_min_downloads != target_min_downloads ||
+        self.filter_min_likes != target_min_likes
+    }
+
     /// Apply a filter preset
     pub fn apply_filter_preset(&mut self, preset: crate::models::FilterPreset) {
         use crate::models::FilterPreset;
         
         match preset {
-            FilterPreset::Trending => {
+            FilterPreset::NoFilters => {
                 // Default: downloads descending, no filters
                 self.sort_field = SortField::Downloads;
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 0;
                 self.filter_min_likes = 0;
-                self.status = "Preset: Trending".to_string();
+                self.status = "Preset: No Filters".to_string();
             }
             FilterPreset::Popular => {
                 // Popular models: 10k+ downloads, 100+ likes

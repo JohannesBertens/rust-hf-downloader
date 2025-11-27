@@ -26,12 +26,9 @@ impl App {
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
         
-        // Set initial status and render UI once before loading models
-        self.status = "Loading trending models...".to_string();
+        // Set initial status for empty screen
+        self.status = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
-        
-        // Load trending models on startup
-        self.load_trending_models().await;
         
         // Spawn verification worker
         let verification_queue = self.verification_queue.clone();

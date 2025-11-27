@@ -1,31 +1,5 @@
-use crate::models::{ModelInfo, ModelFile, QuantizationInfo, QuantizationGroup, TrendingResponse, ModelMetadata, RepoFile, FileTreeNode};
+use crate::models::{ModelInfo, ModelFile, QuantizationInfo, QuantizationGroup, ModelMetadata, RepoFile, FileTreeNode};
 use std::collections::HashMap;
-
-pub async fn fetch_trending_models_page(page: u32, token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
-    let url = format!(
-        "https://huggingface.co/models-json?p={}&sort=trending&withCount=true",
-        page
-    );
-    
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
-    let trending: TrendingResponse = response.json().await?;
-    
-    Ok(trending.models)
-}
-
-pub async fn fetch_trending_models(token: Option<&String>) -> Result<Vec<ModelInfo>, reqwest::Error> {
-    // Fetch both page 0 and page 1 to get ~60 trending models
-    let page0_future = fetch_trending_models_page(0, token);
-    let page1_future = fetch_trending_models_page(1, token);
-    
-    // Fetch both pages in parallel
-    let (page0_result, page1_result) = tokio::join!(page0_future, page1_future);
-    
-    let mut all_models = page0_result?;
-    all_models.extend(page1_result?);
-    
-    Ok(all_models)
-}
 
 /// Fetch models with sorting and filtering parameters
 pub async fn fetch_models_filtered(

@@ -1416,7 +1416,7 @@ pub fn render_filter_toolbar(
         && sort_direction == SortDirection::Descending 
         && min_downloads == 0 
         && min_likes == 0 {
-        Some("Trending")
+        Some("No Filters")
     } else {
         None
     };

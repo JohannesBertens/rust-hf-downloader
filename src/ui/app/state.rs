@@ -110,7 +110,7 @@ impl App {
             quant_list_state,
             loading: false,
             error: None,
-            status: "Press '/' to search, Tab to switch panes, ←/→ for sub-lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string(),
+            status: "Welcome! Press '/' to search for models".to_string(),
             selection_info: String::new(),
             quantizations: Arc::new(Mutex::new(Vec::new())),
             quant_file_list_state,

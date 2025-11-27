@@ -15,11 +15,6 @@ pub struct ModelInfo {
     pub last_modified: Option<String>,
 }
 
-/// Response wrapper for trending models API
-#[derive(Debug, Clone, Deserialize)]
-pub struct TrendingResponse {
-    pub models: Vec<ModelInfo>,
-}
 
 /// Extended model metadata from /api/models/{model_id}
 #[derive(Debug, Clone, Deserialize)]
@@ -170,7 +165,7 @@ pub enum PopupMode {
 /// Filter presets for quick filter combinations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterPreset {
-    Trending,
+    NoFilters,
     Popular,
     HighlyRated,
     Recent,
