@@ -39,3 +39,8 @@ Check `README.md` for more information.
 - **Filter UI**: `src/ui/render.rs` - toolbar rendering with focus highlighting
 - **Filter API**: `src/api.rs` - fetch_models_filtered() with client-side filtering
 - **Filter Config**: `src/config.rs` - default_sort_*, default_min_* persistence
+
+# IMPORTANT NOTES
+- Always read the full file, no 'limit' for read **NEVER READ A FILE ONLY PARTIALLY**
+- Always read the full file before edit
+- Always compile the project after finishing a plan
