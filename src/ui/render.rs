@@ -155,14 +155,15 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(list_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::Models {
-                        Style::default().fg(Color::Yellow)
+                // Enhanced border style with background color for focused panels
+                .border_style({
+                    let panel_focused = input_mode == InputMode::Normal && focused_pane == FocusedPane::Models;
+                    if panel_focused {
+                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
                     } else {
                         Style::default()
                     }
-                ),
+                }),
         )
         .highlight_style(
             Style::default()
@@ -360,14 +361,15 @@ fn render_standard_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(meta_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::ModelMetadata {
-                        Style::default().fg(Color::Yellow)
+                // Enhanced border style with background color for focused panels
+                .border_style({
+                    let panel_focused = input_mode == InputMode::Normal && focused_pane == FocusedPane::ModelMetadata;
+                    if panel_focused {
+                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
                     } else {
                         Style::default()
                     }
-                ),
+                }),
         )
         .wrap(Wrap { trim: false });
 
@@ -441,14 +443,15 @@ fn render_file_tree_panel(
             Block::default()
                 .borders(Borders::ALL)
                 .title(tree_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::FileTree {
-                        Style::default().fg(Color::Yellow)
+                // Enhanced border style with background color for focused panels
+                .border_style({
+                    let panel_focused = input_mode == InputMode::Normal && focused_pane == FocusedPane::FileTree;
+                    if panel_focused {
+                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
                     } else {
                         Style::default()
                     }
-                ),
+                }),
         )
         .highlight_style(
             Style::default()
@@ -558,14 +561,15 @@ fn render_gguf_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(quant_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::QuantizationGroups {
-                        Style::default().fg(Color::Yellow)
+                // Enhanced border style with background color for focused panels
+                .border_style({
+                    let panel_focused = input_mode == InputMode::Normal && focused_pane == FocusedPane::QuantizationGroups;
+                    if panel_focused {
+                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
                     } else {
                         Style::default()
                     }
-                ),
+                }),
         )
         .highlight_style(
             Style::default()
@@ -621,14 +625,15 @@ fn render_gguf_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(file_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::QuantizationFiles {
-                        Style::default().fg(Color::Yellow)
+                // Enhanced border style with background color for focused panels
+                .border_style({
+                    let panel_focused = input_mode == InputMode::Normal && focused_pane == FocusedPane::QuantizationFiles;
+                    if panel_focused {
+                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
                     } else {
                         Style::default()
                     }
-                ),
+                }),
         )
         .highlight_style(
             Style::default()
