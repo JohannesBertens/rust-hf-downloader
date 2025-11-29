@@ -1,12 +1,12 @@
 // Declare submodules
-mod state;
+pub mod state;
 mod events;
 mod models;
 mod downloads;
 mod verification;
 
-// Re-export App struct
-pub use state::App;
+// Re-export App struct and related types
+pub use state::{App, DownloadRecord};
 
 use crate::download::start_download;
 use crate::models::PopupMode;
@@ -79,6 +79,9 @@ impl App {
         });
         
         while self.running {
+            // Update animation frame for canvas features
+            self.update_animation_frame();
+            
             terminal.draw(|frame| self.draw(frame))?;
             
             // Check if we need to search for models after UI render
@@ -122,6 +125,14 @@ impl App {
             self.file_tree.read().unwrap().clone()
         });
         
+        let download_progress = futures::executor::block_on(async {
+            self.download_progress.lock().await.clone()
+        });
+        
+        let verification_progress = futures::executor::block_on(async {
+            self.verification_progress.lock().await.clone()
+        });
+        
         // Render main UI
         crate::ui::render::render_ui(frame, crate::ui::render::RenderParams {
             input: &self.input,
@@ -147,6 +158,12 @@ impl App {
             filter_min_downloads: self.filter_min_downloads,
             filter_min_likes: self.filter_min_likes,
             focused_filter_field: self.focused_filter_field,
+            // Canvas features
+            popup_mode: self.popup_mode,
+            download_progress: &download_progress,
+            verification_progress: &verification_progress,
+            advanced_canvas_state: &self.advanced_canvas_state,
+            canvas_animation_frame: self.canvas_animation_frame,
         });
         
         // Render both download and verification progress bars
@@ -170,20 +187,94 @@ impl App {
         // Render popups (must be last to appear on top)
         match self.popup_mode {
             PopupMode::SearchPopup => {
-                crate::ui::render::render_search_popup(frame, &self.input);
+                crate::ui::render::render_search_popup(
+                    frame, 
+                    &self.input, 
+                    &[], // suggestions
+                    0,   // selected_index
+                    0,   // animation_frame
+                    false // canvas_enabled
+                );
             }
             PopupMode::ResumeDownload => {
                 crate::ui::render::render_resume_popup(frame, &self.incomplete_downloads);
             }
             PopupMode::DownloadPath => {
-                crate::ui::render::render_download_path_popup(frame, &self.download_path_input);
+                crate::ui::render::render_download_path_popup(
+                    frame, 
+                    &self.download_path_input,
+                    &[], // path_components
+                    0,   // current_index
+                    crate::models::ValidationStatus::Pending, // validation_status
+                    0,   // animation_frame
+                    false // canvas_enabled
+                );
             }
             PopupMode::Options => {
-                crate::ui::render::render_options_popup(frame, &self.options, &self.options_directory_input, &self.options_token_input);
+                crate::ui::render::render_options_popup(
+                    frame, 
+                    &self.options, 
+                    &self.options_directory_input, 
+                    &self.options_token_input,
+                    0, // animation_frame
+                    crate::ui::render::CanvasPreferences::default() // canvas_preferences
+                );
             }
             PopupMode::AuthError { ref model_url } => {
                 let has_token = self.options.hf_token.as_ref().is_some_and(|t| !t.is_empty());
                 crate::ui::render::render_auth_error_popup(frame, model_url, has_token);
+            }
+            // Canvas-based popup modes
+            PopupMode::ModelVisualization
+            | PopupMode::ModelComparison 
+            | PopupMode::NetworkActivity
+            | PopupMode::PerformanceAnalytics
+            | PopupMode::EnhancedVerification => {
+                // These are handled by the canvas popup renderer
+                crate::ui::render::render_canvas_popups(frame, crate::ui::render::RenderParams {
+                    input: &self.input,
+                    input_mode: self.input_mode,
+                    models: &futures::executor::block_on(async {
+                        self.models.read().unwrap().clone()
+                    }),
+                    list_state: &mut self.list_state,
+                    loading: *self.loading.read().unwrap(),
+                    quantizations: &futures::executor::block_on(async {
+                        self.quantizations.read().unwrap().clone()
+                    }),
+                    quant_file_list_state: &mut self.quant_file_list_state,
+                    quant_list_state: &mut self.quant_list_state,
+                    loading_quants: *self.loading_quants.read().unwrap(),
+                    focused_pane: self.focused_pane,
+                    error: &self.error.read().unwrap().clone(),
+                    status: &self.status.read().unwrap(),
+                    selection_info: &self.selection_info.read().unwrap(),
+                    complete_downloads: &futures::executor::block_on(async {
+                        self.complete_downloads.lock().await.clone()
+                    }),
+                    display_mode: *self.display_mode.read().unwrap(),
+                    model_metadata: &futures::executor::block_on(async {
+                        self.model_metadata.read().unwrap().clone()
+                    }),
+                    file_tree: &futures::executor::block_on(async {
+                        self.file_tree.read().unwrap().clone()
+                    }),
+                    file_tree_state: &mut self.file_tree_state,
+                    sort_field: self.sort_field,
+                    sort_direction: self.sort_direction,
+                    filter_min_downloads: self.filter_min_downloads,
+                    filter_min_likes: self.filter_min_likes,
+                    focused_filter_field: self.focused_filter_field,
+                    popup_mode: self.popup_mode.clone(),
+                    download_progress: &futures::executor::block_on(async {
+                        self.download_progress.lock().await.clone()
+                    }),
+                    verification_progress: &futures::executor::block_on(async {
+                        self.verification_progress.lock().await.clone()
+                    }),
+                    advanced_canvas_state: &self.advanced_canvas_state,
+                    canvas_animation_frame: self.canvas_animation_frame,
+                });
             }
             PopupMode::None => {}
         }

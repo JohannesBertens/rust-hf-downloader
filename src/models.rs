@@ -56,6 +56,233 @@ pub struct RepoFile {
     pub lfs: Option<LfsInfo>,  // Reuse existing LfsInfo struct
 }
 
+/// Model architecture types for visualization
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ModelType {
+    Transformer,
+    CNN,
+    GPT,
+    LSTM,
+    RNN,
+    BERT,
+    T5,
+    Whisper,
+    StableDiffusion,
+    ResNet,
+    VGG,
+    Inception,
+    MobileNet,
+    EfficientNet,
+    VisionTransformer,
+    GAN,
+    Diffusion,
+    Autoencoder,
+    VAE,
+    Seq2Seq,
+    EncoderDecoder,
+    DecisionTree,
+    RandomForest,
+    SVM,
+    XGBoost,
+    LightGBM,
+    CatBoost,
+    Custom,
+    Unknown,
+}
+
+impl ModelType {
+    /// Get display name for the model type
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ModelType::Transformer => "Transformer",
+            ModelType::CNN => "CNN",
+            ModelType::GPT => "GPT",
+            ModelType::LSTM => "LSTM",
+            ModelType::RNN => "RNN",
+            ModelType::BERT => "BERT",
+            ModelType::T5 => "T5",
+            ModelType::Whisper => "Whisper",
+            ModelType::StableDiffusion => "Stable Diffusion",
+            ModelType::ResNet => "ResNet",
+            ModelType::VGG => "VGG",
+            ModelType::Inception => "Inception",
+            ModelType::MobileNet => "MobileNet",
+            ModelType::EfficientNet => "EfficientNet",
+            ModelType::VisionTransformer => "Vision Transformer",
+            ModelType::GAN => "GAN",
+            ModelType::Diffusion => "Diffusion",
+            ModelType::Autoencoder => "Autoencoder",
+            ModelType::VAE => "VAE",
+            ModelType::Seq2Seq => "Seq2Seq",
+            ModelType::EncoderDecoder => "Encoder-Decoder",
+            ModelType::DecisionTree => "Decision Tree",
+            ModelType::RandomForest => "Random Forest",
+            ModelType::SVM => "SVM",
+            ModelType::XGBoost => "XGBoost",
+            ModelType::LightGBM => "LightGBM",
+            ModelType::CatBoost => "CatBoost",
+            ModelType::Custom => "Custom",
+            ModelType::Unknown => "Unknown",
+        }
+    }
+
+    /// Get category of the model type
+    pub fn category(self) -> &'static str {
+        match self {
+            ModelType::Transformer | ModelType::BERT | ModelType::T5 | ModelType::VisionTransformer => "Attention",
+            ModelType::CNN | ModelType::ResNet | ModelType::VGG | ModelType::Inception | ModelType::MobileNet | ModelType::EfficientNet => "CNN",
+            ModelType::GPT | ModelType::Whisper | ModelType::StableDiffusion | ModelType::Diffusion => "Generative",
+            ModelType::LSTM | ModelType::RNN | ModelType::Seq2Seq | ModelType::EncoderDecoder => "Sequential",
+            ModelType::GAN | ModelType::Autoencoder | ModelType::VAE => "Unsupervised",
+            ModelType::DecisionTree | ModelType::RandomForest | ModelType::SVM | ModelType::XGBoost | ModelType::LightGBM | ModelType::CatBoost => "Traditional ML",
+            ModelType::Custom => "Custom",
+            ModelType::Unknown => "Unknown",
+        }
+    }
+
+    /// Check if this is a transformer-based model
+    pub fn is_transformer_based(self) -> bool {
+        matches!(
+            self,
+            ModelType::Transformer | ModelType::BERT | ModelType::T5 | ModelType::GPT | ModelType::VisionTransformer | ModelType::Whisper
+        )
+    }
+
+    /// Check if this is a CNN-based model
+    pub fn is_cnn_based(self) -> bool {
+        matches!(
+            self,
+            ModelType::CNN | ModelType::ResNet | ModelType::VGG | ModelType::Inception | ModelType::MobileNet | ModelType::EfficientNet
+        )
+    }
+
+    /// Check if this is a generative model
+    pub fn is_generative(self) -> bool {
+        matches!(
+            self,
+            ModelType::GPT | ModelType::StableDiffusion | ModelType::Diffusion | ModelType::GAN | ModelType::VAE | ModelType::Whisper
+        )
+    }
+}
+
+/// Detect model type based on model ID, tags, and metadata
+pub fn detect_model_type(model_id: &str, tags: &[String], library_name: Option<&str>, pipeline_tag: Option<&str>) -> ModelType {
+    let model_id_lower = model_id.to_lowercase();
+    let tags_lower: Vec<String> = tags.iter().map(|t| t.to_lowercase()).collect();
+
+    // Check for specific model families
+    if model_id_lower.contains("gpt") || model_id_lower.contains("gpt-") || tags_lower.contains(&"gpt".to_string()) {
+        return ModelType::GPT;
+    }
+    if model_id_lower.contains("bert") || tags_lower.contains(&"bert".to_string()) {
+        return ModelType::BERT;
+    }
+    if model_id_lower.contains("t5") || tags_lower.contains(&"t5".to_string()) {
+        return ModelType::T5;
+    }
+    if model_id_lower.contains("whisper") || tags_lower.contains(&"whisper".to_string()) {
+        return ModelType::Whisper;
+    }
+    if model_id_lower.contains("stable-diffusion") || tags_lower.contains(&"stable-diffusion".to_string()) {
+        return ModelType::StableDiffusion;
+    }
+    if model_id_lower.contains("diffusion") || tags_lower.contains(&"diffusion".to_string()) {
+        return ModelType::Diffusion;
+    }
+    if model_id_lower.contains("vit") || model_id_lower.contains("vision-transformer") || tags_lower.contains(&"vision-transformer".to_string()) {
+        return ModelType::VisionTransformer;
+    }
+    if model_id_lower.contains("resnet") || tags_lower.contains(&"resnet".to_string()) {
+        return ModelType::ResNet;
+    }
+    if model_id_lower.contains("vgg") || tags_lower.contains(&"vgg".to_string()) {
+        return ModelType::VGG;
+    }
+    if model_id_lower.contains("inception") || tags_lower.contains(&"inception".to_string()) {
+        return ModelType::Inception;
+    }
+    if model_id_lower.contains("mobilenet") || tags_lower.contains(&"mobilenet".to_string()) {
+        return ModelType::MobileNet;
+    }
+    if model_id_lower.contains("efficientnet") || tags_lower.contains(&"efficientnet".to_string()) {
+        return ModelType::EfficientNet;
+    }
+    if model_id_lower.contains("lstm") || tags_lower.contains(&"lstm".to_string()) {
+        return ModelType::LSTM;
+    }
+    if model_id_lower.contains("rnn") || tags_lower.contains(&"rnn".to_string()) {
+        return ModelType::RNN;
+    }
+    if model_id_lower.contains("gan") || tags_lower.contains(&"gan".to_string()) {
+        return ModelType::GAN;
+    }
+    if model_id_lower.contains("autoencoder") || tags_lower.contains(&"autoencoder".to_string()) {
+        return ModelType::Autoencoder;
+    }
+    if model_id_lower.contains("vae") || tags_lower.contains(&"vae".to_string()) {
+        return ModelType::VAE;
+    }
+
+    // Check library names
+    if let Some(lib) = library_name {
+        match lib.to_lowercase().as_str() {
+            "transformers" => {
+                // Further refine by pipeline tag
+                if let Some(pipeline) = pipeline_tag {
+                    match pipeline {
+                        "text-generation" => ModelType::GPT,
+                        "feature-extraction" | "fill-mask" => ModelType::BERT,
+                        "text2text-generation" => ModelType::T5,
+                        "automatic-speech-recognition" => ModelType::Whisper,
+                        "image-to-text" => ModelType::VisionTransformer,
+                        _ => ModelType::Transformer,
+                    }
+                } else {
+                    ModelType::Transformer
+                }
+            }
+            "diffusers" => ModelType::StableDiffusion,
+            "timm" => {
+                // Image models from timm library
+                if model_id_lower.contains("resnet") {
+                    ModelType::ResNet
+                } else if model_id_lower.contains("vgg") {
+                    ModelType::VGG
+                } else if model_id_lower.contains("efficientnet") {
+                    ModelType::EfficientNet
+                } else {
+                    ModelType::CNN
+                }
+            }
+            "sentence-transformers" => ModelType::Transformer,
+            _ => ModelType::Unknown,
+        }
+    } else {
+        // Check pipeline tags as fallback
+        if let Some(pipeline) = pipeline_tag {
+            match pipeline {
+                "text-generation" => ModelType::GPT,
+                "feature-extraction" | "fill-mask" => ModelType::BERT,
+                "text2text-generation" => ModelType::T5,
+                "automatic-speech-recognition" => ModelType::Whisper,
+                "image-classification" => ModelType::CNN,
+                "image-to-image" | "text-to-image" => ModelType::StableDiffusion,
+                "image-to-text" => ModelType::VisionTransformer,
+                _ => ModelType::Unknown,
+            }
+        } else {
+            // Check file extensions as last resort
+            if model_id_lower.contains(".safetensors") || model_id_lower.contains(".bin") {
+                ModelType::Transformer
+            } else if model_id_lower.contains(".onnx") {
+                ModelType::CNN
+            } else {
+                ModelType::Unknown
+            }
+        }
+    }
+}
+
 /// Tree node for hierarchical file display
 #[derive(Debug, Clone)]
 pub struct FileTreeNode {
@@ -134,6 +361,31 @@ pub enum DownloadStatus {
     HashMismatch,
 }
 
+#[derive(Debug, Clone)]
+pub enum ValidationStatus {
+    Valid,
+    Invalid(String),
+    Pending,
+}
+
+#[derive(Debug, Clone)]
+pub enum CanvasContent {
+    SearchContent {
+        query: String,
+        suggestions: Vec<String>,
+        selected_index: usize,
+    },
+    DownloadContent {
+        path: String,
+        validation_status: ValidationStatus,
+    },
+    OptionsContent {
+        settings: AppOptions,
+        focused_field: usize,
+    },
+    // ... other content types
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadMetadata {
     pub model_id: String,
@@ -160,6 +412,12 @@ pub enum PopupMode {
     Options,
     AuthError { model_url: String },
     SearchPopup,
+    // Advanced canvas features
+    ModelVisualization,
+    ModelComparison,
+    NetworkActivity,
+    PerformanceAnalytics,
+    EnhancedVerification,
 }
 
 /// Filter presets for quick filter combinations
