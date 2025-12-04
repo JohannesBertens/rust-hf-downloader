@@ -37,6 +37,9 @@ pub struct RenderParams<'a> {
     pub filter_min_downloads: u64,
     pub filter_min_likes: u64,
     pub focused_filter_field: usize,
+    // Mouse tab areas
+    pub tab_areas: &'a mut Vec<(FocusedPane, Rect)>,
+    pub hovered_tab: &'a Option<FocusedPane>,
 }
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
@@ -64,12 +67,19 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         filter_min_downloads,
         filter_min_likes,
         focused_filter_field,
+        tab_areas,
+        hovered_tab,
     } = params;
+    
+    // Clear previous tab areas
+    tab_areas.clear();
+    
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(10),
+            Constraint::Length(3),   // Filter toolbar
+            Constraint::Length(3),   // Tab bar (NEW)
+            Constraint::Min(10),     // Main content
             Constraint::Length(12),
             Constraint::Length(4),  // Changed from 3 to 4 for 2-line status
         ])
@@ -86,7 +96,10 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         focused_filter_field,
     );
 
-    // Results list
+    // Render tab bar
+    render_tab_bar(frame, chunks[1], focused_pane, tab_areas, hovered_tab);
+
+    // Results list (now chunks[2])
     let items: Vec<ListItem> = models
         .iter()
         .enumerate()
@@ -171,7 +184,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         )
         .highlight_symbol(">> ");
 
-    frame.render_stateful_widget(list, chunks[1], list_state);
+    frame.render_stateful_widget(list, chunks[2], list_state);
 
     // Split bottom panel into left and right sections
     let bottom_panel_chunks = Layout::default()
@@ -180,7 +193,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
             Constraint::Percentage(50),
             Constraint::Percentage(50),
         ])
-        .split(chunks[2]);
+        .split(chunks[3]);
 
     // Render based on display mode
     match display_mode {
@@ -257,7 +270,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         })
         .wrap(Wrap { trim: true });
 
-    frame.render_widget(status_widget, chunks[3]);
+    frame.render_widget(status_widget, chunks[4]);
 }
 
 struct StandardPanelContext<'a> {
@@ -1461,4 +1474,92 @@ pub fn render_filter_toolbar(
     
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
+}
+
+/// Render tab bar for selecting focused pane
+fn render_tab_bar(
+    frame: &mut Frame,
+    area: Rect,
+    focused_pane: FocusedPane,
+    tab_areas: &mut Vec<(FocusedPane, Rect)>,
+    hovered_tab: &Option<FocusedPane>,
+) {
+    use crate::models::FocusedPane;
+    
+    let tabs = vec![
+        ("Models", FocusedPane::Models),
+        ("Quantizations", FocusedPane::QuantizationGroups),
+        ("Files", FocusedPane::QuantizationFiles),
+        ("Metadata", FocusedPane::ModelMetadata),
+        ("Repository", FocusedPane::FileTree),
+    ];
+    
+    // Calculate tab widths - distribute evenly
+    let tab_width = area.width / tabs.len() as u16;
+    let mut x_offset = area.x;
+    
+    // Create tab block
+    let tab_block = Block::default()
+        .borders(Borders::ALL | Borders::BOTTOM)
+        .title("Navigation")
+        .border_style(Style::default().fg(Color::Cyan));
+    
+    let inner = tab_block.inner(area);
+    frame.render_widget(tab_block, area);
+    
+    // Render each tab
+    for (i, (title, pane)) in tabs.iter().enumerate() {
+        let tab_area = Rect {
+            x: inner.x + (i as u16 * tab_width),
+            y: inner.y,
+            width: tab_width,
+            height: inner.height,
+        };
+        
+        // Store tab area for click detection
+        tab_areas.push((pane.clone(), tab_area));
+        
+        // Determine tab style
+        let is_active = *pane == focused_pane;
+        let is_hovered = hovered_tab.as_ref().map_or(false, |h| h == pane);
+        
+        let tab_style = if is_active {
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else if is_hovered {
+            Style::default()
+                .fg(Color::Cyan)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Black)
+        };
+        
+        // Create tab content
+        let tab_content = if is_active {
+            format!(" [ {} ] ", title)
+        } else {
+            format!(" {} ", title)
+        };
+        
+        let tab_widget = Paragraph::new(tab_content)
+            .style(tab_style)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL ^ Borders::LEFT ^ Borders::RIGHT ^ Borders::BOTTOM) // All borders except left, right, bottom
+                    .border_style(if is_active {
+                        Style::default().fg(Color::Yellow)
+                    } else if is_hovered {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    })
+            );
+        
+        frame.render_widget(tab_widget, tab_area);
+    }
 }

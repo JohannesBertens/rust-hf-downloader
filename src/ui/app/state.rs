@@ -1,6 +1,7 @@
 use crate::models::*;
-use crossterm::event::EventStream;
+use crossterm::event::{EventStream, MouseEvent, MouseEventKind};
 use ratatui::widgets::ListState;
+use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,6 +68,10 @@ pub struct App {
     pub filter_min_downloads: u64,
     pub filter_min_likes: u64,
     pub focused_filter_field: usize,  // 0=sort, 1=downloads, 2=likes
+    // Mouse interaction state
+    pub mouse_position: Option<(u16, u16)>,  // Current mouse position (x, y)
+    pub tab_areas: Vec<(FocusedPane, Rect)>,  // Store tab areas for click detection
+    pub hovered_tab: Option<FocusedPane>,  // Currently hovered tab for visual feedback
 }
 
 impl Default for App {
@@ -149,6 +154,10 @@ impl App {
             filter_min_downloads: default_min_downloads,
             filter_min_likes: default_min_likes,
             focused_filter_field: 0,
+            // Mouse interaction state
+            mouse_position: None,
+            tab_areas: Vec::new(),
+            hovered_tab: None,
         }
     }
 

@@ -147,6 +147,8 @@ impl App {
             filter_min_downloads: self.filter_min_downloads,
             filter_min_likes: self.filter_min_likes,
             focused_filter_field: self.focused_filter_field,
+            tab_areas: &mut self.tab_areas,
+            hovered_tab: &self.hovered_tab,
         });
         
         // Render both download and verification progress bars
@@ -189,6 +191,53 @@ impl App {
         }
     }
 
+    /// Handle mouse events
+    async fn on_mouse_event(&mut self, mouse_event: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseEventKind, MouseButton};
+        
+        // Update mouse position
+        self.mouse_position = Some((mouse_event.column, mouse_event.row));
+        
+        // Only handle mouse events when no popups are visible
+        if self.popup_mode != crate::models::PopupMode::None {
+            self.hovered_tab = None;
+            return;
+        }
+        
+        match mouse_event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Check if click is within any tab area
+                for (pane, area) in &self.tab_areas {
+                    if area.contains(ratatui::layout::Position::new(
+                        mouse_event.column,
+                        mouse_event.row
+                    )) {
+                        self.focused_pane = pane.clone();
+                        break;
+                    }
+                }
+            }
+            MouseEventKind::Moved => {
+                // Update hover state
+                let mut found_hover = false;
+                for (pane, area) in &self.tab_areas {
+                    if area.contains(ratatui::layout::Position::new(
+                        mouse_event.column,
+                        mouse_event.row
+                    )) {
+                        self.hovered_tab = Some(pane.clone());
+                        found_hover = true;
+                        break;
+                    }
+                }
+                if !found_hover {
+                    self.hovered_tab = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Handle crossterm events (keyboard input, status updates)
     async fn handle_crossterm_events(&mut self) -> Result<()> {
         // Check for status messages from download tasks
@@ -209,9 +258,17 @@ impl App {
         let delay = tokio::time::sleep(tokio::time::Duration::from_millis(100));
         tokio::select! {
             maybe_event = self.event_stream.next().fuse() => {
-                if let Some(Ok(Event::Key(key))) = maybe_event {
-                    if key.kind == KeyEventKind::Press {
-                        self.on_key_event(key).await;
+                if let Some(Ok(event)) = maybe_event {
+                    match event {
+                        Event::Key(key) => {
+                            if key.kind == KeyEventKind::Press {
+                                self.on_key_event(key).await;
+                            }
+                        }
+                        Event::Mouse(mouse_event) => {
+                            self.on_mouse_event(mouse_event).await;
+                        }
+                        _ => {}
                     }
                 }
             }
