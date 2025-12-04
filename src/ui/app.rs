@@ -101,26 +101,22 @@ impl App {
 
     /// Draw UI components
     fn draw(&mut self, frame: &mut Frame) {
-        // Get all the data we need for rendering
-        let models = futures::executor::block_on(async {
-            self.models.read().unwrap().clone()
-        });
+        // Get all the data we need for rendering using non-blocking access
+        // RwLock reads are safe and fast - use direct access
+        let models = self.models.read().unwrap().clone();
+        let quantizations = self.quantizations.read().unwrap().clone();
+        let model_metadata = self.model_metadata.read().unwrap().clone();
+        let file_tree = self.file_tree.read().unwrap().clone();
         
-        let quantizations = futures::executor::block_on(async {
-            self.quantizations.read().unwrap().clone()
-        });
-        
-        let complete_downloads = futures::executor::block_on(async {
-            self.complete_downloads.lock().await.clone()
-        });
-        
-        let model_metadata = futures::executor::block_on(async {
-            self.model_metadata.read().unwrap().clone()
-        });
-        
-        let file_tree = futures::executor::block_on(async {
-            self.file_tree.read().unwrap().clone()
-        });
+        // For tokio Mutex, use try_lock() to avoid blocking/deadlock
+        // Fall back to cached values if lock is held by another task
+        let complete_downloads = self.complete_downloads.try_lock()
+            .map(|guard| {
+                // Update cache when we successfully get the lock
+                self.cached_complete_downloads = guard.clone();
+                guard.clone()
+            })
+            .unwrap_or_else(|_| self.cached_complete_downloads.clone());
         
         // Render main UI
         crate::ui::render::render_ui(frame, crate::ui::render::RenderParams {
@@ -147,19 +143,38 @@ impl App {
             filter_min_downloads: self.filter_min_downloads,
             filter_min_likes: self.filter_min_likes,
             focused_filter_field: self.focused_filter_field,
-            tab_areas: &mut self.tab_areas,
-            hovered_tab: &self.hovered_tab,
+            panel_areas: &mut self.panel_areas,
+            hovered_panel: &self.hovered_panel,
         });
         
-        // Render both download and verification progress bars
-        let (download_progress, download_queue_size, verification_progress, verification_queue_size) = 
-            futures::executor::block_on(async {
-                let dl_prog = self.download_progress.lock().await.clone();
-                let dl_queue = *self.download_queue_size.lock().await;
-                let ver_prog = self.verification_progress.lock().await.clone();
-                let ver_queue = *self.verification_queue_size.lock().await;
-                (dl_prog, dl_queue, ver_prog, ver_queue)
-            });
+        // For progress bars, use try_lock() with fallback to cached values
+        let download_progress = self.download_progress.try_lock()
+            .map(|guard| {
+                self.cached_download_progress = guard.clone();
+                guard.clone()
+            })
+            .unwrap_or_else(|_| self.cached_download_progress.clone());
+        
+        let download_queue_size = self.download_queue_size.try_lock()
+            .map(|guard| {
+                self.cached_download_queue_size = *guard;
+                *guard
+            })
+            .unwrap_or(self.cached_download_queue_size);
+        
+        let verification_progress = self.verification_progress.try_lock()
+            .map(|guard| {
+                self.cached_verification_progress = guard.clone();
+                guard.clone()
+            })
+            .unwrap_or_else(|_| self.cached_verification_progress.clone());
+        
+        let verification_queue_size = self.verification_queue_size.try_lock()
+            .map(|guard| {
+                self.cached_verification_queue_size = *guard;
+                *guard
+            })
+            .unwrap_or(self.cached_verification_queue_size);
         
         crate::ui::render::render_progress_bars(
             frame,
@@ -191,60 +206,53 @@ impl App {
         }
     }
 
-    /// Handle mouse events
-    async fn on_mouse_event(&mut self, mouse_event: crossterm::event::MouseEvent) {
-        use crossterm::event::{MouseEventKind, MouseButton};
-        
-        // Update mouse position
-        self.mouse_position = Some((mouse_event.column, mouse_event.row));
-        
-        // Only handle mouse events when no popups are visible
-        if self.popup_mode != crate::models::PopupMode::None {
-            self.hovered_tab = None;
+    /// Handle mouse click events immediately (synchronous)
+    fn handle_mouse_click(&mut self, column: u16, row: u16) {
+        // Skip if popup is open or no panel areas defined
+        if self.popup_mode != crate::models::PopupMode::None || self.panel_areas.is_empty() {
             return;
         }
         
-        match mouse_event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                // Check if click is within any tab area
-                for (pane, area) in &self.tab_areas {
-                    if area.contains(ratatui::layout::Position::new(
-                        mouse_event.column,
-                        mouse_event.row
-                    )) {
-                        self.focused_pane = pane.clone();
-                        break;
-                    }
-                }
+        // Check if click is within any panel area
+        for (pane, area) in &self.panel_areas {
+            if area.contains(ratatui::layout::Position::new(column, row)) {
+                // Use focus_pane() to also select first item if needed
+                self.focus_pane(*pane);
+                break;
             }
-            MouseEventKind::Moved => {
-                // Update hover state
-                let mut found_hover = false;
-                for (pane, area) in &self.tab_areas {
-                    if area.contains(ratatui::layout::Position::new(
-                        mouse_event.column,
-                        mouse_event.row
-                    )) {
-                        self.hovered_tab = Some(pane.clone());
-                        found_hover = true;
-                        break;
-                    }
-                }
-                if !found_hover {
-                    self.hovered_tab = None;
-                }
-            }
-            _ => {}
         }
     }
 
-    /// Handle crossterm events (keyboard input, status updates)
+    /// Update hover state based on mouse position (called once per frame with coalesced position)
+    fn update_hover_state(&mut self, column: u16, row: u16) {
+        self.mouse_position = Some((column, row));
+        
+        // Skip if popup is open
+        if self.popup_mode != crate::models::PopupMode::None {
+            self.hovered_panel = None;
+            return;
+        }
+        
+        // Skip if no panel areas defined
+        if self.panel_areas.is_empty() {
+            self.hovered_panel = None;
+            return;
+        }
+        
+        // Find which panel (if any) the mouse is hovering over
+        self.hovered_panel = self.panel_areas.iter()
+            .find(|(_, area)| area.contains(ratatui::layout::Position::new(column, row)))
+            .map(|(pane, _)| *pane);
+    }
+
+    /// Handle crossterm events with event coalescing
+    /// Drains all pending events, processing keys immediately but coalescing mouse moves
     async fn handle_crossterm_events(&mut self) -> Result<()> {
-        // Check for status messages from download tasks
-        {
-            let mut rx = self.status_rx.lock().await;
+        use crossterm::event::{MouseEventKind, MouseButton};
+        
+        // Check for status messages from download tasks (non-blocking)
+        if let Ok(mut rx) = self.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
-                // Check for authentication error
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
@@ -255,7 +263,11 @@ impl App {
             }
         }
         
-        let delay = tokio::time::sleep(tokio::time::Duration::from_millis(100));
+        // Track the last mouse position for coalesced hover update
+        let mut last_mouse_position: Option<(u16, u16)> = None;
+        
+        // Wait for at least one event or timeout
+        let delay = tokio::time::sleep(tokio::time::Duration::from_millis(50));
         tokio::select! {
             maybe_event = self.event_stream.next().fuse() => {
                 if let Some(Ok(event)) = maybe_event {
@@ -266,16 +278,75 @@ impl App {
                             }
                         }
                         Event::Mouse(mouse_event) => {
-                            self.on_mouse_event(mouse_event).await;
+                            match mouse_event.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    // Process clicks immediately
+                                    self.handle_mouse_click(mouse_event.column, mouse_event.row);
+                                }
+                                MouseEventKind::Moved => {
+                                    // Queue for coalesced processing
+                                    last_mouse_position = Some((mouse_event.column, mouse_event.row));
+                                }
+                                _ => {}
+                            }
                         }
                         _ => {}
                     }
                 }
             }
             _ = delay => {
-                // Timeout - just redraw
+                // Timeout - just proceed to drain any pending events
             }
         }
+        
+        // Drain any additional pending events without blocking
+        // This coalesces multiple mouse move events into one
+        loop {
+            // Use poll to check if there are more events without blocking
+            use futures::stream::StreamExt;
+            match futures::poll!(self.event_stream.next()) {
+                std::task::Poll::Ready(Some(Ok(event))) => {
+                    match event {
+                        Event::Key(key) => {
+                            if key.kind == KeyEventKind::Press {
+                                self.on_key_event(key).await;
+                            }
+                        }
+                        Event::Mouse(mouse_event) => {
+                            match mouse_event.kind {
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    self.handle_mouse_click(mouse_event.column, mouse_event.row);
+                                }
+                                MouseEventKind::Moved => {
+                                    // Overwrite - only keep the latest position
+                                    last_mouse_position = Some((mouse_event.column, mouse_event.row));
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                std::task::Poll::Ready(Some(Err(_))) => {
+                    // Error reading event, skip
+                    continue;
+                }
+                std::task::Poll::Ready(None) | std::task::Poll::Pending => {
+                    // No more events or stream ended
+                    break;
+                }
+            }
+        }
+        
+        // Apply coalesced hover update once (if mouse moved)
+        if let Some((col, row)) = last_mouse_position {
+            // Throttle hover updates to ~60fps
+            if self.last_mouse_event_time.elapsed() >= std::time::Duration::from_millis(16) {
+                self.last_mouse_event_time = std::time::Instant::now();
+                self.update_hover_state(col, row);
+            }
+        }
+        
         Ok(())
     }
 }
