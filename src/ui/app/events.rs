@@ -491,34 +491,68 @@ impl App {
         self.list_state.select(Some(i));
     }
 
+    /// Focus a specific pane and select first item if needed
+    /// This is the core logic used by both toggle_focus() and mouse clicks
+    pub fn focus_pane(&mut self, pane: FocusedPane) {
+        // Skip if already focused on this pane
+        if self.focused_pane == pane {
+            return;
+        }
+        
+        // Select first item in the target pane if it has items and none selected
+        match pane {
+            FocusedPane::Models => {
+                // Models list - select first if available and none selected
+                let models_len = self.models.read().unwrap().len();
+                if models_len > 0 && self.list_state.selected().is_none() {
+                    self.list_state.select(Some(0));
+                }
+            }
+            FocusedPane::QuantizationGroups => {
+                // Quantization groups - select first if available and none selected
+                let quants_len = self.quantizations.read().unwrap().len();
+                if quants_len > 0 && self.quant_list_state.selected().is_none() {
+                    self.quant_list_state.select(Some(0));
+                }
+            }
+            FocusedPane::QuantizationFiles => {
+                // Quantization files - select first file if available and none selected
+                if self.quant_file_list_state.selected().is_none() {
+                    if let Some(selected_group) = self.quant_list_state.selected() {
+                        let quantizations = self.quantizations.read().unwrap();
+                        if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
+                            self.quant_file_list_state.select(Some(0));
+                        }
+                    }
+                }
+            }
+            FocusedPane::ModelMetadata => {
+                // Metadata pane has no selection state
+            }
+            FocusedPane::FileTree => {
+                // File tree - select first if available and none selected
+                if self.file_tree_state.selected().is_none() {
+                    let tree_has_items = self.file_tree.read().unwrap().as_ref()
+                        .map(|t| !t.children.is_empty())
+                        .unwrap_or(false);
+                    if tree_has_items {
+                        self.file_tree_state.select(Some(0));
+                    }
+                }
+            }
+        }
+        
+        self.focused_pane = pane;
+    }
+
     /// Toggle focus between panes based on display mode
     pub fn toggle_focus(&mut self) {
-        self.focused_pane = match *self.display_mode.read().unwrap() {
+        let next_pane = match *self.display_mode.read().unwrap() {
             ModelDisplayMode::Gguf => {
                 // GGUF mode: cycle Models → QuantizationGroups → QuantizationFiles → Models
                 match self.focused_pane {
-                    FocusedPane::Models => {
-                        // When switching to quantization groups, select first item if available
-                        let quants_len = futures::executor::block_on(async {
-                            self.quantizations.read().unwrap().len()
-                        });
-                        if quants_len > 0 {
-                            self.quant_list_state.select(Some(0));
-                        }
-                        FocusedPane::QuantizationGroups
-                    }
-                    FocusedPane::QuantizationGroups => {
-                        // When switching to quantization files, select first file if available
-                        if let Some(selected_group) = self.quant_list_state.selected() {
-                            let quantizations = futures::executor::block_on(async {
-                                self.quantizations.read().unwrap().clone()
-                            });
-                            if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
-                                self.quant_file_list_state.select(Some(0));
-                            }
-                        }
-                        FocusedPane::QuantizationFiles
-                    }
+                    FocusedPane::Models => FocusedPane::QuantizationGroups,
+                    FocusedPane::QuantizationGroups => FocusedPane::QuantizationFiles,
                     FocusedPane::QuantizationFiles => FocusedPane::Models,
                     // Fallback for ModelMetadata/FileTree (shouldn't happen in GGUF mode)
                     _ => FocusedPane::Models,
@@ -527,24 +561,15 @@ impl App {
             ModelDisplayMode::Standard => {
                 // Standard mode: cycle Models → FileTree → Models (skip ModelMetadata - no actions)
                 match self.focused_pane {
-                    FocusedPane::Models => {
-                        // Skip directly to FileTree, select first item if available
-                        let tree_has_items = futures::executor::block_on(async {
-                            self.file_tree.read().unwrap().as_ref()
-                                .map(|t| !t.children.is_empty())
-                                .unwrap_or(false)
-                        });
-                        if tree_has_items {
-                            self.file_tree_state.select(Some(0));
-                        }
-                        FocusedPane::FileTree
-                    }
+                    FocusedPane::Models => FocusedPane::FileTree,
                     FocusedPane::FileTree => FocusedPane::Models,
                     // Fallback for QuantizationGroups/Files/ModelMetadata (shouldn't happen in Standard mode)
                     _ => FocusedPane::Models,
                 }
             }
         };
+        
+        self.focus_pane(next_pane);
     }
 
     /// Toggle focus between QuantizationGroups and QuantizationFiles panes

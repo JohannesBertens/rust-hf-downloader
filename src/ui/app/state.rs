@@ -1,6 +1,7 @@
 use crate::models::*;
 use crossterm::event::EventStream;
 use ratatui::widgets::ListState;
+use ratatui::layout::Rect;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -67,6 +68,18 @@ pub struct App {
     pub filter_min_downloads: u64,
     pub filter_min_likes: u64,
     pub focused_filter_field: usize,  // 0=sort, 1=downloads, 2=likes
+    // Mouse interaction state
+    pub mouse_position: Option<(u16, u16)>,  // Current mouse position (x, y)
+    pub panel_areas: Vec<(FocusedPane, Rect)>,  // Store panel areas for click/hover detection
+    pub hovered_panel: Option<FocusedPane>,  // Currently hovered panel for visual feedback
+    pub last_mouse_event_time: std::time::Instant,  // Track time of last processed mouse event
+    pub filter_areas: Vec<(usize, Rect)>,  // Store filter field areas (0=sort, 1=downloads, 2=likes)
+    // Cached values for non-blocking render (used when tokio Mutex is locked)
+    pub cached_complete_downloads: CompleteDownloads,
+    pub cached_download_progress: Option<DownloadProgress>,
+    pub cached_download_queue_size: usize,
+    pub cached_verification_progress: Vec<VerificationProgress>,
+    pub cached_verification_queue_size: usize,
 }
 
 impl Default for App {
@@ -149,6 +162,18 @@ impl App {
             filter_min_downloads: default_min_downloads,
             filter_min_likes: default_min_likes,
             focused_filter_field: 0,
+            // Mouse interaction state
+            mouse_position: None,
+            panel_areas: Vec::new(),
+            hovered_panel: None,
+            last_mouse_event_time: std::time::Instant::now(),
+            filter_areas: Vec::new(),
+            // Cached values for non-blocking render
+            cached_complete_downloads: HashMap::new(),
+            cached_download_progress: None,
+            cached_download_queue_size: 0,
+            cached_verification_progress: Vec::new(),
+            cached_verification_queue_size: 0,
         }
     }
 

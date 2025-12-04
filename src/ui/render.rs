@@ -37,6 +37,11 @@ pub struct RenderParams<'a> {
     pub filter_min_downloads: u64,
     pub filter_min_likes: u64,
     pub focused_filter_field: usize,
+    // Mouse panel areas (for click/hover detection on panels)
+    pub panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
+    pub hovered_panel: &'a Option<FocusedPane>,
+    // Filter toolbar click areas
+    pub filter_areas: &'a mut Vec<(usize, Rect)>,
 }
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
@@ -64,14 +69,22 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         filter_min_downloads,
         filter_min_likes,
         focused_filter_field,
+        panel_areas,
+        hovered_panel,
+        filter_areas,
     } = params;
+    
+    // Clear previous panel and filter areas
+    panel_areas.clear();
+    filter_areas.clear();
+    
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(12),
-            Constraint::Length(4),  // Changed from 3 to 4 for 2-line status
+            Constraint::Length(3),   // Filter toolbar
+            Constraint::Min(10),     // Main content (models list)
+            Constraint::Length(12),  // Bottom panels
+            Constraint::Length(4),   // Status bar
         ])
         .split(frame.area());
 
@@ -84,9 +97,21 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         filter_min_downloads,
         filter_min_likes,
         focused_filter_field,
+        filter_areas,
     );
 
-    // Results list
+    // Helper to determine border style based on focus and hover state
+    let get_border_style = |pane: FocusedPane| -> Style {
+        if input_mode == InputMode::Normal && focused_pane == pane {
+            Style::default().fg(Color::Yellow)
+        } else if hovered_panel.as_ref() == Some(&pane) {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        }
+    };
+
+    // Results list (chunks[1])
     let items: Vec<ListItem> = models
         .iter()
         .enumerate()
@@ -155,14 +180,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(list_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::Models {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }
-                ),
+                .border_style(get_border_style(FocusedPane::Models)),
         )
         .highlight_style(
             Style::default()
@@ -171,6 +189,8 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         )
         .highlight_symbol(">> ");
 
+    // Store panel area for click/hover detection
+    panel_areas.push((FocusedPane::Models, chunks[1]));
     frame.render_stateful_widget(list, chunks[1], list_state);
 
     // Split bottom panel into left and right sections
@@ -193,6 +213,8 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 input_mode,
                 focused_pane,
                 complete_downloads,
+                hovered_panel,
+                panel_areas,
             });
         }
         ModelDisplayMode::Standard => {
@@ -203,6 +225,8 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 loading: loading_quants,
                 input_mode,
                 focused_pane,
+                hovered_panel,
+                panel_areas,
             });
         }
     }
@@ -267,6 +291,8 @@ struct StandardPanelContext<'a> {
     loading: bool,
     input_mode: InputMode,
     focused_pane: FocusedPane,
+    hovered_panel: &'a Option<FocusedPane>,
+    panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
 }
 
 fn render_standard_panels(
@@ -281,7 +307,20 @@ fn render_standard_panels(
         loading,
         input_mode,
         focused_pane,
+        hovered_panel,
+        panel_areas,
     } = ctx;
+    
+    // Helper to determine border style based on focus and hover state
+    let get_border_style = |pane: FocusedPane| -> Style {
+        if input_mode == InputMode::Normal && focused_pane == pane {
+            Style::default().fg(Color::Yellow)
+        } else if hovered_panel.as_ref() == Some(&pane) {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        }
+    };
     // Left side: Model metadata
     let meta_title = if loading {
         "Model Information [Loading...]"
@@ -360,21 +399,16 @@ fn render_standard_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(meta_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::ModelMetadata {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }
-                ),
+                .border_style(get_border_style(FocusedPane::ModelMetadata)),
         )
         .wrap(Wrap { trim: false });
 
+    // Store panel area for click/hover detection
+    panel_areas.push((FocusedPane::ModelMetadata, chunks[0]));
     frame.render_widget(metadata_widget, chunks[0]);
 
     // Right side: File tree
-    render_file_tree_panel(frame, chunks[1], file_tree, file_tree_state, input_mode, focused_pane);
+    render_file_tree_panel(frame, chunks[1], file_tree, file_tree_state, input_mode, focused_pane, hovered_panel, panel_areas);
 }
 
 fn render_file_tree_panel(
@@ -384,7 +418,19 @@ fn render_file_tree_panel(
     file_tree_state: &mut ListState,
     input_mode: InputMode,
     focused_pane: FocusedPane,
+    hovered_panel: &Option<FocusedPane>,
+    panel_areas: &mut Vec<(FocusedPane, Rect)>,
 ) {
+    // Helper to determine border style based on focus and hover state
+    let get_border_style = |pane: FocusedPane| -> Style {
+        if input_mode == InputMode::Normal && focused_pane == pane {
+            Style::default().fg(Color::Yellow)
+        } else if hovered_panel.as_ref() == Some(&pane) {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        }
+    };
     let tree_title = if file_tree.is_none() {
         "Repository Files [Select a model to view]"
     } else {
@@ -441,14 +487,7 @@ fn render_file_tree_panel(
             Block::default()
                 .borders(Borders::ALL)
                 .title(tree_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::FileTree {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }
-                ),
+                .border_style(get_border_style(FocusedPane::FileTree)),
         )
         .highlight_style(
             Style::default()
@@ -457,6 +496,8 @@ fn render_file_tree_panel(
         )
         .highlight_symbol(">> ");
 
+    // Store panel area for click/hover detection
+    panel_areas.push((FocusedPane::FileTree, area));
     frame.render_stateful_widget(tree_list, area, file_tree_state);
 }
 
@@ -498,6 +539,8 @@ struct GgufPanelContext<'a> {
     input_mode: InputMode,
     focused_pane: FocusedPane,
     complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
+    hovered_panel: &'a Option<FocusedPane>,
+    panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
 }
 
 fn render_gguf_panels(
@@ -513,7 +556,20 @@ fn render_gguf_panels(
         input_mode,
         focused_pane,
         complete_downloads,
+        hovered_panel,
+        panel_areas,
     } = ctx;
+    
+    // Helper to determine border style based on focus and hover state
+    let get_border_style = |pane: FocusedPane| -> Style {
+        if input_mode == InputMode::Normal && focused_pane == pane {
+            Style::default().fg(Color::Yellow)
+        } else if hovered_panel.as_ref() == Some(&pane) {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        }
+    };
     // Left side: Quantization types
     let quant_title = if loading_quants {
         "Quantization Types [Loading...]"
@@ -558,14 +614,7 @@ fn render_gguf_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(quant_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::QuantizationGroups {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }
-                ),
+                .border_style(get_border_style(FocusedPane::QuantizationGroups)),
         )
         .highlight_style(
             Style::default()
@@ -574,6 +623,8 @@ fn render_gguf_panels(
         )
         .highlight_symbol(">> ");
 
+    // Store panel area for click/hover detection
+    panel_areas.push((FocusedPane::QuantizationGroups, chunks[0]));
     frame.render_stateful_widget(quant_list, chunks[0], quant_list_state);
 
     // Right side: Files for selected quantization
@@ -621,14 +672,7 @@ fn render_gguf_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(file_title)
-                .border_style(
-                    if input_mode == InputMode::Normal 
-                        && focused_pane == FocusedPane::QuantizationFiles {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    }
-                ),
+                .border_style(get_border_style(FocusedPane::QuantizationFiles)),
         )
         .highlight_style(
             Style::default()
@@ -637,6 +681,8 @@ fn render_gguf_panels(
         )
         .highlight_symbol(">> ");
 
+    // Store panel area for click/hover detection
+    panel_areas.push((FocusedPane::QuantizationFiles, chunks[1]));
     frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
 }
 
@@ -1368,12 +1414,13 @@ pub fn render_filter_toolbar(
     min_downloads: u64,
     min_likes: u64,
     focused_field: usize,
+    filter_areas: &mut Vec<(usize, Rect)>,
 ) {
     use crate::models::{SortField, SortDirection};
     
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Filters  [/: Search | 1-4: Presets | f: Focus | +/-: Modify | r: Reset | Ctrl+S: Save]")
+        .title("Filters  [Click to cycle | 1-4: Presets | r: Reset | Ctrl+S: Save]")
         .style(Style::default().fg(Color::Cyan));
     
     let inner = block.inner(area);
@@ -1437,15 +1484,66 @@ pub fn render_filter_toolbar(
         None
     };
     
+    // Calculate text segments for click detection
+    // Format: "Sort: {value}  |  Min Downloads: {value}  |  Min Likes: {value}"
+    let sort_label = "Sort: ";
+    let sort_value = format!("{} {}", sort_name, sort_arrow);
+    let separator1 = "  |  ";
+    let downloads_label = "Min Downloads: ";
+    let downloads_value = crate::utils::format_number(min_downloads);
+    let separator2 = "  |  ";
+    let likes_label = "Min Likes: ";
+    let likes_value = crate::utils::format_number(min_likes);
+    
+    // Calculate x positions for each clickable area
+    let mut x = inner.x;
+    
+    // Sort area: includes label and value
+    let sort_start = x;
+    x += sort_label.len() as u16 + sort_value.len() as u16;
+    let sort_area = Rect {
+        x: sort_start,
+        y: inner.y,
+        width: x - sort_start,
+        height: 1,
+    };
+    filter_areas.push((0, sort_area));
+    
+    x += separator1.len() as u16;
+    
+    // Downloads area: includes label and value
+    let downloads_start = x;
+    x += downloads_label.len() as u16 + downloads_value.len() as u16;
+    let downloads_area = Rect {
+        x: downloads_start,
+        y: inner.y,
+        width: x - downloads_start,
+        height: 1,
+    };
+    filter_areas.push((1, downloads_area));
+    
+    x += separator2.len() as u16;
+    
+    // Likes area: includes label and value
+    let likes_start = x;
+    x += likes_label.len() as u16 + likes_value.len() as u16;
+    let likes_area = Rect {
+        x: likes_start,
+        y: inner.y,
+        width: x - likes_start,
+        height: 1,
+    };
+    filter_areas.push((2, likes_area));
+    
     let mut line_parts = vec![
-        Span::styled("Sort: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{} {}", sort_name, sort_arrow), sort_style),
-        Span::raw("  |  "),
-        Span::styled("Min Downloads: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(crate::utils::format_number(min_downloads), downloads_style),
-        Span::raw("  |  "),
-        Span::styled("Min Likes: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(crate::utils::format_number(min_likes), likes_style),
+        Span::styled(sort_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(sort_value, sort_style),
+        Span::raw(separator1),
+        Span::styled(downloads_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(downloads_value, downloads_style),
+        Span::raw(separator2),
+        Span::styled(likes_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(likes_value, likes_style),
     ];
     
     // Add preset indicator if a preset is active
@@ -1462,3 +1560,5 @@ pub fn render_filter_toolbar(
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
 }
+
+
