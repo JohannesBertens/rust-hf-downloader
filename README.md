@@ -82,6 +82,8 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 ### Controls
 
+#### Keyboard Controls
+
 | Key | Action |
 |-----|--------|
 | `/` | Open search popup |
@@ -97,6 +99,23 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 | `-` | Decrement numeric option value (in options screen) / Decrement focused filter |
 | `Space` | Toggle boolean option (in options screen) |
 | `q` or `Ctrl+C` | Quit application |
+
+#### Mouse Controls
+
+| Action | Effect |
+|--------|--------|
+| **Click on panel** | Focus that panel and select first item |
+| **Scroll in panel** | Navigate up/down in the focused panel |
+| **Hover over panel** | Highlight panel border (cyan) |
+| **Click on filter field** | Focus field and cycle to next value |
+| **Scroll on filter field** | Cycle filter value up/down |
+
+Mouse-supported panels:
+- **Models list**: Click to focus, scroll to navigate models (loads details automatically)
+- **Quantization Groups**: Click to focus, scroll to navigate groups
+- **Quantization Files**: Click to focus, scroll to navigate files
+- **File Tree**: Click to focus, scroll to navigate tree
+- **Filter Toolbar**: Click/scroll on Sort, Min Downloads, or Min Likes to cycle values
 
 #### Filter & Sort Controls
 | Key | Action |

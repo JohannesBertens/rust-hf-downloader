@@ -145,6 +145,7 @@ impl App {
             focused_filter_field: self.focused_filter_field,
             panel_areas: &mut self.panel_areas,
             hovered_panel: &self.hovered_panel,
+            filter_areas: &mut self.filter_areas,
         });
         
         // For progress bars, use try_lock() with fallback to cached values
@@ -208,26 +209,87 @@ impl App {
 
     /// Handle mouse click events immediately (synchronous)
     fn handle_mouse_click(&mut self, column: u16, row: u16) {
-        // Skip if popup is open or no panel areas defined
-        if self.popup_mode != crate::models::PopupMode::None || self.panel_areas.is_empty() {
+        // Skip if popup is open
+        if self.popup_mode != crate::models::PopupMode::None {
             return;
+        }
+        
+        let pos = ratatui::layout::Position::new(column, row);
+        
+        // Check if click is within any filter area first
+        for (field_idx, area) in &self.filter_areas {
+            if area.contains(pos) {
+                self.handle_filter_click(*field_idx);
+                return;
+            }
         }
         
         // Check if click is within any panel area
         for (pane, area) in &self.panel_areas {
-            if area.contains(ratatui::layout::Position::new(column, row)) {
+            if area.contains(pos) {
                 // Use focus_pane() to also select first item if needed
                 self.focus_pane(*pane);
-                break;
+                return;
             }
         }
     }
 
-    /// Handle mouse scroll events - scroll the focused panel up or down
-    fn handle_mouse_scroll(&mut self, scroll_up: bool) {
+    /// Handle click on a filter field - cycle to next value
+    fn handle_filter_click(&mut self, field_idx: usize) {
+        // Set focused field and cycle its value
+        self.focused_filter_field = field_idx;
+        
+        match field_idx {
+            0 => {
+                // Sort field: cycle through Downloads → Likes → Modified → Name → Downloads
+                self.sort_field = match self.sort_field {
+                    crate::models::SortField::Downloads => crate::models::SortField::Likes,
+                    crate::models::SortField::Likes => crate::models::SortField::Modified,
+                    crate::models::SortField::Modified => crate::models::SortField::Name,
+                    crate::models::SortField::Name => crate::models::SortField::Downloads,
+                };
+                *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
+            }
+            1 => {
+                // Min downloads: cycle through 0, 100, 1k, 10k, 100k, 1M
+                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let new_idx = (current_idx + 1) % steps.len();
+                self.filter_min_downloads = steps[new_idx];
+                *self.status.write().unwrap() = format!("Min downloads: {}", crate::utils::format_number(self.filter_min_downloads));
+            }
+            2 => {
+                // Min likes: cycle through 0, 10, 50, 100, 500, 1k, 5k
+                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let new_idx = (current_idx + 1) % steps.len();
+                self.filter_min_likes = steps[new_idx];
+                *self.status.write().unwrap() = format!("Min likes: {}", crate::utils::format_number(self.filter_min_likes));
+            }
+            _ => {}
+        }
+        
+        // Re-fetch with new filters
+        self.clear_search_results();
+        self.needs_search_models = true;
+    }
+
+    /// Handle mouse scroll events - scroll the focused panel up or down,
+    /// or cycle filter values if scrolling over filter toolbar
+    fn handle_mouse_scroll(&mut self, scroll_up: bool, column: u16, row: u16) {
         // Skip if popup is open
         if self.popup_mode != crate::models::PopupMode::None {
             return;
+        }
+        
+        let pos = ratatui::layout::Position::new(column, row);
+        
+        // Check if scroll is within any filter area
+        for (field_idx, area) in &self.filter_areas {
+            if area.contains(pos) {
+                self.handle_filter_scroll(*field_idx, scroll_up);
+                return;
+            }
         }
         
         // Navigate in the currently focused pane
@@ -238,6 +300,9 @@ impl App {
                 } else {
                     self.next();
                 }
+                // Clear details and trigger reload (same as keyboard navigation)
+                self.clear_model_details();
+                self.needs_load_quantizations = true;
             }
             crate::models::FocusedPane::QuantizationGroups => {
                 if scroll_up {
@@ -264,6 +329,63 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Handle scroll on a filter field - cycle value up or down
+    fn handle_filter_scroll(&mut self, field_idx: usize, scroll_up: bool) {
+        // Set focused field
+        self.focused_filter_field = field_idx;
+        
+        match field_idx {
+            0 => {
+                // Sort field: cycle through options
+                self.sort_field = if scroll_up {
+                    match self.sort_field {
+                        crate::models::SortField::Downloads => crate::models::SortField::Name,
+                        crate::models::SortField::Likes => crate::models::SortField::Downloads,
+                        crate::models::SortField::Modified => crate::models::SortField::Likes,
+                        crate::models::SortField::Name => crate::models::SortField::Modified,
+                    }
+                } else {
+                    match self.sort_field {
+                        crate::models::SortField::Downloads => crate::models::SortField::Likes,
+                        crate::models::SortField::Likes => crate::models::SortField::Modified,
+                        crate::models::SortField::Modified => crate::models::SortField::Name,
+                        crate::models::SortField::Name => crate::models::SortField::Downloads,
+                    }
+                };
+                *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
+            }
+            1 => {
+                // Min downloads: cycle through steps
+                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let new_idx = if scroll_up {
+                    if current_idx == 0 { steps.len() - 1 } else { current_idx - 1 }
+                } else {
+                    (current_idx + 1) % steps.len()
+                };
+                self.filter_min_downloads = steps[new_idx];
+                *self.status.write().unwrap() = format!("Min downloads: {}", crate::utils::format_number(self.filter_min_downloads));
+            }
+            2 => {
+                // Min likes: cycle through steps
+                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
+                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let new_idx = if scroll_up {
+                    if current_idx == 0 { steps.len() - 1 } else { current_idx - 1 }
+                } else {
+                    (current_idx + 1) % steps.len()
+                };
+                self.filter_min_likes = steps[new_idx];
+                *self.status.write().unwrap() = format!("Min likes: {}", crate::utils::format_number(self.filter_min_likes));
+            }
+            _ => {}
+        }
+        
+        // Re-fetch with new filters
+        self.clear_search_results();
+        self.needs_search_models = true;
     }
 
     /// Update hover state based on mouse position (called once per frame with coalesced position)
@@ -327,12 +449,12 @@ impl App {
                                     self.handle_mouse_click(mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::ScrollUp => {
-                                    // Process scroll immediately
-                                    self.handle_mouse_scroll(true);
+                                    // Process scroll immediately with position
+                                    self.handle_mouse_scroll(true, mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    // Process scroll immediately
-                                    self.handle_mouse_scroll(false);
+                                    // Process scroll immediately with position
+                                    self.handle_mouse_scroll(false, mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::Moved => {
                                     // Queue for coalesced processing
@@ -369,10 +491,10 @@ impl App {
                                     self.handle_mouse_click(mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::ScrollUp => {
-                                    self.handle_mouse_scroll(true);
+                                    self.handle_mouse_scroll(true, mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    self.handle_mouse_scroll(false);
+                                    self.handle_mouse_scroll(false, mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::Moved => {
                                     // Overwrite - only keep the latest position

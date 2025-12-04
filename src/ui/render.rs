@@ -40,6 +40,8 @@ pub struct RenderParams<'a> {
     // Mouse panel areas (for click/hover detection on panels)
     pub panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
     pub hovered_panel: &'a Option<FocusedPane>,
+    // Filter toolbar click areas
+    pub filter_areas: &'a mut Vec<(usize, Rect)>,
 }
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
@@ -69,10 +71,12 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         focused_filter_field,
         panel_areas,
         hovered_panel,
+        filter_areas,
     } = params;
     
-    // Clear previous panel areas
+    // Clear previous panel and filter areas
     panel_areas.clear();
+    filter_areas.clear();
     
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -93,6 +97,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         filter_min_downloads,
         filter_min_likes,
         focused_filter_field,
+        filter_areas,
     );
 
     // Helper to determine border style based on focus and hover state
@@ -1409,12 +1414,13 @@ pub fn render_filter_toolbar(
     min_downloads: u64,
     min_likes: u64,
     focused_field: usize,
+    filter_areas: &mut Vec<(usize, Rect)>,
 ) {
     use crate::models::{SortField, SortDirection};
     
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Filters  [/: Search | 1-4: Presets | f: Focus | +/-: Modify | r: Reset | Ctrl+S: Save]")
+        .title("Filters  [Click to cycle | 1-4: Presets | r: Reset | Ctrl+S: Save]")
         .style(Style::default().fg(Color::Cyan));
     
     let inner = block.inner(area);
@@ -1478,15 +1484,66 @@ pub fn render_filter_toolbar(
         None
     };
     
+    // Calculate text segments for click detection
+    // Format: "Sort: {value}  |  Min Downloads: {value}  |  Min Likes: {value}"
+    let sort_label = "Sort: ";
+    let sort_value = format!("{} {}", sort_name, sort_arrow);
+    let separator1 = "  |  ";
+    let downloads_label = "Min Downloads: ";
+    let downloads_value = crate::utils::format_number(min_downloads);
+    let separator2 = "  |  ";
+    let likes_label = "Min Likes: ";
+    let likes_value = crate::utils::format_number(min_likes);
+    
+    // Calculate x positions for each clickable area
+    let mut x = inner.x;
+    
+    // Sort area: includes label and value
+    let sort_start = x;
+    x += sort_label.len() as u16 + sort_value.len() as u16;
+    let sort_area = Rect {
+        x: sort_start,
+        y: inner.y,
+        width: x - sort_start,
+        height: 1,
+    };
+    filter_areas.push((0, sort_area));
+    
+    x += separator1.len() as u16;
+    
+    // Downloads area: includes label and value
+    let downloads_start = x;
+    x += downloads_label.len() as u16 + downloads_value.len() as u16;
+    let downloads_area = Rect {
+        x: downloads_start,
+        y: inner.y,
+        width: x - downloads_start,
+        height: 1,
+    };
+    filter_areas.push((1, downloads_area));
+    
+    x += separator2.len() as u16;
+    
+    // Likes area: includes label and value
+    let likes_start = x;
+    x += likes_label.len() as u16 + likes_value.len() as u16;
+    let likes_area = Rect {
+        x: likes_start,
+        y: inner.y,
+        width: x - likes_start,
+        height: 1,
+    };
+    filter_areas.push((2, likes_area));
+    
     let mut line_parts = vec![
-        Span::styled("Sort: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{} {}", sort_name, sort_arrow), sort_style),
-        Span::raw("  |  "),
-        Span::styled("Min Downloads: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(crate::utils::format_number(min_downloads), downloads_style),
-        Span::raw("  |  "),
-        Span::styled("Min Likes: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(crate::utils::format_number(min_likes), likes_style),
+        Span::styled(sort_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(sort_value, sort_style),
+        Span::raw(separator1),
+        Span::styled(downloads_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(downloads_value, downloads_style),
+        Span::raw(separator2),
+        Span::styled(likes_label, Style::default().fg(Color::DarkGray)),
+        Span::styled(likes_value, likes_style),
     ];
     
     // Add preset indicator if a preset is active

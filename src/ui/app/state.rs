@@ -73,6 +73,7 @@ pub struct App {
     pub panel_areas: Vec<(FocusedPane, Rect)>,  // Store panel areas for click/hover detection
     pub hovered_panel: Option<FocusedPane>,  // Currently hovered panel for visual feedback
     pub last_mouse_event_time: std::time::Instant,  // Track time of last processed mouse event
+    pub filter_areas: Vec<(usize, Rect)>,  // Store filter field areas (0=sort, 1=downloads, 2=likes)
     // Cached values for non-blocking render (used when tokio Mutex is locked)
     pub cached_complete_downloads: CompleteDownloads,
     pub cached_download_progress: Option<DownloadProgress>,
@@ -166,6 +167,7 @@ impl App {
             panel_areas: Vec::new(),
             hovered_panel: None,
             last_mouse_event_time: std::time::Instant::now(),
+            filter_areas: Vec::new(),
             // Cached values for non-blocking render
             cached_complete_downloads: HashMap::new(),
             cached_download_progress: None,
