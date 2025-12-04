@@ -223,6 +223,49 @@ impl App {
         }
     }
 
+    /// Handle mouse scroll events - scroll the focused panel up or down
+    fn handle_mouse_scroll(&mut self, scroll_up: bool) {
+        // Skip if popup is open
+        if self.popup_mode != crate::models::PopupMode::None {
+            return;
+        }
+        
+        // Navigate in the currently focused pane
+        match self.focused_pane {
+            crate::models::FocusedPane::Models => {
+                if scroll_up {
+                    self.previous();
+                } else {
+                    self.next();
+                }
+            }
+            crate::models::FocusedPane::QuantizationGroups => {
+                if scroll_up {
+                    self.previous_quant();
+                } else {
+                    self.next_quant();
+                }
+            }
+            crate::models::FocusedPane::QuantizationFiles => {
+                if scroll_up {
+                    self.previous_file();
+                } else {
+                    self.next_file();
+                }
+            }
+            crate::models::FocusedPane::ModelMetadata => {
+                // Metadata pane has no scrollable list
+            }
+            crate::models::FocusedPane::FileTree => {
+                if scroll_up {
+                    self.previous_file_tree_item();
+                } else {
+                    self.next_file_tree_item();
+                }
+            }
+        }
+    }
+
     /// Update hover state based on mouse position (called once per frame with coalesced position)
     fn update_hover_state(&mut self, column: u16, row: u16) {
         self.mouse_position = Some((column, row));
@@ -283,6 +326,14 @@ impl App {
                                     // Process clicks immediately
                                     self.handle_mouse_click(mouse_event.column, mouse_event.row);
                                 }
+                                MouseEventKind::ScrollUp => {
+                                    // Process scroll immediately
+                                    self.handle_mouse_scroll(true);
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    // Process scroll immediately
+                                    self.handle_mouse_scroll(false);
+                                }
                                 MouseEventKind::Moved => {
                                     // Queue for coalesced processing
                                     last_mouse_position = Some((mouse_event.column, mouse_event.row));
@@ -316,6 +367,12 @@ impl App {
                             match mouse_event.kind {
                                 MouseEventKind::Down(MouseButton::Left) => {
                                     self.handle_mouse_click(mouse_event.column, mouse_event.row);
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    self.handle_mouse_scroll(true);
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    self.handle_mouse_scroll(false);
                                 }
                                 MouseEventKind::Moved => {
                                     // Overwrite - only keep the latest position
