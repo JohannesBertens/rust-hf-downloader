@@ -2,6 +2,14 @@
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
+## Demo
+
+### Search & Browse
+![Search & Browse Demo](docs/images/searching.gif)
+
+### Download Flow
+![Download Flow Demo](docs/images/search_download.gif)
+
 ## Features
 
 - 🔍 **Interactive Search**: Search through thousands of HuggingFace models with popup dialog
