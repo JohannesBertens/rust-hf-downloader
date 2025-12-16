@@ -278,12 +278,21 @@ impl App {
     pub async fn resume_incomplete_downloads(&mut self) {
         let count = self.incomplete_downloads.len();
         let hf_token = self.options.hf_token.clone();
+        let default_dir = self.options.default_directory.clone();
         
         for metadata in &self.incomplete_downloads {
-            // Queue the download to resume
-            let base_path = PathBuf::from(&metadata.local_path).parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from(&metadata.local_path));
+            // Calculate model_path as base/author/model_name (without file's subdirectory)
+            // The filename may contain subdirectories (e.g., "Q4_1/model.gguf")
+            // which will be appended during download
+            let model_parts: Vec<&str> = metadata.model_id.split('/').collect();
+            let base_path = if model_parts.len() == 2 {
+                PathBuf::from(&default_dir).join(model_parts[0]).join(model_parts[1])
+            } else {
+                // Fallback to deriving from local_path if model_id format is unexpected
+                PathBuf::from(&metadata.local_path).parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(&default_dir))
+            };
             
             let _ = self.download_tx.send((
                 metadata.model_id.clone(),
