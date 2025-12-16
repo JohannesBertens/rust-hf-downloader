@@ -137,14 +137,21 @@ impl App {
                 
                 let base_path = self.download_path_input.value().to_string();
                 
-                // Validate and sanitize the path to prevent path traversal
-                let model_path = match validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
-                    Ok(path) => path.parent().unwrap_or(&path).to_path_buf(),
-                    Err(e) => {
-                        *self.error.write().unwrap() = Some(format!("Invalid path: {}", e));
-                        *self.status.write().unwrap() = "Download cancelled due to invalid path".to_string();
-                        return;
-                    }
+                // Validate the path to prevent path traversal
+                if let Err(e) = validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
+                    *self.error.write().unwrap() = Some(format!("Invalid path: {}", e));
+                    *self.status.write().unwrap() = "Download cancelled due to invalid path".to_string();
+                    return;
+                }
+                
+                // Calculate model_path as base/author/model_name (without file's subdirectory)
+                // The filename may contain subdirectories (e.g., "UD-Q6_K_XL/model.gguf")
+                // which will be appended during download, so we don't include them here
+                let model_parts: Vec<&str> = model.id.split('/').collect();
+                let model_path = if model_parts.len() == 2 {
+                    PathBuf::from(&base_path).join(model_parts[0]).join(model_parts[1])
+                } else {
+                    PathBuf::from(&base_path)
                 };
                 
                 // Convert files_to_download to filenames
