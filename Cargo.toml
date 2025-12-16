@@ -8,6 +8,7 @@ edition = "2021"
 documentation = "https://github.com/JohannesBertens/rust-hf-downloader"
 homepage = "https://jreb.nl"
 repository = "https://github.com/JohannesBertens/rust-hf-downloader"
+exclude = ["docs/images"]
 
 [dependencies]
 color-eyre = "0.6.3"
