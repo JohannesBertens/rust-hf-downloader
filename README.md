@@ -37,6 +37,7 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
   - Multi-part GGUF file handling
   - Automatic subfolder organization by publisher/model
   - Fixed quantization folder duplication issue
+  - Fixed GGUF file path duplication for subdirectory downloads
   - Download queue with status display
 - ✅ **Download Tracking**: Visual indicators showing already downloaded files
 - 🔒 **SHA256 Verification**: Automatic integrity checking with:
@@ -311,6 +312,14 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 1.1.1 (2025-12-16)
+- **Bug Fix**: Fixed GGUF file path duplication issue for subdirectory downloads
+- **Files Affected**: `src/ui/app/downloads.rs` - path construction logic in `confirm_download()` and `resume_incomplete_downloads()`
+- **Issue**: Downloads with subdirectory paths (e.g., `UD-Q6_K_XL/model.gguf`) created double folder names
+- **Solution**: Modified base_path calculation to exclude file subdirectory, preserving it only in filename
+- **Verification**: Comprehensive audit of all download entry points completed
+- **Migration**: Delete existing broken directories and rebuild with `cargo build --release`
 
 ### Version 1.0.0 (2025-11-27)
 - **Major Change**: Removed trending models automatic loading on startup
