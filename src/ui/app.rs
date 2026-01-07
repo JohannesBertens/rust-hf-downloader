@@ -51,17 +51,21 @@ impl App {
         let download_rx = self.download_rx.clone();
         let download_progress = self.download_progress.clone();
         let download_queue_size = self.download_queue_size.clone();
+        let download_queue_bytes = self.download_queue_bytes.clone();
         let status_tx = self.status_tx.clone();
         let complete_downloads = self.complete_downloads.clone();
         let verification_queue = self.verification_queue.clone();
         let verification_queue_size = self.verification_queue_size.clone();
         tokio::spawn(async move {
             let mut rx = download_rx.lock().await;
-            while let Some((model_id, filename, path, sha256, hf_token)) = rx.recv().await {
-                // Decrement queue size when we start processing
+            while let Some((model_id, filename, path, sha256, hf_token, total_size)) = rx.recv().await {
+                // Decrement queue size and bytes when we start processing
                 {
                     let mut queue_size = download_queue_size.lock().await;
                     *queue_size = queue_size.saturating_sub(1);
+
+                    let mut queue_bytes = download_queue_bytes.lock().await;
+                    *queue_bytes = queue_bytes.saturating_sub(total_size);
                 }
                 start_download(crate::download::DownloadParams {
                     model_id,
@@ -162,7 +166,14 @@ impl App {
                 *guard
             })
             .unwrap_or(self.cached_download_queue_size);
-        
+
+        let download_queue_bytes = self.download_queue_bytes.try_lock()
+            .map(|guard| {
+                self.cached_download_queue_bytes = *guard;
+                *guard
+            })
+            .unwrap_or(self.cached_download_queue_bytes);
+
         let verification_progress = self.verification_progress.try_lock()
             .map(|guard| {
                 self.cached_verification_progress = guard.clone();
@@ -181,6 +192,7 @@ impl App {
             frame,
             &download_progress,
             download_queue_size,
+            download_queue_bytes,
             &verification_progress,
             verification_queue_size,
         );

@@ -35,6 +35,7 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
   - Configurable download speed limiting (token bucket rate limiter)
   - Real-time speed tracking with continuous updates
   - Progress tracking with per-chunk speed indicators showing actual/limit speeds
+  - Remaining download size display (e.g., "Downloading (2 queued) 120GB remaining")
   - Resume support for interrupted downloads
   - Multi-part GGUF file handling
   - Automatic subfolder organization by publisher/model
@@ -198,7 +199,8 @@ Mouse-supported panels:
    - Download progress appears in the top right corner with:
      - Progress percentage
      - Download speed (shows as "actual/limit MB/s" when rate limiting is enabled)
-     - Queue count if multiple downloads pending
+     - Queue count and total remaining size (e.g., "(2 queued) 120GB remaining")
+     - Shows "<1GB remaining" for downloads under 1GB
 
 12. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
    - Verification runs in background with progress bar
@@ -317,6 +319,15 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 1.2.1 (2026-01-07)
+- **Enhancement**: Download progress now displays total remaining size
+- **UI Improvement**: Progress box title shows combined size of current + queued downloads
+- **Display Format**: "Downloading (2 queued) 120GB remaining" or "Downloading <1GB remaining"
+- **Implementation**: Extended download message tuple to include file size tracking
+- **Files Modified**: 4 files (state.rs, app.rs, downloads.rs, render.rs)
+- **No Breaking Changes**: All existing functionality preserved
+- See [changelog/RELEASE_NOTES_1.2.1.md](changelog/RELEASE_NOTES_1.2.1.md) for full details
 
 ### Version 1.2.0 (2026-01-07)
 - **Feature**: Download speed rate limiting with token bucket algorithm

@@ -686,19 +686,33 @@ fn render_gguf_panels(
     frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
 }
 
+/// Format bytes as GB, rounding up. Returns empty string for 0 bytes.
+fn format_remaining_gb(bytes: u64) -> String {
+    const GB: u64 = 1_073_741_824;
+    if bytes == 0 {
+        String::new()
+    } else if bytes < GB {
+        "<1GB".to_string()
+    } else {
+        let gb = (bytes as f64 / GB as f64).ceil() as u64;
+        format!("{}GB", gb)
+    }
+}
+
 /// Render both download and verification progress bars
 pub fn render_progress_bars(
     frame: &mut Frame,
     download_progress: &Option<DownloadProgress>,
     download_queue_size: usize,
+    download_queue_bytes: u64,
     verification_progress: &[VerificationProgress],
     verification_queue_size: usize,
 ) {
     // Render download progress (top-right) if active
     if let Some(progress) = download_progress {
-        render_download_progress(frame, progress, download_queue_size);
+        render_download_progress(frame, progress, download_queue_size, download_queue_bytes);
     }
-    
+
     // Render verification progress (bottom-right) if active
     if !verification_progress.is_empty() || verification_queue_size > 0 {
         render_verification_progress(frame, verification_progress, verification_queue_size);
@@ -710,6 +724,7 @@ fn render_download_progress(
     frame: &mut Frame,
     progress: &DownloadProgress,
     queue_size: usize,
+    queue_bytes: u64,
 ) {
     // Filter active chunks
     let active_chunks: Vec<_> = progress.chunks.iter()
@@ -739,10 +754,19 @@ fn render_download_progress(
     } else {
         0
     };
-    
-    // Title with queue info (no more verifying logic)
-    let title = if queue_size > 0 {
+
+    // Calculate total remaining bytes
+    let current_remaining = progress.total.saturating_sub(progress.downloaded);
+    let total_remaining = current_remaining + queue_bytes;
+    let remaining_str = format_remaining_gb(total_remaining);
+
+    // Title with queue info and remaining size
+    let title = if queue_size > 0 && !remaining_str.is_empty() {
+        format!("Downloading ({} queued) {} remaining", queue_size, remaining_str)
+    } else if queue_size > 0 {
         format!("Downloading ({} queued)", queue_size)
+    } else if !remaining_str.is_empty() {
+        format!("Downloading {} remaining", remaining_str)
     } else {
         "Downloading".to_string()
     };
