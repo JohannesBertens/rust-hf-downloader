@@ -699,6 +699,32 @@ fn format_remaining_gb(bytes: u64) -> String {
     }
 }
 
+/// Calculate ETA in minutes based on remaining bytes and current speed.
+/// Returns None if speed is zero or negative (download stalled/starting).
+/// Shows "<1 minute" for very fast downloads.
+fn calculate_eta_minutes(remaining_bytes: u64, speed_mbps: f64) -> Option<String> {
+    if speed_mbps <= 0.0 {
+        return None;
+    }
+
+    // Convert speed from MB/s to bytes/s
+    let speed_bytes_per_sec = speed_mbps * 1_048_576.0;
+
+    // Calculate seconds remaining
+    let seconds_remaining = remaining_bytes as f64 / speed_bytes_per_sec;
+
+    // Convert to minutes, rounding UP
+    let minutes = (seconds_remaining / 60.0).ceil() as u64;
+
+    if minutes == 0 {
+        Some("<1 minute".to_string())
+    } else if minutes == 1 {
+        Some("1 minute".to_string())
+    } else {
+        Some(format!("{} minutes", minutes))
+    }
+}
+
 /// Render both download and verification progress bars
 pub fn render_progress_bars(
     frame: &mut Frame,
@@ -760,15 +786,35 @@ fn render_download_progress(
     let total_remaining = current_remaining + queue_bytes;
     let remaining_str = format_remaining_gb(total_remaining);
 
-    // Title with queue info and remaining size
-    let title = if queue_size > 0 && !remaining_str.is_empty() {
-        format!("Downloading ({} queued) {} remaining", queue_size, remaining_str)
-    } else if queue_size > 0 {
-        format!("Downloading ({} queued)", queue_size)
-    } else if !remaining_str.is_empty() {
-        format!("Downloading {} remaining", remaining_str)
-    } else {
-        "Downloading".to_string()
+    // Calculate ETA based on current speed and total remaining
+    let eta_str = calculate_eta_minutes(total_remaining, progress.speed_mbps);
+
+    // Title with queue info, remaining size, and ETA
+    let title = match (queue_size > 0, !remaining_str.is_empty(), eta_str) {
+        // Queue + Size + ETA
+        (true, true, Some(eta)) => {
+            format!("Downloading ({} queued) {} remaining, ~{}", queue_size, remaining_str, eta)
+        }
+        // Queue + Size, no ETA (speed = 0)
+        (true, true, None) => {
+            format!("Downloading ({} queued) {} remaining", queue_size, remaining_str)
+        }
+        // Queue only
+        (true, false, _) => {
+            format!("Downloading ({} queued)", queue_size)
+        }
+        // Size + ETA, no queue
+        (false, true, Some(eta)) => {
+            format!("Downloading {} remaining, ~{}", remaining_str, eta)
+        }
+        // Size only, no ETA
+        (false, true, None) => {
+            format!("Downloading {} remaining", remaining_str)
+        }
+        // Base case
+        _ => {
+            "Downloading".to_string()
+        }
     };
     
     // Label with speed and rate limit indicator

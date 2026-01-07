@@ -35,7 +35,8 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
   - Configurable download speed limiting (token bucket rate limiter)
   - Real-time speed tracking with continuous updates
   - Progress tracking with per-chunk speed indicators showing actual/limit speeds
-  - Remaining download size display (e.g., "Downloading (2 queued) 120GB remaining")
+  - Remaining download size and ETA display (e.g., "Downloading (2 queued) 120GB remaining, ~45 minutes")
+  - Intelligent ETA calculation based on current speed (shows minutes, rounds up conservatively)
   - Resume support for interrupted downloads
   - Multi-part GGUF file handling
   - Automatic subfolder organization by publisher/model
