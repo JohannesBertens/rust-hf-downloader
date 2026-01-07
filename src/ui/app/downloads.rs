@@ -225,11 +225,19 @@ impl App {
                     let mut reg = self.download_registry.lock().await;
                     *reg = registry;
                 }
-                
-                // Increment queue size by number of files
+
+                // Calculate total bytes for all files being queued
+                let total_queued_bytes: u64 = files_to_download.iter()
+                    .map(|f| f.size)
+                    .sum();
+
+                // Increment queue size and bytes by number of files
                 {
                     let mut queue_size = self.download_queue_size.lock().await;
                     *queue_size += num_files;
+
+                    let mut queue_bytes = self.download_queue_bytes.lock().await;
+                    *queue_bytes += total_queued_bytes;
                 }
                 
                 // Send all download requests
@@ -243,13 +251,21 @@ impl App {
                         // Fallback: look up hash from fetched map
                         sha256_map.get(filename).and_then(|h| h.clone())
                     };
-                    
+
+                    // Get file size from the corresponding QuantizationInfo
+                    let file_size = if idx < files_to_download.len() {
+                        files_to_download[idx].size
+                    } else {
+                        0  // Fallback for safety
+                    };
+
                     if self.download_tx.send((
                         model.id.clone(),
                         filename.clone(),
                         model_path.clone(),
                         sha256,
                         hf_token.clone(),
+                        file_size,
                     )).is_ok() {
                         success_count += 1;
                     }
@@ -264,11 +280,20 @@ impl App {
                 } else {
                     *self.error.write().unwrap() = Some("Failed to start download".to_string());
                 }
-                
-                // Adjust queue size if some sends failed
+
+                // Adjust queue size and bytes if some sends failed
                 if success_count < num_files {
+                    let failed_count = num_files - success_count;
+                    let failed_bytes: u64 = files_to_download.iter()
+                        .skip(success_count)
+                        .map(|f| f.size)
+                        .sum();
+
                     let mut queue_size = self.download_queue_size.lock().await;
-                    *queue_size = queue_size.saturating_sub(num_files - success_count);
+                    *queue_size = queue_size.saturating_sub(failed_count);
+
+                    let mut queue_bytes = self.download_queue_bytes.lock().await;
+                    *queue_bytes = queue_bytes.saturating_sub(failed_bytes);
                 }
             }
         }
@@ -279,7 +304,8 @@ impl App {
         let count = self.incomplete_downloads.len();
         let hf_token = self.options.hf_token.clone();
         let default_dir = self.options.default_directory.clone();
-        
+        let mut total_bytes: u64 = 0;
+
         for metadata in &self.incomplete_downloads {
             // Calculate model_path as base/author/model_name (without file's subdirectory)
             // The filename may contain subdirectories (e.g., "Q4_1/model.gguf")
@@ -293,22 +319,28 @@ impl App {
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from(&default_dir))
             };
-            
+
+            total_bytes += metadata.total_size;
+
             let _ = self.download_tx.send((
                 metadata.model_id.clone(),
                 metadata.filename.clone(),
                 base_path,
                 metadata.expected_sha256.clone(),
                 hf_token.clone(),
+                metadata.total_size,
             ));
         }
         
-        // Update queue size
+        // Update queue size and bytes
         {
             let mut queue_size = self.download_queue_size.lock().await;
             *queue_size += count;
+
+            let mut queue_bytes = self.download_queue_bytes.lock().await;
+            *queue_bytes += total_bytes;
         }
-        
+
         *self.status.write().unwrap() = format!("Resuming {} incomplete download(s)", count);
         self.incomplete_downloads.clear();
     }
@@ -428,11 +460,19 @@ impl App {
                     let mut reg = self.download_registry.lock().await;
                     *reg = registry;
                 }
-                
-                // Increment queue size
+
+                // Calculate total bytes for all files
+                let total_queued_bytes: u64 = files_to_download.iter()
+                    .filter_map(|f| f.size)
+                    .sum();
+
+                // Increment queue size and bytes
                 {
                     let mut queue_size = self.download_queue_size.lock().await;
                     *queue_size += num_files;
+
+                    let mut queue_bytes = self.download_queue_bytes.lock().await;
+                    *queue_bytes += total_queued_bytes;
                 }
                 
                 // Calculate the model root directory (base/author/model_name)
@@ -449,13 +489,15 @@ impl App {
                 let hf_token = self.options.hf_token.clone();
                 for file in &files_to_download {
                     let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
-                    
+                    let file_size = file.size.unwrap_or(0);
+
                     if self.download_tx.send((
                         model.id.clone(),
                         file.rfilename.clone(),
                         model_root.clone(),
                         sha256,
                         hf_token.clone(),
+                        file_size,
                     )).is_ok() {
                         success_count += 1;
                     }
@@ -466,11 +508,20 @@ impl App {
                 } else {
                     *self.error.write().unwrap() = Some("Failed to start downloads".to_string());
                 }
-                
-                // Adjust queue size if some sends failed
+
+                // Adjust queue size and bytes if some sends failed
                 if success_count < num_files {
+                    let failed_count = num_files - success_count;
+                    let failed_bytes: u64 = files_to_download.iter()
+                        .skip(success_count)
+                        .filter_map(|f| f.size)
+                        .sum();
+
                     let mut queue_size = self.download_queue_size.lock().await;
-                    *queue_size = queue_size.saturating_sub(num_files - success_count);
+                    *queue_size = queue_size.saturating_sub(failed_count);
+
+                    let mut queue_bytes = self.download_queue_bytes.lock().await;
+                    *queue_bytes = queue_bytes.saturating_sub(failed_bytes);
                 }
             }
         }

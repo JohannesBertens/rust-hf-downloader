@@ -10,8 +10,8 @@ use tokio::sync::{Mutex, mpsc};
 use tui_input::Input;
 
 /// Type alias for download message tuple
-/// Tuple: (model_id, filename, path, sha256, hf_token)
-pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>);
+/// Tuple: (model_id, filename, path, sha256, hf_token, total_size)
+pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>, u64);
 
 /// Type alias for download receiver to reduce complexity
 pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
@@ -41,6 +41,7 @@ pub struct App {
     pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
     pub download_rx: DownloadReceiver,
     pub download_queue_size: Arc<Mutex<usize>>,
+    pub download_queue_bytes: Arc<Mutex<u64>>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
     pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
     pub status_tx: mpsc::UnboundedSender<String>,
@@ -78,6 +79,7 @@ pub struct App {
     pub cached_complete_downloads: CompleteDownloads,
     pub cached_download_progress: Option<DownloadProgress>,
     pub cached_download_queue_size: usize,
+    pub cached_download_queue_bytes: u64,
     pub cached_verification_progress: Vec<VerificationProgress>,
     pub cached_verification_queue_size: usize,
 }
@@ -138,6 +140,7 @@ impl App {
             download_tx,
             download_rx: Arc::new(Mutex::new(download_rx)),
             download_queue_size: Arc::new(Mutex::new(0)),
+            download_queue_bytes: Arc::new(Mutex::new(0)),
             incomplete_downloads: Vec::new(),
             status_rx: Arc::new(Mutex::new(status_rx)),
             status_tx,
@@ -172,6 +175,7 @@ impl App {
             cached_complete_downloads: HashMap::new(),
             cached_download_progress: None,
             cached_download_queue_size: 0,
+            cached_download_queue_bytes: 0,
             cached_verification_progress: Vec::new(),
             cached_verification_queue_size: 0,
         }
