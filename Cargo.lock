@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "rust-hf-downloader"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "backtrace",
  "color-eyre",
@@ -972,6 +972,7 @@ dependencies = [
  "hex",
  "idna 0.5.0",
  "indexmap",
+ "once_cell",
  "ratatui 0.29.0",
  "regex",
  "reqwest",

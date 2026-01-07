@@ -1,11 +1,13 @@
 use crate::models::{ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus, VerificationQueueItem};
 use crate::registry;
+use crate::rate_limiter::RateLimiter;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, AtomicU64, AtomicU32, AtomicBool, Ordering};
 use tokio::sync::{Mutex, mpsc, Semaphore};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use std::io::SeekFrom;
+use once_cell::sync::Lazy;
 
 /// Parameters for starting a download
 pub struct DownloadParams {
@@ -371,6 +373,8 @@ pub struct DownloadConfig {
     pub download_timeout_secs: AtomicU64,
     pub retry_delay_secs: AtomicU64,
     pub progress_update_interval_ms: AtomicU64,
+    pub rate_limit_enabled: AtomicBool,
+    pub rate_limit_bytes_per_sec: AtomicU64,
 }
 
 impl DownloadConfig {
@@ -385,12 +389,20 @@ impl DownloadConfig {
             download_timeout_secs: AtomicU64::new(300),
             retry_delay_secs: AtomicU64::new(1),
             progress_update_interval_ms: AtomicU64::new(200),
+            rate_limit_enabled: AtomicBool::new(false),
+            rate_limit_bytes_per_sec: AtomicU64::new(50 * 1024 * 1024),  // 50 MB/s
         }
     }
 }
 
 // Global static configuration
 pub static DOWNLOAD_CONFIG: DownloadConfig = DownloadConfig::new();
+
+// Global rate limiter instance (initialized lazily)
+pub static RATE_LIMITER: Lazy<RateLimiter> = Lazy::new(|| {
+    let rate = DOWNLOAD_CONFIG.rate_limit_bytes_per_sec.load(Ordering::Relaxed);
+    RateLimiter::new(rate, 2.0)  // 2 second burst window (fixed)
+});
 
 fn calculate_chunk_size(file_size: u64) -> usize {
     let target_chunks = DOWNLOAD_CONFIG.target_chunks.load(Ordering::Relaxed) as u64;
@@ -684,8 +696,14 @@ async fn download_chunk_with_progress(
     
     while let Some(item) = stream.next().await {
         let bytes = item?;
+
+        // Rate limiting: acquire tokens before writing
+        if DOWNLOAD_CONFIG.rate_limit_enabled.load(Ordering::Relaxed) {
+            RATE_LIMITER.acquire(bytes.len()).await?;
+        }
+
         file.write_all(&bytes).await?;
-        
+
         let bytes_len = bytes.len() as u64;
         chunk_downloaded += bytes_len;
         

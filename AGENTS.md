@@ -18,6 +18,7 @@ src/
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
 ├── registry.rs       # Download metadata management
 ├── download.rs       # Download orchestration with auth (v0.9.5)
+├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification (v0.8.0)
 ├── utils.rs          # Helper functions
 └── ui/

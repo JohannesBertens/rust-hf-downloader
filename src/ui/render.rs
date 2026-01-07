@@ -747,9 +747,17 @@ fn render_download_progress(
         "Downloading".to_string()
     };
     
-    // Label with speed
+    // Label with speed and rate limit indicator
     let label = if progress.speed_mbps > 0.0 {
-        format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
+        use std::sync::atomic::Ordering;
+        let rate_limited = crate::download::DOWNLOAD_CONFIG.rate_limit_enabled.load(Ordering::Relaxed);
+        if rate_limited {
+            let limit_bytes = crate::download::DOWNLOAD_CONFIG.rate_limit_bytes_per_sec.load(Ordering::Relaxed);
+            let limit_mbps = limit_bytes as f64 / 1_048_576.0;
+            format!("{}% - {:.1}/{:.1} MB/s", percentage, progress.speed_mbps, limit_mbps)
+        } else {
+            format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
+        }
     } else {
         format!("{}%", percentage)
     };
@@ -1246,7 +1254,7 @@ pub fn render_options_popup(
     token_input: &tui_input::Input,
 ) {
     let popup_width = 64.min(frame.area().width.saturating_sub(4));
-    let popup_height = 27;
+    let popup_height = 31.min(frame.area().height.saturating_sub(4));
     let popup_area = Rect {
         x: (frame.area().width.saturating_sub(popup_width)) / 2,
         y: (frame.area().height.saturating_sub(popup_height)) / 2,
@@ -1292,7 +1300,10 @@ pub fn render_options_popup(
         ("Download Timeout (sec):", options.download_timeout_secs.to_string()),
         ("Retry Delay (sec):", options.retry_delay_secs.to_string()),
         ("Progress Update Interval (ms):", options.progress_update_interval_ms.to_string()),
-        // Verification (indices 10-13)
+        // Rate Limiting (indices 10-11)
+        ("Rate Limit:", if options.download_rate_limit_enabled { "Enabled".to_string() } else { "Disabled".to_string() }),
+        ("Max Download Speed (MB/s):", format!("{:.1}", options.download_rate_limit_mbps)),
+        // Verification (indices 12-15)
         ("Enable Verification:", if options.verification_on_completion { "Enabled".to_string() } else { "Disabled".to_string() }),
         ("Concurrent Verifications:", options.concurrent_verifications.to_string()),
         ("Verification Buffer Size:", format_size(options.verification_buffer_size as u64)),
@@ -1303,7 +1314,8 @@ pub fn render_options_popup(
     let category_offsets = [
         (0, "General"),
         (2, "Download"),
-        (10, "Verification"),
+        (10, "Rate Limiting"),
+        (12, "Verification"),
     ];
     
     let mut y_offset = 1u16;
