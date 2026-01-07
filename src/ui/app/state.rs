@@ -191,7 +191,19 @@ impl App {
         crate::download::DOWNLOAD_CONFIG.download_timeout_secs.store(self.options.download_timeout_secs, Ordering::Relaxed);
         crate::download::DOWNLOAD_CONFIG.retry_delay_secs.store(self.options.retry_delay_secs, Ordering::Relaxed);
         crate::download::DOWNLOAD_CONFIG.progress_update_interval_ms.store(self.options.progress_update_interval_ms, Ordering::Relaxed);
-        
+
+        // Rate limiting config
+        let rate_limit_enabled = self.options.download_rate_limit_enabled;
+        crate::download::DOWNLOAD_CONFIG.rate_limit_enabled.store(rate_limit_enabled, Ordering::Relaxed);
+        let bytes_per_sec = (self.options.download_rate_limit_mbps * 1_048_576.0) as u64;
+        crate::download::DOWNLOAD_CONFIG.rate_limit_bytes_per_sec.store(bytes_per_sec, Ordering::Relaxed);
+
+        // Update rate limiter asynchronously
+        tokio::spawn(async move {
+            crate::download::RATE_LIMITER.set_rate(bytes_per_sec).await;
+            crate::download::RATE_LIMITER.set_enabled(rate_limit_enabled);
+        });
+
         // Verification config
         crate::verification::VERIFICATION_CONFIG.concurrent_verifications.store(self.options.concurrent_verifications, Ordering::Relaxed);
         crate::verification::VERIFICATION_CONFIG.buffer_size.store(self.options.verification_buffer_size, Ordering::Relaxed);

@@ -23,6 +23,7 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - ⚙️ **Persistent Configuration**: Customize and save settings (press 'o')
   - Download directory, concurrent threads, chunk sizes
   - Retry behavior, timeout settings
+  - Rate limiting with configurable speed caps
   - Verification options
   - HuggingFace authentication token
   - Settings persist across restarts
@@ -31,8 +32,9 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, IQ4_XS, MXFP4, etc.) with file sizes
 - 📥 **Smart Downloads**: Download models directly from the TUI with:
   - Adaptive chunk sizing for optimal performance across all file sizes
+  - Configurable download speed limiting (token bucket rate limiter)
   - Real-time speed tracking with continuous updates
-  - Progress tracking with per-chunk speed indicators
+  - Progress tracking with per-chunk speed indicators showing actual/limit speeds
   - Resume support for interrupted downloads
   - Multi-part GGUF file handling
   - Automatic subfolder organization by publisher/model
@@ -163,8 +165,8 @@ Mouse-supported panels:
    - Navigate with `j`/`k`
    - Edit directory: Press Enter, type path, Enter again
    - Edit HuggingFace Token: Press Enter, paste token, Enter again (required for gated models)
-   - Adjust numbers: Press `+`/`-`
-   - Toggle options: Press Space
+   - Adjust numbers: Press `+`/`-` (including download speed limit in MB/s)
+   - Toggle options: Press `+`/`-` or Space (including rate limiting enable/disable)
    - Press Esc to close and save
 
 4. **For gated models (Llama-3.1, Llama-2, etc.)**:
@@ -195,7 +197,7 @@ Mouse-supported panels:
    - Press Esc to cancel
    - Download progress appears in the top right corner with:
      - Progress percentage
-     - Download speed (MB/s)
+     - Download speed (shows as "actual/limit MB/s" when rate limiting is enabled)
      - Queue count if multiple downloads pending
 
 12. **Press `v`** to verify a downloaded file (if SHA256 hash is available):
@@ -231,9 +233,10 @@ The **Quantization Details** section shows all available GGUF quantized versions
 - **TLS Backend**: rustls (pure Rust TLS implementation)
 - **API**: HuggingFace REST API (`https://huggingface.co/api/models`)
 - **Text Input**: tui-input for search box handling
-- **Download Management**: 
+- **Download Management**:
   - Adaptive chunk sizing (targets ~20 chunks per file, 5MB-100MB range)
   - Parallel downloads with up to 8 concurrent chunks
+  - Token bucket rate limiting with 2-second burst window
   - Real-time speed tracking (updated every 200ms during streaming)
   - TOML-based metadata registry (`~/models/hf-downloads.toml`)
   - Automatic resume from byte position
@@ -264,6 +267,7 @@ rust-hf-downloader/
     ├── http_client.rs      # Authenticated HTTP requests (v0.9.5)
     ├── registry.rs         # Download registry persistence
     ├── download.rs         # Download manager & security
+    ├── rate_limiter.rs     # Token bucket rate limiter (v1.2.0)
     ├── verification.rs     # SHA256 verification worker
     └── ui/
         ├── mod.rs          # UI module declaration
@@ -303,6 +307,7 @@ rust-hf-downloader/
 - `futures`: Async stream utilities
 - `sha2`: SHA256 hash calculation
 - `hex`: Hex encoding for hash display
+- `once_cell`: Lazy static initialization for rate limiter
 
 ## Security
 
@@ -312,6 +317,22 @@ Key security features in v0.6.0:
 - ✅ Canonicalization checks for download paths
 
 ## Changelog
+
+### Version 1.2.0 (2026-01-07)
+- **Feature**: Download speed rate limiting with token bucket algorithm
+- **New Module**: `src/rate_limiter.rs` for bandwidth control
+- **Configuration Options**: Two new settings in options screen
+  - Rate Limit toggle (field 10): Enable/disable rate limiting
+  - Max Download Speed (field 11): Adjust speed from 0.1 to 1000.0 MB/s (±0.5 MB/s increments)
+- **UI Enhancement**: Progress display shows "actual/limit MB/s" when rate limiting is enabled
+- **Technical Details**:
+  - Token bucket implementation with fixed 2-second burst window
+  - Global rate limiter shared across all concurrent download chunks
+  - Zero overhead when disabled (atomic flag fast-path)
+  - Dynamic rate adjustment without restart
+- **Default Settings**: Disabled by default, 50.0 MB/s default limit when enabled
+- **Dependency**: Added `once_cell` v1.19 for lazy static initialization
+- See [changelog/RELEASE_NOTES_1.2.0.md](changelog/RELEASE_NOTES_1.2.0.md) for full details
 
 ### Version 1.1.1 (2025-12-16)
 - **Bug Fix**: Fixed GGUF file path duplication issue for subdirectory downloads

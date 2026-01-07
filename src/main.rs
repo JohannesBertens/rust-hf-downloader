@@ -7,6 +7,7 @@ mod registry;
 mod ui;
 mod utils;
 mod http_client;
+mod rate_limiter;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {

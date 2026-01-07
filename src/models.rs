@@ -261,6 +261,11 @@ pub struct VerificationQueueItem {
     pub is_manual: bool,  // True if triggered by 'v' key, false if automatic
 }
 
+// Default value for rate limit (50.0 MB/s)
+fn default_rate_limit_mbps() -> f64 {
+    50.0
+}
+
 /// Application options/settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppOptions {
@@ -277,6 +282,12 @@ pub struct AppOptions {
     pub download_timeout_secs: u64,
     pub retry_delay_secs: u64,
     pub progress_update_interval_ms: u64,
+
+    // Rate Limiting
+    #[serde(default)]
+    pub download_rate_limit_enabled: bool,
+    #[serde(default = "default_rate_limit_mbps")]
+    pub download_rate_limit_mbps: f64,
     
     // Verification Settings
     pub verification_on_completion: bool,
@@ -318,6 +329,8 @@ impl Default for AppOptions {
             download_timeout_secs: 300,
             retry_delay_secs: 1,
             progress_update_interval_ms: 200,
+            download_rate_limit_enabled: false,
+            download_rate_limit_mbps: 50.0,
             verification_on_completion: true,
             concurrent_verifications: 2,
             verification_buffer_size: 128 * 1024,

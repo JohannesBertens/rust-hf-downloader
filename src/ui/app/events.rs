@@ -367,7 +367,7 @@ impl App {
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.options.selected_field < 13 {
+                    if self.options.selected_field < 15 {
                         self.options.selected_field += 1;
                     }
                 }
@@ -879,21 +879,29 @@ impl App {
                     .clamp(100, 1000) as u64;
                 self.options.progress_update_interval_ms = new;
             }
-            10 => { // verification_on_completion - toggle with +/-
+            10 => { // download_rate_limit_enabled - toggle with +/-
+                self.options.download_rate_limit_enabled = !self.options.download_rate_limit_enabled;
+            }
+            11 => { // download_rate_limit_mbps (0.1-1000.0, step 0.5)
+                let new = (self.options.download_rate_limit_mbps + delta as f64 * 0.5)
+                    .clamp(0.1, 1000.0);
+                self.options.download_rate_limit_mbps = new;
+            }
+            12 => { // verification_on_completion - toggle with +/-
                 self.options.verification_on_completion = !self.options.verification_on_completion;
             }
-            11 => { // concurrent_verifications (1-8, step 1)
+            13 => { // concurrent_verifications (1-8, step 1)
                 let new = (self.options.concurrent_verifications as i32 + delta)
                     .clamp(1, 8) as usize;
                 self.options.concurrent_verifications = new;
             }
-            12 => { // verification_buffer_size (64KB-512KB, step 64KB)
+            14 => { // verification_buffer_size (64KB-512KB, step 64KB)
                 let step = 64 * 1024;
                 let new = (self.options.verification_buffer_size as i64 + delta as i64 * step)
                     .clamp(64 * 1024, 512 * 1024) as usize;
                 self.options.verification_buffer_size = new;
             }
-            13 => { // verification_update_interval (50-500, step 50)
+            15 => { // verification_update_interval (50-500, step 50)
                 let new = (self.options.verification_update_interval as i32 + delta * 50)
                     .clamp(50, 500) as usize;
                 self.options.verification_update_interval = new;
