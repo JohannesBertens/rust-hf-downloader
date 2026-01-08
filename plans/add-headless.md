@@ -46,17 +46,18 @@ rust-hf-downloader --headless list <model_id>
 - [x] Test CLI argument parsing
 
 ### Phase 2: Extract Core Logic from UI
-**Status**: 📋 Not Started
+**Status**: ✅ Complete
 **File**: `plans/implementation/add-headless-phase2.md`
 **Estimated Time**: 2 hours
+**Actual Time**: 2 hours
 
-- [ ] Create `src/headless.rs` module
-- [ ] Implement `search_models()` function
-- [ ] Implement `list_quantizations()` function
-- [ ] Implement `download_model()` function
-- [ ] Implement `resume_downloads()` function
-- [ ] Add headless progress reporting functions
-- [ ] Refactor `main.rs` for early headless detection
+- [x] Create `src/headless.rs` module
+- [x] Implement `search_models()` function
+- [x] Implement `list_quantizations()` function
+- [x] Implement `download_model()` function
+- [x] Implement `resume_downloads()` function
+- [x] Add headless progress reporting functions
+- [x] Refactor `main.rs` for early headless detection
 
 ### Phase 3: Implement Headless Commands
 **Status**: 📋 Not Started

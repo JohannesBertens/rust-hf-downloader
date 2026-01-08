@@ -49,15 +49,15 @@ Each phase includes detailed tasks, code examples, and verification steps:
 
 ### Overall Status
 - [x] Phase 1: CLI Parsing (5/5 tasks) ✅
-- [ ] Phase 2: Core Logic Extraction (0/6 tasks)
+- [x] Phase 2: Core Logic Extraction (8/8 tasks) ✅
 - [ ] Phase 3: Headless Commands (0/6 tasks)
 - [ ] Phase 4: Progress & Error Handling (0/6 tasks)
 - [ ] Phase 5: Testing & Documentation (0/6 tasks)
 
 ### Current Status
-**Phase**: Phase 2 - Extract Core Logic from UI
-**Tasks Completed**: 5/29
-**Progress**: 17%
+**Phase**: Phase 3 - Implement Headless Commands
+**Tasks Completed**: 13/29
+**Progress**: 45%
 
 ## 🚀 Quick Start
 

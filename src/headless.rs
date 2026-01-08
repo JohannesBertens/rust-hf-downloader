@@ -1,54 +1,17 @@
-# Phase 2: Extract Core Logic from UI
+//! Headless mode implementation for CLI-only operation
+//! 
+//! This module provides functions for running the application without a TUI,
+//! suitable for CI/CD automation and scripting.
 
-**Status**: ✅ Complete
-**Estimated Time**: 2 hours
-**Actual Time**: 2 hours
-**Dependencies**: Phase 1 (CLI parsing)
-**Blocked By**: Phase 1 completion
-
-## Overview
-Create the `headless.rs` module with reusable functions that wrap existing API and download logic. This phase bridges CLI commands with core functionality.
-
-## Objectives
-- Create `src/headless.rs` module
-- Implement headless versions of core operations
-- Set up progress reporting for console output
-- Integrate with `main.rs` for headless mode entry point
-
-## Tasks Checklist
-
-### 2.1 Create headless.rs Module Structure
-- [x] Create `src/headless.rs` file
-- [x] Add `mod headless;` to `src/main.rs`
-- [x] Define module-level structs and error types
-- [x] Set up imports from existing modules
-
-**File Structure:**
-```rust
-// src/headless.rs
 use crate::models::*;
 use crate::api;
-use crate::download;
 use crate::config;
+use crate::registry;
 use std::path::PathBuf;
+use std::io::Write;
+use tokio::sync::mpsc;
 
-// Module will contain:
-// - search_models()
-// - list_quantizations()
-// - download_model()
-// - resume_downloads()
-// - ProgressReporter struct
-// - HeadlessError enum
-```
-
-### 2.2 Define Headless Error Type
-- [x] Create `HeadlessError` enum
-- [x] Implement variants: ApiError, DownloadError, ConfigError, IoError
-- [x] Implement `std::fmt::Display` for user-friendly messages
-- [x] Implement `From` traits for existing error types
-
-**Expected Code:**
-```rust
+/// Error type for headless operations
 #[derive(Debug)]
 pub enum HeadlessError {
     ApiError(String),
@@ -83,26 +46,18 @@ impl From<std::io::Error> for HeadlessError {
         HeadlessError::IoError(err)
     }
 }
-```
 
-### 2.3 Implement search_models() Function
-- [x] Create function with signature:
-  ```rust
-  pub async fn search_models(
-      query: &str,
-      sort_field: Option<SortField>,
-      sort_direction: Option<SortDirection>,
-      min_downloads: Option<u64>,
-      min_likes: Option<u64>,
-      token: Option<&String>,
-  ) -> Result<Vec<ModelInfo>, HeadlessError>
-  ```
-- [x] Use existing `api::fetch_models_filtered()`
-- [x] Apply default values for None parameters
-- [x] Return results or propagate errors
+/// Type for download messages sent to the download manager
+pub type DownloadMessage = (
+    String,              // model_id
+    String,              // filename
+    PathBuf,             // output path
+    Option<String>,      // sha256
+    Option<String>,      // hf_token
+    u64,                 // total_size
+);
 
-**Expected Implementation:**
-```rust
+/// Search for models with optional filters
 pub async fn search_models(
     query: &str,
     sort_field: Option<SortField>,
@@ -120,22 +75,8 @@ pub async fn search_models(
         .await
         .map_err(|e| HeadlessError::ApiError(e.to_string()))
 }
-```
 
-### 2.4 Implement list_quantizations() Function
-- [x] Create function with signature:
-  ```rust
-  pub async fn list_quantizations(
-      model_id: &str,
-      token: Option<&String>,
-  ) -> Result<(Vec<QuantizationGroup>, ModelMetadata), HeadlessError>
-  ```
-- [x] Call `api::fetch_model_files()` for GGUF models
-- [x] Call `api::fetch_model_metadata()` for file tree
-- [x] Return both for comprehensive listing
-
-**Expected Implementation:**
-```rust
+/// List quantizations and metadata for a model
 pub async fn list_quantizations(
     model_id: &str,
     token: Option<&String>,
@@ -152,28 +93,8 @@ pub async fn list_quantizations(
 
     Ok((quantizations, metadata))
 }
-```
 
-### 2.5 Implement download_model() Function
-- [x] Create function with signature:
-  ```rust
-  pub async fn download_model(
-      model_id: &str,
-      quantization_filter: Option<&str>,
-      download_all: bool,
-      output_dir: &str,
-      hf_token: Option<String>,
-      progress_tx: mpsc::UnboundedSender<String>,
-      download_tx: mpsc::UnboundedSender<DownloadMessage>,
-  ) -> Result<(), HeadlessError>
-  ```
-- [x] Load config from `config::load_config()`
-- [x] Filter quantizations if quantization_filter is Some
-- [x] Queue downloads via download_tx channel
-- [x] Handle both GGUF and non-GGUF models
-
-**Expected Implementation:**
-```rust
+/// Download a model with optional quantization filter
 pub async fn download_model(
     model_id: &str,
     quantization_filter: Option<&str>,
@@ -239,7 +160,7 @@ pub async fn download_model(
         for file in &metadata.siblings {
             let path = PathBuf::from(output_dir);
             let size = file.size.unwrap_or(0);
-            let sha256 = file.lfs.as_ref().map(|l| lfs.oid.clone());
+            let sha256 = file.lfs.as_ref().map(|l| l.oid.clone());
 
             download_tx.send((
                 model_id.to_string(),
@@ -256,28 +177,13 @@ pub async fn download_model(
 
     Ok(())
 }
-```
 
-### 2.6 Implement resume_downloads() Function
-- [x] Create function with signature:
-  ```rust
-  pub async fn resume_downloads(
-      download_tx: mpsc::UnboundedSender<DownloadMessage>,
-      progress_tx: mpsc::UnboundedSender<String>,
-  ) -> Result<Vec<DownloadMetadata>, HeadlessError>
-  ```
-- [x] Load download registry
-- [x] Filter for Incomplete status
-- [x] Queue all incomplete downloads
-- [x] Return list of resumed downloads
-
-**Expected Implementation:**
-```rust
+/// Resume incomplete downloads from registry
 pub async fn resume_downloads(
     download_tx: mpsc::UnboundedSender<DownloadMessage>,
     progress_tx: mpsc::UnboundedSender<String>,
 ) -> Result<Vec<DownloadMetadata>, HeadlessError> {
-    let registry = crate::registry::load_registry();
+    let registry = registry::load_registry();
     let incomplete: Vec<_> = registry.downloads.iter()
         .filter(|d| d.status == DownloadStatus::Incomplete)
         .cloned()
@@ -304,16 +210,8 @@ pub async fn resume_downloads(
 
     Ok(incomplete)
 }
-```
 
-### 2.7 Create ProgressReporter Struct
-- [x] Define struct for console progress reporting
-- [x] Implement methods for simple text progress bars
-- [x] Handle status messages from channels
-- [x] Support both stdout (progress) and stderr (errors)
-
-**Expected Implementation:**
-```rust
+/// Progress reporter for console output (text and JSON modes)
 pub struct ProgressReporter {
     json_mode: bool,
 }
@@ -365,7 +263,7 @@ impl ProgressReporter {
             let bar_width = 40;
             let filled = (percent as f32 / 100.0 * bar_width as f32) as usize;
             let bar: String = "=".repeat(filled) + &" ".repeat(bar_width - filled);
-            println!("\r[{}] {}% ({:.2} MB/s)", bar, percent, speed_mbps);
+            print!("\r[{}] {}% ({:.2} MB/s) - {}", bar, percent, speed_mbps, filename);
             let _ = std::io::stdout().flush();
         }
     }
@@ -393,128 +291,104 @@ impl ProgressReporter {
             eprintln!("Error: {}", error);
         }
     }
-}
-```
 
-### 2.8 Integrate with main.rs
-- [x] Update `main.rs` to call headless functions
-- [x] Set up channels for progress reporting
-- [x] Match on CLI commands and dispatch appropriately
-- [x] Handle errors and return proper exit codes
+    pub fn report_info(&self, message: &str) {
+        if self.json_mode {
+            let json = serde_json::json!({
+                "status": "info",
+                "message": message
+            });
+            println!("{}", json);
+        } else {
+            println!("{}", message);
+        }
+    }
 
-**Expected Code Change in main.rs:**
-```rust
-mod cli;
-mod headless;
-
-async fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
-    let cli_args = cli::Cli::parse();
-
-    if cli_args.headless {
-        let json_mode = cli_args.json;
-        let reporter = headless::ProgressReporter::new(json_mode);
-
-        // Create channels for download manager
-        let (download_tx, download_rx) = mpsc::unbounded_channel();
-        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-        let download_rx = Arc::new(Mutex::new(download_rx));
-
-        // Spawn download manager task (reused from TUI)
-        let download_progress = Arc::new(Mutex::new(None));
-        let complete_downloads = Arc::new(Mutex::new(HashMap::new()));
-        let verification_queue = Arc::new(Mutex::new(Vec::new()));
-        let verification_queue_size = Arc::new(Mutex::new(0));
-        let download_queue_size = Arc::new(Mutex::new(0));
-        let download_queue_bytes = Arc::new(Mutex::new(0));
-        let download_registry = Arc::new(Mutex::new(DownloadRegistry::default()));
-
-        tokio::spawn(async move {
-            let mut rx = download_rx.lock().await;
-            while let Some((model_id, filename, path, sha256, hf_token, total_size)) = rx.recv().await {
-                // ... (reuse existing download manager logic)
+    pub fn report_list_quantizations(&self, quantizations: &[QuantizationGroup], metadata: &ModelMetadata) {
+        if self.json_mode {
+            // Simplified JSON output without full serialization
+            println!("{{");
+            println!("  \"model_id\": \"{}\",", metadata.model_id);
+            println!("  \"quantizations\": [");
+            for (i, quant) in quantizations.iter().enumerate() {
+                if i > 0 {
+                    println!(",");
+                }
+                println!("    {{");
+                println!("      \"quant_type\": \"{}\",", quant.quant_type);
+                println!("      \"total_size\": {},", quant.total_size);
+                println!("      \"file_count\": {}", quant.files.len());
+                print!("      \"files\": [");
+                for (j, file) in quant.files.iter().enumerate() {
+                    if j > 0 {
+                        print!(", ");
+                    }
+                    print!("\"{}\"", file.filename);
+                }
+                println!("]");
+                print!("    }}");
             }
-        });
-
-        // Spawn progress reporter task
-        tokio::spawn(async move {
-            while let Some(msg) = progress_rx.recv().await {
-                reporter.report_error(&msg); // Or appropriate report method
+            println!();
+            println!("  ]");
+            println!("}}");
+        } else {
+            println!("Model: {}", metadata.model_id);
+            println!("\nQuantizations:");
+            for quant in quantizations {
+                println!("  - {} ({} files, {} MB total)",
+                    quant.quant_type,
+                    quant.files.len(),
+                    quant.total_size / 1_048_576
+                );
+                for file in &quant.files {
+                    println!("      - {} ({} MB)",
+                        file.filename,
+                        file.size / 1_048_576
+                    );
+                }
             }
-        });
-
-        // Execute command
-        let result = match cli_args.command {
-            Some(cli::Commands::Search { query, sort, min_downloads, min_likes }) => {
-                headless::search_models(&query, None, None, min_downloads, min_likes, cli_args.token.as_ref()).await
-            }
-            Some(cli::Commands::Download { model_id, quantization, all, output }) => {
-                let output_dir = output.unwrap_or_else(|| {
-                    let options = config::load_config();
-                    options.default_directory
-                });
-                headless::download_model(&model_id, quantization.as_deref(), all, &output_dir, cli_args.token, progress_tx, download_tx).await
-            }
-            Some(cli::Commands::List { model_id }) => {
-                headless::list_quantizations(&model_id, cli_args.token.as_ref()).await
-            }
-            Some(cli::Commands::Resume) => {
-                headless::resume_downloads(download_tx, progress_tx).await
-            }
-            None => {
-                eprintln!("Error: No command specified");
-                std::process::exit(1);
-            }
-        };
-
-        match result {
-            Ok(_) => std::process::exit(0),
-            Err(e) => {
-                reporter.report_error(&e.to_string());
-                std::process::exit(1);
+            
+            // Show file tree for non-GGUF models
+            if !quantizations.is_empty() {
+                println!("\nFile Tree:");
+                let file_tree = api::build_file_tree(metadata.siblings.clone());
+                print_tree_node(&file_tree, 0);
             }
         }
     }
 
-    // Original TUI flow...
+    pub fn report_resume(&self, resumed: &[DownloadMetadata]) {
+        if self.json_mode {
+            let json = serde_json::json!({
+                "status": "resumed",
+                "count": resumed.len(),
+                "downloads": resumed
+            });
+            println!("{}", json);
+        } else {
+            if resumed.is_empty() {
+                self.report_info("No incomplete downloads to resume");
+            } else {
+                println!("Resumed {} downloads:", resumed.len());
+                for download in resumed {
+                    println!("  - {}", download.filename);
+                }
+            }
+        }
+    }
 }
-```
 
-## Verification Steps
-
-### Unit Testing
-- [ ] Test `search_models()` with various filters
-- [ ] Test `list_quantizations()` with GGUF model
-- [ ] Test `list_quantizations()` with non-GGUF model
-- [ ] Test `resume_downloads()` with empty registry
-- [ ] Test error handling (invalid model_id, network errors)
-
-### Integration Testing
-- [ ] Run `--headless search "test"` and verify output
-- [ ] Run `--headless list "model_id"` and verify file listing
-- [ ] Run `--headless resume` and verify error message (no incomplete downloads)
-- [ ] Verify channels don't deadlock
-- [ ] Verify proper cleanup on Ctrl+C
-
-## Success Criteria
-
-### Must Have
-- ✅ All headless functions implemented
-- ✅ Reuses existing API and download logic
-- ✅ Progress reporter works in both text and JSON modes
-- ✅ Integration with main.rs complete
-- ✅ No blocking calls in async context
-
-### Nice to Have
-- Progress bar animation for text mode
-- Colored output for errors
-- Verbose mode with detailed logging
-
-## Next Phase Link
-Once this phase is complete, proceed to **Phase 3: Implement Headless Commands** (`add-headless-phase3.md`).
-
-## Notes
-- Keep functions async and non-blocking
-- Use channels for loose coupling
-- Prioritize code reuse over optimization
-- Ensure graceful error propagation
+fn print_tree_node(node: &FileTreeNode, depth: usize) {
+    let indent = "  ".repeat(depth);
+    let size_str = if let Some(size) = node.size {
+        format!(" ({} MB)", size / 1_048_576)
+    } else {
+        String::new()
+    };
+    
+    println!("{}{}{}", indent, node.name, size_str);
+    
+    for child in &node.children {
+        print_tree_node(child, depth + 1);
+    }
+}
