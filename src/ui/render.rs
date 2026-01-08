@@ -277,7 +277,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         .style(if error.is_some() {
             Style::default().fg(Color::Red)
         } else {
-            Style::default().fg(Color::White)
+            Style::default()
         })
         .wrap(Wrap { trim: true });
 
