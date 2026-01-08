@@ -321,6 +321,17 @@ Key security features in v0.6.0:
 
 ## Changelog
 
+### Version 1.2.2 (2026-01-08)
+- **Bug Fix**: Fixed color contrast issue on light terminal backgrounds
+- **Visibility**: Status bar and UI text now adapt to terminal theme
+- **Issue Resolution**: [#16 - Empty screen](https://github.com/JohannesBertens/rust-hf-downloader/issues/16)
+- **Problem**: Hard-coded white text was invisible on white/light terminal backgrounds
+- **Solution**: Changed to terminal-default colors for automatic theme adaptation
+- **Impact**: UI now visible on all terminal color schemes (dark, light, custom)
+- **Files Modified**: `src/ui/render.rs` (1 line)
+- **No Breaking Changes**: All existing functionality preserved
+- See [changelog/RELEASE_NOTES_1.2.2.md](changelog/RELEASE_NOTES_1.2.2.md) for full details
+
 ### Version 1.2.1 (2026-01-07)
 - **Enhancement**: Download progress now displays total remaining size
 - **UI Improvement**: Progress box title shows combined size of current + queued downloads
