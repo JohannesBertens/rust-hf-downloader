@@ -333,6 +333,10 @@ pub async fn run_download_dry_run(
 
     // Get download summary
     let (quantizations, metadata) = list_quantizations(model_id, hf_token.as_ref()).await?;
+
+    // Check if model is gated and token is provided (even in dry-run)
+    check_gated_model(&metadata, &hf_token)?;
+
     let has_gguf = api::has_gguf_files(&metadata);
 
     let (files_to_download, total_size) = if has_gguf {
@@ -343,6 +347,39 @@ pub async fn run_download_dry_run(
 
     // Report what would be downloaded
     reporter.report_dry_run_summary(&files_to_download, total_size, output_dir, has_gguf);
+
+    Ok(())
+}
+
+/// Check if a model is gated and requires authentication
+fn check_gated_model(metadata: &ModelMetadata, hf_token: &Option<String>) -> Result<(), HeadlessError> {
+    // Check if model is gated
+    let is_gated = match &metadata.gated {
+        serde_json::Value::String(s) if s == "auto" || s == "manual" => true,
+        serde_json::Value::Bool(true) => true,
+        _ => false,
+    };
+
+    if is_gated {
+        // Check if token is provided
+        if hf_token.is_none() || hf_token.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
+            return Err(HeadlessError::AuthError(format!(
+                "Model '{}' is gated and requires authentication.\n\n\
+                To download this model:\n\
+                1. Get a HuggingFace token from: https://huggingface.co/settings/tokens\n\
+                2. Accept the model terms at: https://huggingface.co/{}/\n\
+                3. Provide the token via --token flag or config file\n\n\
+                Example:\n\
+                  rust-hf-downloader --headless download \"{}\" --all --token \"hf_...\"\n\
+                  \n\
+                Or add to ~/.config/jreb/config.toml:\n\
+                  hf_token = \"hf_...\"",
+                metadata.model_id,
+                metadata.model_id,
+                metadata.model_id
+            )));
+        }
+    }
 
     Ok(())
 }
@@ -366,6 +403,9 @@ pub async fn run_download(
 
     // Get download summary
     let (quantizations, metadata) = list_quantizations(model_id, hf_token.as_ref()).await?;
+
+    // Check if model is gated and token is provided
+    check_gated_model(&metadata, &hf_token)?;
     let has_gguf = api::has_gguf_files(&metadata);
 
     let (files_to_download, total_size) = if has_gguf {
