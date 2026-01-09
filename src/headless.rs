@@ -1,5 +1,5 @@
 //! Headless mode implementation for CLI-only operation
-//! 
+//!
 //! This module provides functions for running the application without a TUI,
 //! suitable for CI/CD automation and scripting.
 
@@ -9,6 +9,7 @@ use crate::config;
 use crate::registry;
 use std::path::PathBuf;
 use std::io::Write;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Error type for headless operations
@@ -56,6 +57,24 @@ pub type DownloadMessage = (
     Option<String>,      // hf_token
     u64,                 // total_size
 );
+
+/// Exit code constants
+pub const EXIT_SUCCESS: i32 = 0;
+pub const EXIT_ERROR: i32 = 1;
+pub const EXIT_AUTH_ERROR: i32 = 2;
+pub const EXIT_INVALID_ARGS: i32 = 3;
+
+impl HeadlessError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            HeadlessError::AuthError(_) => EXIT_AUTH_ERROR,
+            HeadlessError::ApiError(_)
+            | HeadlessError::DownloadError(_)
+            | HeadlessError::ConfigError(_)
+            | HeadlessError::IoError(_) => EXIT_ERROR,
+        }
+    }
+}
 
 /// Format file size in human-readable format
 pub fn format_file_size(bytes: u64) -> String {
@@ -308,6 +327,9 @@ pub async fn run_download(
     reporter: &ProgressReporter,
     download_tx: mpsc::UnboundedSender<DownloadMessage>,
     progress_tx: mpsc::UnboundedSender<String>,
+    download_queue_size: Arc<tokio::sync::Mutex<usize>>,
+    download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
+    shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
 ) -> Result<(), HeadlessError> {
     // Validate model ID first
     validate_model_id(model_id)?;
@@ -327,6 +349,9 @@ pub async fn run_download(
 
     // Queue the actual downloads
     download_model(model_id, quantization, download_all, output_dir, hf_token, progress_tx, download_tx).await?;
+
+    // Wait for downloads to complete
+    wait_for_downloads(download_queue_size, download_progress, reporter, shutdown_signal).await?;
 
     Ok(())
 }
@@ -364,6 +389,75 @@ pub async fn resume_downloads(
     Ok(incomplete)
 }
 
+/// Wait for all downloads to complete and report progress
+pub async fn wait_for_downloads(
+    download_queue_size: Arc<tokio::sync::Mutex<usize>>,
+    download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
+    reporter: &ProgressReporter,
+    shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
+) -> Result<(), HeadlessError> {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
+    let mut last_progress: Option<DownloadProgress> = None;
+
+    loop {
+        interval.tick().await;
+
+        // Check for shutdown signal
+        if *shutdown_signal.lock().await {
+            reporter.report_info("\nShutdown requested, downloads will resume on next run");
+            return Ok(());
+        }
+
+        // Check download progress
+        let progress_guard = download_progress.try_lock();
+        if let Ok(ref progress_opt) = progress_guard {
+            if let Some(progress) = progress_opt.as_ref() {
+                // Only report if progress changed significantly (>1% or new file)
+                let should_report = match &last_progress {
+                    None => true,
+                    Some(last) => {
+                        progress.filename != last.filename ||
+                        (progress.downloaded as f64 - last.downloaded as f64) > progress.total as f64 * 0.01
+                    }
+                };
+
+                if should_report {
+                    // Calculate speed (bytes per 200ms interval -> MB/s)
+                    let speed_mbps = if progress.total > 0 {
+                        let bytes_diff = progress.downloaded.saturating_sub(
+                            last_progress.as_ref().map(|l| l.downloaded).unwrap_or(0)
+                        );
+                        (bytes_diff as f64 / 1_048_576.0) / 0.2
+                    } else {
+                        0.0
+                    };
+
+                    reporter.report_download_progress(
+                        &progress.filename,
+                        progress.downloaded,
+                        progress.total,
+                        speed_mbps,
+                    );
+                    last_progress = Some(progress.clone());
+                }
+            }
+        }
+        drop(progress_guard);
+
+        // Check if queue is empty and no active downloads
+        let queue_size = *download_queue_size.lock().await;
+        let has_progress = download_progress.try_lock()
+            .map(|p| p.is_some())
+            .unwrap_or(false);
+
+        if queue_size == 0 && !has_progress {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 /// Run list command with formatted output
 pub async fn run_list(
     model_id: &str,
@@ -395,6 +489,9 @@ pub async fn run_resume(
     reporter: &ProgressReporter,
     download_tx: mpsc::UnboundedSender<DownloadMessage>,
     progress_tx: mpsc::UnboundedSender<String>,
+    download_queue_size: Arc<tokio::sync::Mutex<usize>>,
+    download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
+    shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
 ) -> Result<(), HeadlessError> {
     let incomplete = resume_downloads(download_tx, progress_tx).await?;
 
@@ -404,6 +501,9 @@ pub async fn run_resume(
     }
 
     reporter.report_resume_summary(&incomplete);
+
+    // Wait for downloads to complete
+    wait_for_downloads(download_queue_size, download_progress, reporter, shutdown_signal).await?;
 
     Ok(())
 }

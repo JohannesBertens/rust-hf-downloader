@@ -76,16 +76,17 @@ rust-hf-downloader --headless list <model_id>
 - [x] Test each command individually
 
 ### Phase 4: Progress & Error Handling
-**Status**: 📋 Not Started
+**Status**: ✅ Complete
 **File**: `plans/implementation/add-headless-phase4.md`
 **Estimated Time**: 2 hours
+**Actual Time**: 2 hours
 
-- [ ] Replace UI progress bars with console output
-- [ ] Reuse `status_tx` channel for headless messages
-- [ ] Implement proper exit codes (0=success, 1=error, 2=auth)
-- [ ] Add graceful error handling for missing files
-- [ ] Preserve existing retry logic in headless mode
-- [ ] Test error scenarios
+- [x] Replace UI progress bars with console output
+- [x] Reuse `status_tx` channel for headless messages
+- [x] Implement proper exit codes (0=success, 1=error, 2=auth)
+- [x] Add graceful error handling for missing files
+- [x] Preserve existing retry logic in headless mode
+- [x] Test error scenarios
 
 ### Phase 5: Testing & Documentation
 **Status**: 📋 Not Started

@@ -29,6 +29,10 @@ async fn main() -> color_eyre::Result<()> {
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
         let download_rx = std::sync::Arc::new(tokio::sync::Mutex::new(download_rx));
 
+        // Create shutdown signal
+        let shutdown_signal = std::sync::Arc::new(tokio::sync::Mutex::new(false));
+        let shutdown_signal_clone = shutdown_signal.clone();
+
         // Spawn download manager task
         let download_progress = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let complete_downloads = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -90,6 +94,36 @@ async fn main() -> color_eyre::Result<()> {
             }
         });
 
+        // Spawn signal handler for graceful shutdown
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            tokio::spawn(async move {
+                let mut sigint = signal(SignalKind::interrupt()).expect("Failed to setup SIGINT handler");
+                let mut sigterm = signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler");
+
+                tokio::select! {
+                    _ = sigint.recv() => {
+                        eprintln!("\nReceived interrupt signal (Ctrl+C), shutting down gracefully...");
+                        *shutdown_signal_clone.lock().await = true;
+                    }
+                    _ = sigterm.recv() => {
+                        eprintln!("\nReceived termination signal, shutting down gracefully...");
+                        *shutdown_signal_clone.lock().await = true;
+                    }
+                }
+            });
+        }
+
+        #[cfg(windows)]
+        {
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                eprintln!("\nReceived interrupt signal (Ctrl+C), shutting down gracefully...");
+                *shutdown_signal_clone.lock().await = true;
+            });
+        }
+
         // Execute command
         let result = match cli_args.command {
             Some(cli::Commands::Search { query, sort: _, min_downloads, min_likes }) => {
@@ -116,6 +150,9 @@ async fn main() -> color_eyre::Result<()> {
                     &reporter,
                     download_tx,
                     progress_tx,
+                    download_queue_size,
+                    download_progress,
+                    shutdown_signal,
                 ).await
             }
             Some(cli::Commands::List { model_id }) => {
@@ -130,19 +167,22 @@ async fn main() -> color_eyre::Result<()> {
                     &reporter,
                     download_tx,
                     progress_tx,
+                    download_queue_size,
+                    download_progress,
+                    shutdown_signal,
                 ).await
             }
             None => {
                 eprintln!("Error: No command specified");
-                std::process::exit(1);
+                std::process::exit(headless::EXIT_INVALID_ARGS);
             }
         };
 
         match result {
-            Ok(_) => std::process::exit(0),
+            Ok(_) => std::process::exit(headless::EXIT_SUCCESS),
             Err(e) => {
                 reporter.report_error(&e.to_string());
-                std::process::exit(1);
+                std::process::exit(e.exit_code());
             }
         }
     }
