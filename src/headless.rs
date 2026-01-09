@@ -317,6 +317,36 @@ fn calculate_non_gguf_download_summary(
     Ok((files, total_size))
 }
 
+/// Run download command in dry-run mode (show what would be downloaded)
+pub async fn run_download_dry_run(
+    model_id: &str,
+    quantization: Option<&str>,
+    download_all: bool,
+    output_dir: &str,
+    hf_token: Option<String>,
+    reporter: &ProgressReporter,
+) -> Result<(), HeadlessError> {
+    // Validate model ID first
+    validate_model_id(model_id)?;
+
+    reporter.report_info("Dry run mode - no files will be downloaded\n");
+
+    // Get download summary
+    let (quantizations, metadata) = list_quantizations(model_id, hf_token.as_ref()).await?;
+    let has_gguf = api::has_gguf_files(&metadata);
+
+    let (files_to_download, total_size) = if has_gguf {
+        calculate_gguf_download_summary(&quantizations, quantization, download_all)?
+    } else {
+        calculate_non_gguf_download_summary(&metadata, download_all)?
+    };
+
+    // Report what would be downloaded
+    reporter.report_dry_run_summary(&files_to_download, total_size, output_dir, has_gguf);
+
+    Ok(())
+}
+
 /// Run download command with summary and progress tracking
 pub async fn run_download(
     model_id: &str,
@@ -742,6 +772,35 @@ impl ProgressReporter {
                 println!("  ... and {} more", files.len() - 5);
             }
             println!();
+        }
+    }
+
+    pub fn report_dry_run_summary(&self, files: &[String], total_size: u64, output_dir: &str, is_gguf: bool) {
+        if self.json_mode {
+            let json = serde_json::json!({
+                "status": "dry_run",
+                "model_type": if is_gguf { "GGUF" } else { "Non-GGUF" },
+                "file_count": files.len(),
+                "total_size_bytes": total_size,
+                "output_directory": output_dir,
+                "files": files
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        } else {
+            println!("Download Plan:");
+            println!("  Model type: {}", if is_gguf { "GGUF" } else { "Non-GGUF" });
+            println!("  Files to download: {}", files.len());
+            println!("  Total size: {}", format_file_size(total_size));
+            println!("  Output directory: {}", output_dir);
+            println!();
+
+            println!("Files:");
+            for (i, file) in files.iter().enumerate() {
+                println!("  {}. {}", i + 1, file);
+            }
+            println!();
+
+            println!("Run without --dry-run to execute the download.");
         }
     }
 

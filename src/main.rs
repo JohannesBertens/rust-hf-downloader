@@ -141,19 +141,31 @@ async fn main() -> color_eyre::Result<()> {
                     let options = config::load_config();
                     options.default_directory
                 });
-                headless::run_download(
-                    &model_id,
-                    quantization.as_deref(),
-                    all,
-                    &output_dir,
-                    cli_args.token,
-                    &reporter,
-                    download_tx,
-                    progress_tx,
-                    download_queue_size,
-                    download_progress,
-                    shutdown_signal,
-                ).await
+
+                if cli_args.dry_run {
+                    headless::run_download_dry_run(
+                        &model_id,
+                        quantization.as_deref(),
+                        all,
+                        &output_dir,
+                        cli_args.token,
+                        &reporter,
+                    ).await
+                } else {
+                    headless::run_download(
+                        &model_id,
+                        quantization.as_deref(),
+                        all,
+                        &output_dir,
+                        cli_args.token,
+                        &reporter,
+                        download_tx,
+                        progress_tx,
+                        download_queue_size,
+                        download_progress,
+                        shutdown_signal,
+                    ).await
+                }
             }
             Some(cli::Commands::List { model_id }) => {
                 headless::run_list(

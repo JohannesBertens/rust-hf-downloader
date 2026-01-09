@@ -1,0 +1,36 @@
+name: Download Model with rust-hf-downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_id:
+        description: 'Model ID to download'
+        required: true
+        default: 'TheBloke/TinyLlama-1.1B-Chat-v0.3-GGUF'
+      quantization:
+        description: 'Quantization type (for GGUF models)'
+        required: false
+        default: 'Q4_K_M'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install rust-hf-downloader
+        run: cargo install rust-hf-downloader
+
+      - name: Download model
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: |
+          rust-hf-downloader --headless download \
+            "${{ github.event.inputs.model_id }}" \
+            --quantization "${{ github.event.inputs.quantization }}" \
+            --output "./models" \
+            --token "$HF_TOKEN"
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: model-files
+          path: ./models/
