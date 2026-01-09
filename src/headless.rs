@@ -273,9 +273,24 @@ fn calculate_gguf_download_summary(
     if let Some(q_filter) = filter {
         let group = quantizations.iter()
             .find(|q| q.quant_type == q_filter)
-            .ok_or_else(|| HeadlessError::DownloadError(
-                format!("Quantization '{}' not found", q_filter)
-            ))?;
+            .ok_or_else(|| {
+                // Build helpful error message with available quantizations
+                let available: Vec<String> = quantizations.iter()
+                    .map(|q| {
+                        format!("{} ({} files, {})",
+                            q.quant_type,
+                            q.files.len(),
+                            format_file_size(q.total_size)
+                        )
+                    })
+                    .collect();
+
+                HeadlessError::DownloadError(
+                    format!("Quantization '{}' not found\n\nAvailable quantizations:\n  {}",
+                        q_filter,
+                        available.join("\n  "))
+                )
+            })?;
 
         let files: Vec<String> = group.files.iter().map(|f| f.filename.clone()).collect();
         let total_size = group.total_size;
@@ -287,8 +302,20 @@ fn calculate_gguf_download_summary(
         let total_size: u64 = quantizations.iter().map(|q| q.total_size).sum();
         Ok((files, total_size))
     } else {
+        // Build list of available quantizations for the error message
+        let available: Vec<String> = quantizations.iter()
+            .map(|q| {
+                format!("{} ({} files, {})",
+                    q.quant_type,
+                    q.files.len(),
+                    format_file_size(q.total_size)
+                )
+            })
+            .collect();
+
         Err(HeadlessError::DownloadError(
-            "Must specify --quantization or --all".to_string()
+            format!("Must specify --quantization or --all\n\nAvailable quantizations:\n  {}",
+                available.join("\n  "))
         ))
     }
 }
