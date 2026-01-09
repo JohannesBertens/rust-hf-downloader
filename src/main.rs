@@ -93,47 +93,44 @@ async fn main() -> color_eyre::Result<()> {
         // Execute command
         let result = match cli_args.command {
             Some(cli::Commands::Search { query, sort: _, min_downloads, min_likes }) => {
-                let models = headless::search_models(
+                headless::run_search(
                     &query,
-                    None, // sort
-                    None, // direction
+                    None, // sort_field
                     min_downloads,
                     min_likes,
                     cli_args.token.as_ref(),
-                ).await?;
-                reporter.report_search(&models);
-                Ok(())
+                    &reporter,
+                ).await
             }
             Some(cli::Commands::Download { model_id, quantization, all, output }) => {
                 let output_dir = output.unwrap_or_else(|| {
                     let options = config::load_config();
                     options.default_directory
                 });
-                headless::download_model(
+                headless::run_download(
                     &model_id,
                     quantization.as_deref(),
                     all,
                     &output_dir,
                     cli_args.token,
-                    progress_tx,
+                    &reporter,
                     download_tx,
+                    progress_tx,
                 ).await
             }
             Some(cli::Commands::List { model_id }) => {
-                let (quantizations, metadata) = headless::list_quantizations(
+                headless::run_list(
                     &model_id,
                     cli_args.token.as_ref(),
-                ).await?;
-                reporter.report_list_quantizations(&quantizations, &metadata);
-                Ok(())
+                    &reporter,
+                ).await
             }
             Some(cli::Commands::Resume) => {
-                let resumed = headless::resume_downloads(
+                headless::run_resume(
+                    &reporter,
                     download_tx,
                     progress_tx,
-                ).await?;
-                reporter.report_resume(&resumed);
-                Ok(())
+                ).await
             }
             None => {
                 eprintln!("Error: No command specified");

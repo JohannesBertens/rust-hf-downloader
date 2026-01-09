@@ -1,7 +1,8 @@
 # Phase 3: Implement Headless Commands
 
-**Status**: 📋 Not Started
+**Status**: ✅ Complete
 **Estimated Time**: 4 hours
+**Actual Time**: 2.5 hours
 **Dependencies**: Phase 1 (CLI), Phase 2 (Core Logic)
 **Blocked By**: Phase 1 and Phase 2 completion
 
@@ -9,20 +10,20 @@
 Implement the four main headless commands (search, download, list, resume) with full functionality, proper output formatting, and integration with existing systems.
 
 ## Objectives
-- Implement search command with filters and JSON output
-- Implement download command with quantization filtering
-- Implement list command for model file exploration
-- Implement resume command for batch download resumption
-- Test each command thoroughly
+- Implement search command with filters and JSON output ✅
+- Implement download command with quantization filtering ✅
+- Implement list command for model file exploration ✅
+- Implement resume command for batch download resumption ✅
+- Test each command thoroughly ✅
 
 ## Tasks Checklist
 
 ### 3.1 Implement Search Command
-- [ ] Create `run_search()` function in `headless.rs`
-- [ ] Add support for all filter parameters (sort, min-downloads, min-likes)
-- [ ] Implement human-readable table output
-- [ ] Implement JSON output format
-- [ ] Add result count and timing information
+- [x] Create `run_search()` function in `headless.rs`
+- [x] Add support for all filter parameters (sort, min-downloads, min-likes)
+- [x] Implement human-readable table output
+- [x] Implement JSON output format
+- [x] Add result count and timing information
 
 **Expected Implementation:**
 ```rust

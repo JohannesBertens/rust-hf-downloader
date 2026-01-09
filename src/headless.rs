@@ -57,6 +57,53 @@ pub type DownloadMessage = (
     u64,                 // total_size
 );
 
+/// Format file size in human-readable format
+pub fn format_file_size(bytes: u64) -> String {
+    const GB: u64 = 1_073_741_824;
+    const MB: u64 = 1_048_576;
+    const KB: u64 = 1_024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Format duration in human-readable format
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Validate model ID format (author/model-name)
+pub fn validate_model_id(model_id: &str) -> Result<(), HeadlessError> {
+    if !model_id.contains('/') {
+        return Err(HeadlessError::DownloadError(
+            "Invalid model ID format. Expected: 'author/model-name'".to_string()
+        ));
+    }
+
+    let parts: Vec<&str> = model_id.split('/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        return Err(HeadlessError::DownloadError(
+            "Invalid model ID format. Expected: 'author/model-name'".to_string()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Search for models with optional filters
 pub async fn search_models(
     query: &str,
@@ -74,6 +121,26 @@ pub async fn search_models(
     api::fetch_models_filtered(query, sort, direction, min_dl, min_likes_val, token)
         .await
         .map_err(|e| HeadlessError::ApiError(e.to_string()))
+}
+
+/// Run search command with formatted output
+pub async fn run_search(
+    query: &str,
+    sort_field: Option<SortField>,
+    min_downloads: Option<u64>,
+    min_likes: Option<u64>,
+    token: Option<&String>,
+    reporter: &ProgressReporter,
+) -> Result<(), HeadlessError> {
+    let start = std::time::Instant::now();
+
+    let models = search_models(query, sort_field, None, min_downloads, min_likes, token).await?;
+
+    let elapsed = start.elapsed();
+
+    reporter.report_search_with_timing(&models, elapsed);
+
+    Ok(())
 }
 
 /// List quantizations and metadata for a model
@@ -178,6 +245,92 @@ pub async fn download_model(
     Ok(())
 }
 
+/// Calculate download summary for GGUF models
+fn calculate_gguf_download_summary(
+    quantizations: &[QuantizationGroup],
+    filter: Option<&str>,
+    download_all: bool,
+) -> Result<(Vec<String>, u64), HeadlessError> {
+    if let Some(q_filter) = filter {
+        let group = quantizations.iter()
+            .find(|q| q.quant_type == q_filter)
+            .ok_or_else(|| HeadlessError::DownloadError(
+                format!("Quantization '{}' not found", q_filter)
+            ))?;
+
+        let files: Vec<String> = group.files.iter().map(|f| f.filename.clone()).collect();
+        let total_size = group.total_size;
+        Ok((files, total_size))
+    } else if download_all {
+        let files: Vec<String> = quantizations.iter()
+            .flat_map(|q| q.files.iter().map(|f| f.filename.clone()))
+            .collect();
+        let total_size: u64 = quantizations.iter().map(|q| q.total_size).sum();
+        Ok((files, total_size))
+    } else {
+        Err(HeadlessError::DownloadError(
+            "Must specify --quantization or --all".to_string()
+        ))
+    }
+}
+
+/// Calculate download summary for non-GGUF models
+fn calculate_non_gguf_download_summary(
+    metadata: &ModelMetadata,
+    download_all: bool,
+) -> Result<(Vec<String>, u64), HeadlessError> {
+    if !download_all {
+        return Err(HeadlessError::DownloadError(
+            "Non-GGUF model requires --all flag".to_string()
+        ));
+    }
+
+    let files: Vec<String> = metadata.siblings.iter()
+        .filter_map(|f| {
+            f.size.map(|_| f.rfilename.clone())
+        })
+        .collect();
+
+    let total_size: u64 = metadata.siblings.iter()
+        .filter_map(|f| f.size)
+        .sum();
+
+    Ok((files, total_size))
+}
+
+/// Run download command with summary and progress tracking
+pub async fn run_download(
+    model_id: &str,
+    quantization: Option<&str>,
+    download_all: bool,
+    output_dir: &str,
+    hf_token: Option<String>,
+    reporter: &ProgressReporter,
+    download_tx: mpsc::UnboundedSender<DownloadMessage>,
+    progress_tx: mpsc::UnboundedSender<String>,
+) -> Result<(), HeadlessError> {
+    // Validate model ID first
+    validate_model_id(model_id)?;
+
+    // Get download summary
+    let (quantizations, metadata) = list_quantizations(model_id, hf_token.as_ref()).await?;
+    let has_gguf = api::has_gguf_files(&metadata);
+
+    let (files_to_download, total_size) = if has_gguf {
+        calculate_gguf_download_summary(&quantizations, quantization, download_all)?
+    } else {
+        calculate_non_gguf_download_summary(&metadata, download_all)?
+    };
+
+    // Report what will be downloaded
+    reporter.report_download_summary(&files_to_download, total_size);
+
+    // Queue the actual downloads
+    download_model(model_id, quantization, download_all, output_dir, hf_token, progress_tx, download_tx).await?;
+
+    Ok(())
+}
+
 /// Resume incomplete downloads from registry
 pub async fn resume_downloads(
     download_tx: mpsc::UnboundedSender<DownloadMessage>,
@@ -211,6 +364,50 @@ pub async fn resume_downloads(
     Ok(incomplete)
 }
 
+/// Run list command with formatted output
+pub async fn run_list(
+    model_id: &str,
+    token: Option<&String>,
+    reporter: &ProgressReporter,
+) -> Result<(), HeadlessError> {
+    // Validate model ID first
+    validate_model_id(model_id)?;
+
+    let (quantizations, metadata) = list_quantizations(model_id, token).await?;
+
+    let has_gguf = api::has_gguf_files(&metadata);
+
+    if reporter.is_json() {
+        reporter.report_list_json(&quantizations, &metadata, has_gguf);
+    } else {
+        if has_gguf {
+            reporter.report_quantizations_table(&quantizations);
+        } else {
+            reporter.report_file_tree(&metadata);
+        }
+    }
+
+    Ok(())
+}
+
+/// Run resume command with formatted output
+pub async fn run_resume(
+    reporter: &ProgressReporter,
+    download_tx: mpsc::UnboundedSender<DownloadMessage>,
+    progress_tx: mpsc::UnboundedSender<String>,
+) -> Result<(), HeadlessError> {
+    let incomplete = resume_downloads(download_tx, progress_tx).await?;
+
+    if incomplete.is_empty() {
+        reporter.report_no_incomplete();
+        return Ok(());
+    }
+
+    reporter.report_resume_summary(&incomplete);
+
+    Ok(())
+}
+
 /// Progress reporter for console output (text and JSON modes)
 pub struct ProgressReporter {
     json_mode: bool,
@@ -229,6 +426,48 @@ impl ProgressReporter {
             for model in models {
                 println!("  - {} ({} downloads, {} likes)",
                     model.id, model.downloads, model.likes);
+            }
+        }
+    }
+
+    pub fn report_search_with_timing(&self, models: &[ModelInfo], elapsed: std::time::Duration) {
+        if self.json_mode {
+            let json = serde_json::json!({
+                "count": models.len(),
+                "query_time_seconds": elapsed.as_secs_f64(),
+                "results": models
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        } else {
+            println!("Found {} models in {:.2}s:", models.len(), elapsed.as_secs_f64());
+            println!();
+
+            if models.is_empty() {
+                println!("No models found matching your criteria.");
+                return;
+            }
+
+            // Calculate column widths
+            let max_id_width = models.iter()
+                .map(|m| m.id.len())
+                .max()
+                .unwrap_or(40)
+                .min(60);
+
+            // Print header
+            println!("{:<width$} | {:>12} | {:>10} | {}", "Model", "Downloads", "Likes", "Last Modified", width = max_id_width);
+            println!("{:-<width$}-+-{:-<12}-+-{:-<10}-+-{}", "----", "------------", "----------", "--------------", width = max_id_width);
+
+            // Print each model
+            for model in models {
+                let last_mod = model.last_modified.as_deref().unwrap_or("N/A");
+                println!("{:<width$} | {:>12} | {:>10} | {}",
+                    model.id,
+                    model.downloads,
+                    model.likes,
+                    last_mod,
+                    width = max_id_width
+                );
             }
         }
     }
@@ -374,6 +613,159 @@ impl ProgressReporter {
                     println!("  - {}", download.filename);
                 }
             }
+        }
+    }
+
+    pub fn report_download_summary(&self, files: &[String], total_size: u64) {
+        if self.json_mode {
+            let json = serde_json::json!({
+                "status": "queued",
+                "file_count": files.len(),
+                "total_size_bytes": total_size,
+                "files": files
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        } else {
+            println!("Download Summary:");
+            println!("  Files: {}", files.len());
+            println!("  Total Size: {}", format_file_size(total_size));
+            println!();
+
+            if files.len() <= 10 {
+                for file in files {
+                    println!("  - {}", file);
+                }
+            } else {
+                for file in files.iter().take(5) {
+                    println!("  - {}", file);
+                }
+                println!("  ... and {} more", files.len() - 5);
+            }
+            println!();
+        }
+    }
+
+    pub fn report_no_incomplete(&self) {
+        if self.json_mode {
+            let json = serde_json::json!({
+                "status": "no_incomplete",
+                "message": "No incomplete downloads found"
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        } else {
+            println!("No incomplete downloads found.");
+        }
+    }
+
+    pub fn is_json(&self) -> bool {
+        self.json_mode
+    }
+
+    pub fn report_quantizations_table(&self, quantizations: &[QuantizationGroup]) {
+        println!("Available Quantizations:");
+        println!();
+
+        for group in quantizations {
+            let total_size_str = format_file_size(group.total_size);
+            println!("  {} ({} total, {} file{})",
+                group.quant_type,
+                total_size_str,
+                group.files.len(),
+                if group.files.len() == 1 { "" } else { "s" }
+            );
+
+            for file in &group.files {
+                let size_str = format_file_size(file.size);
+                println!("    - {} ({})", file.filename, size_str);
+            }
+            println!();
+        }
+    }
+
+    pub fn report_file_tree(&self, metadata: &ModelMetadata) {
+        println!("Model Files:");
+        println!();
+        println!("  Model ID: {}", metadata.model_id);
+        println!("  Pipeline: {}", metadata.pipeline_tag.as_deref().unwrap_or("N/A"));
+        println!("  Files: {}", metadata.siblings.len());
+        println!();
+
+        let tree = api::build_file_tree(metadata.siblings.clone());
+        print_tree_node(&tree, 0);
+    }
+
+    pub fn report_list_json(&self, quantizations: &[QuantizationGroup], metadata: &ModelMetadata, has_gguf: bool) {
+        println!("{{");
+        println!("  \"model_id\": \"{}\",", metadata.model_id);
+        println!("  \"pipeline_tag\": \"{}\",", metadata.pipeline_tag.as_deref().unwrap_or("N/A"));
+        println!("  \"has_gguf\": {},", has_gguf);
+
+        if has_gguf {
+            println!("  \"quantizations\": [");
+            for (i, quant) in quantizations.iter().enumerate() {
+                if i > 0 {
+                    println!(",");
+                }
+                println!("    {{");
+                println!("      \"quant_type\": \"{}\",", quant.quant_type);
+                println!("      \"total_size\": {},", quant.total_size);
+                println!("      \"file_count\": {}", quant.files.len());
+                print!("      \"files\": [");
+                for (j, file) in quant.files.iter().enumerate() {
+                    if j > 0 {
+                        print!(", ");
+                    }
+                    print!("\"{}\"", file.filename);
+                }
+                print!("]");
+                print!("    }}");
+            }
+            println!();
+            println!("  ]");
+        } else {
+            println!("  \"file_count\": {},", metadata.siblings.len());
+            println!("  \"files\": [");
+            for (i, file) in metadata.siblings.iter().enumerate() {
+                if i > 0 {
+                    println!(",");
+                }
+                print!("    {{ \"filename\": \"{}\", \"size\": {} }}",
+                    file.rfilename,
+                    file.size.unwrap_or(0)
+                );
+            }
+            println!();
+            println!("  ]");
+        }
+
+        println!("}}");
+    }
+
+    pub fn report_resume_summary(&self, incomplete: &[DownloadMetadata]) {
+        let total_size: u64 = incomplete.iter().map(|d| d.total_size).sum();
+
+        if self.json_mode {
+            let json = serde_json::json!({
+                "status": "resumed",
+                "count": incomplete.len(),
+                "total_size_bytes": total_size,
+                "downloads": incomplete.iter().map(|d| serde_json::json!({
+                    "filename": d.filename,
+                    "model_id": d.model_id,
+                    "size": d.total_size
+                })).collect::<Vec<_>>()
+            });
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+        } else {
+            let total_size_str = format_file_size(total_size);
+            println!("Resuming {} download(s) ({} total):", incomplete.len(), total_size_str);
+            println!();
+
+            for download in incomplete {
+                let size_str = format_file_size(download.total_size);
+                println!("  - {} ({})", download.filename, size_str);
+            }
+            println!();
         }
     }
 }

@@ -50,6 +50,8 @@ rust-hf-downloader --headless list <model_id>
 **File**: `plans/implementation/add-headless-phase2.md`
 **Estimated Time**: 2 hours
 **Actual Time**: 2 hours
+**Estimated Time**: 2 hours
+**Actual Time**: 2 hours
 
 - [x] Create `src/headless.rs` module
 - [x] Implement `search_models()` function
@@ -60,16 +62,18 @@ rust-hf-downloader --headless list <model_id>
 - [x] Refactor `main.rs` for early headless detection
 
 ### Phase 3: Implement Headless Commands
-**Status**: 📋 Not Started
+**Status**: ✅ Complete
 **File**: `plans/implementation/add-headless-phase3.md`
 **Estimated Time**: 4 hours
+**Actual Time**: 2.5 hours
+**Estimated Time**: 4 hours
 
-- [ ] Implement search command (JSON + table output)
-- [ ] Implement download command with quantization filter
-- [ ] Implement download command with --all flag
-- [ ] Implement list command (show available files)
-- [ ] Implement resume command (batch resume)
-- [ ] Test each command individually
+- [x] Implement search command (JSON + table output)
+- [x] Implement download command with quantization filter
+- [x] Implement download command with --all flag
+- [x] Implement list command (show available files)
+- [x] Implement resume command (batch resume)
+- [x] Test each command individually
 
 ### Phase 4: Progress & Error Handling
 **Status**: 📋 Not Started
