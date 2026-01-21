@@ -12,28 +12,31 @@ impl App {
     pub async fn scan_incomplete_downloads(&mut self) {
         // Load registry from disk
         let registry = registry::load_registry();
-        
+
         // Update the app's registry
         {
             let mut reg = self.download_registry.lock().await;
             *reg = registry.clone();
         }
-        
+
         // Find incomplete downloads
         self.incomplete_downloads = registry::get_incomplete_downloads(&registry);
-        
+
         // Load complete downloads into memory
         let complete_map = registry::get_complete_downloads(&registry);
-        
+
         {
             let mut complete = self.complete_downloads.lock().await;
             *complete = complete_map;
         }
-        
+
         // Show popup if incomplete downloads found
         if !self.incomplete_downloads.is_empty() {
             self.popup_mode = PopupMode::ResumeDownload;
-            *self.status.write().unwrap() = format!("Found {} incomplete download(s)", self.incomplete_downloads.len());
+            *self.status.write().unwrap() = format!(
+                "Found {} incomplete download(s)",
+                self.incomplete_downloads.len()
+            );
         }
     }
 
@@ -47,13 +50,14 @@ impl App {
                     let metadata = futures::executor::block_on(async {
                         self.model_metadata.read().unwrap().clone()
                     });
-                    
+
                     if let Some(meta) = metadata {
                         let file_count = meta.siblings.len();
-                        self.download_path_input = Input::default()
-                            .with_value(self.options.default_directory.clone());
+                        self.download_path_input =
+                            Input::default().with_value(self.options.default_directory.clone());
                         self.popup_mode = PopupMode::DownloadPath;
-                        *self.status.write().unwrap() = format!("Download all {} files from repository", file_count);
+                        *self.status.write().unwrap() =
+                            format!("Download all {} files from repository", file_count);
                     }
                 }
             }
@@ -62,14 +66,17 @@ impl App {
                 let quantizations = futures::executor::block_on(async {
                     self.quantizations.read().unwrap().clone()
                 });
-                
+
                 if let Some(selected) = self.quant_list_state.selected() {
                     if selected < quantizations.len() {
                         // Update download path input with current default directory
-                        self.download_path_input = Input::default()
-                            .with_value(self.options.default_directory.clone());
+                        self.download_path_input =
+                            Input::default().with_value(self.options.default_directory.clone());
                         self.popup_mode = PopupMode::DownloadPath;
-                        *self.status.write().unwrap() = format!("Download all {} files in quantization group", quantizations[selected].files.len());
+                        *self.status.write().unwrap() = format!(
+                            "Download all {} files in quantization group",
+                            quantizations[selected].files.len()
+                        );
                     }
                 }
             }
@@ -77,8 +84,8 @@ impl App {
                 // Download specific file only
                 if let Some(_group_idx) = self.quant_list_state.selected() {
                     if let Some(_file_idx) = self.quant_file_list_state.selected() {
-                        self.download_path_input = Input::default()
-                            .with_value(self.options.default_directory.clone());
+                        self.download_path_input =
+                            Input::default().with_value(self.options.default_directory.clone());
                         self.popup_mode = PopupMode::DownloadPath;
                         *self.status.write().unwrap() = "Download single selected file".to_string();
                     }
@@ -91,23 +98,24 @@ impl App {
     /// Complete download with validation - create metadata and queue download
     pub async fn confirm_download(&mut self) {
         // Check if we're downloading a full repository (non-GGUF model)
-        if self.focused_pane == FocusedPane::Models && 
-           *self.display_mode.read().unwrap() == crate::models::ModelDisplayMode::Standard {
+        if self.focused_pane == FocusedPane::Models
+            && *self.display_mode.read().unwrap() == crate::models::ModelDisplayMode::Standard
+        {
             self.confirm_repository_download().await;
             return;
         }
-        
+
         let models = self.models.read().unwrap().clone();
         let quant_groups = self.quantizations.read().unwrap().clone();
-        
+
         let model_selected = self.list_state.selected();
         let quant_selected = self.quant_list_state.selected();
-        
+
         if let (Some(model_idx), Some(quant_idx)) = (model_selected, quant_selected) {
             if model_idx < models.len() && quant_idx < quant_groups.len() {
                 let model = &models[model_idx];
                 let group = &quant_groups[quant_idx];
-                
+
                 // Determine which files to download based on focus
                 let files_to_download: Vec<QuantizationInfo> = match self.focused_pane {
                     FocusedPane::QuantizationFiles => {
@@ -127,40 +135,45 @@ impl App {
                         group.files.clone()
                     }
                 };
-                
+
                 if files_to_download.is_empty() {
-                    *self.error.write().unwrap() = Some("No files selected for download".to_string());
+                    *self.error.write().unwrap() =
+                        Some("No files selected for download".to_string());
                     return;
                 }
-                
+
                 let quant = &files_to_download[0];
-                
+
                 let base_path = self.download_path_input.value().to_string();
-                
+
                 // Validate the path to prevent path traversal
                 if let Err(e) = validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
                     *self.error.write().unwrap() = Some(format!("Invalid path: {}", e));
-                    *self.status.write().unwrap() = "Download cancelled due to invalid path".to_string();
+                    *self.status.write().unwrap() =
+                        "Download cancelled due to invalid path".to_string();
                     return;
                 }
-                
+
                 // Calculate model_path as base/author/model_name (without file's subdirectory)
                 // The filename may contain subdirectories (e.g., "UD-Q6_K_XL/model.gguf")
                 // which will be appended during download, so we don't include them here
                 let model_parts: Vec<&str> = model.id.split('/').collect();
                 let model_path = if model_parts.len() == 2 {
-                    PathBuf::from(&base_path).join(model_parts[0]).join(model_parts[1])
+                    PathBuf::from(&base_path)
+                        .join(model_parts[0])
+                        .join(model_parts[1])
                 } else {
                     PathBuf::from(&base_path)
                 };
-                
+
                 // Convert files_to_download to filenames
-                let filenames_to_download: Vec<String> = files_to_download.iter()
+                let filenames_to_download: Vec<String> = files_to_download
+                    .iter()
                     .map(|f| f.filename.clone())
                     .collect();
-                
+
                 let num_files = filenames_to_download.len();
-                
+
                 // Fetch SHA256 hashes for all files
                 let token = self.options.hf_token.as_ref();
                 let sha256_map = if num_files > 1 {
@@ -174,26 +187,31 @@ impl App {
                 } else {
                     HashMap::new() // Single file uses quant.sha256 directly
                 };
-                
+
                 // Load registry and add metadata entries for all files
                 let mut registry = {
                     let reg = self.download_registry.lock().await;
                     reg.clone()
                 };
-                
+
                 for (idx, filename) in filenames_to_download.iter().enumerate() {
                     // Validate each filename before processing
-                    let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
-                        Ok(path) => path,
-                        Err(e) => {
-                            *self.error.write().unwrap() = Some(format!("Invalid filename '{}': {}", filename, e));
-                            continue;
-                        }
-                    };
-                    
-                    let url = format!("https://huggingface.co/{}/resolve/main/{}", model.id, filename);
+                    let validated_path =
+                        match validate_and_sanitize_path(&base_path, &model.id, filename) {
+                            Ok(path) => path,
+                            Err(e) => {
+                                *self.error.write().unwrap() =
+                                    Some(format!("Invalid filename '{}': {}", filename, e));
+                                continue;
+                            }
+                        };
+
+                    let url = format!(
+                        "https://huggingface.co/{}/resolve/main/{}",
+                        model.id, filename
+                    );
                     let local_path_str = validated_path.to_string_lossy().to_string();
-                    
+
                     // Only add if not already in registry
                     if !registry.downloads.iter().any(|d| d.url == url) {
                         // Get SHA256 from the corresponding QuantizationInfo
@@ -205,7 +223,7 @@ impl App {
                             // Look up hash for this specific part from fetched map
                             sha256_map.get(filename).and_then(|h| h.clone())
                         };
-                        
+
                         registry.downloads.push(DownloadMetadata {
                             model_id: model.id.clone(),
                             filename: filename.clone(),
@@ -218,7 +236,7 @@ impl App {
                         });
                     }
                 }
-                
+
                 // Save registry with all new entries
                 registry::save_registry(&registry);
                 {
@@ -227,19 +245,14 @@ impl App {
                 }
 
                 // Calculate total bytes for all files being queued
-                let total_queued_bytes: u64 = files_to_download.iter()
-                    .map(|f| f.size)
-                    .sum();
+                let total_queued_bytes: u64 = files_to_download.iter().map(|f| f.size).sum();
 
                 // Increment queue size and bytes by number of files
                 {
-                    let mut queue_size = self.download_queue_size.lock().await;
-                    *queue_size += num_files;
-
-                    let mut queue_bytes = self.download_queue_bytes.lock().await;
-                    *queue_bytes += total_queued_bytes;
+                    let mut queue = self.download_queue.lock().await;
+                    queue.add(num_files, total_queued_bytes);
                 }
-                
+
                 // Send all download requests
                 let mut success_count = 0;
                 let hf_token = self.options.hf_token.clone();
@@ -256,26 +269,39 @@ impl App {
                     let file_size = if idx < files_to_download.len() {
                         files_to_download[idx].size
                     } else {
-                        0  // Fallback for safety
+                        0 // Fallback for safety
                     };
 
-                    if self.download_tx.send((
-                        model.id.clone(),
-                        filename.clone(),
-                        model_path.clone(),
-                        sha256,
-                        hf_token.clone(),
-                        file_size,
-                    )).is_ok() {
+                    if self
+                        .download_tx
+                        .send((
+                            model.id.clone(),
+                            filename.clone(),
+                            model_path.clone(),
+                            sha256,
+                            hf_token.clone(),
+                            file_size,
+                        ))
+                        .is_ok()
+                    {
                         success_count += 1;
                     }
                 }
-                
+
                 if success_count > 0 {
                     if num_files > 1 {
-                        *self.status.write().unwrap() = format!("Queued {} parts of {} to {}", num_files, quant.filename, model_path.display());
+                        *self.status.write().unwrap() = format!(
+                            "Queued {} parts of {} to {}",
+                            num_files,
+                            quant.filename,
+                            model_path.display()
+                        );
                     } else {
-                        *self.status.write().unwrap() = format!("Starting download of {} to {}", quant.filename, model_path.display());
+                        *self.status.write().unwrap() = format!(
+                            "Starting download of {} to {}",
+                            quant.filename,
+                            model_path.display()
+                        );
                     }
                 } else {
                     *self.error.write().unwrap() = Some("Failed to start download".to_string());
@@ -284,16 +310,14 @@ impl App {
                 // Adjust queue size and bytes if some sends failed
                 if success_count < num_files {
                     let failed_count = num_files - success_count;
-                    let failed_bytes: u64 = files_to_download.iter()
+                    let failed_bytes: u64 = files_to_download
+                        .iter()
                         .skip(success_count)
                         .map(|f| f.size)
                         .sum();
 
-                    let mut queue_size = self.download_queue_size.lock().await;
-                    *queue_size = queue_size.saturating_sub(failed_count);
-
-                    let mut queue_bytes = self.download_queue_bytes.lock().await;
-                    *queue_bytes = queue_bytes.saturating_sub(failed_bytes);
+                    let mut queue = self.download_queue.lock().await;
+                    queue.remove(failed_count, failed_bytes);
                 }
             }
         }
@@ -312,10 +336,13 @@ impl App {
             // which will be appended during download
             let model_parts: Vec<&str> = metadata.model_id.split('/').collect();
             let base_path = if model_parts.len() == 2 {
-                PathBuf::from(&default_dir).join(model_parts[0]).join(model_parts[1])
+                PathBuf::from(&default_dir)
+                    .join(model_parts[0])
+                    .join(model_parts[1])
             } else {
                 // Fallback to deriving from local_path if model_id format is unexpected
-                PathBuf::from(&metadata.local_path).parent()
+                PathBuf::from(&metadata.local_path)
+                    .parent()
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from(&default_dir))
             };
@@ -331,14 +358,11 @@ impl App {
                 metadata.total_size,
             ));
         }
-        
+
         // Update queue size and bytes
         {
-            let mut queue_size = self.download_queue_size.lock().await;
-            *queue_size += count;
-
-            let mut queue_bytes = self.download_queue_bytes.lock().await;
-            *queue_bytes += total_bytes;
+            let mut queue = self.download_queue.lock().await;
+            queue.add(count, total_bytes);
         }
 
         *self.status.write().unwrap() = format!("Resuming {} incomplete download(s)", count);
@@ -349,40 +373,45 @@ impl App {
     pub async fn delete_incomplete_downloads(&mut self) {
         let mut deleted = 0;
         let mut errors = Vec::new();
-        
+
         // Load registry
         let mut registry = {
             let reg = self.download_registry.lock().await;
             reg.clone()
         };
-        
+
         for metadata in &self.incomplete_downloads {
             // Try to delete the actual .incomplete file
             let file_path = PathBuf::from(&metadata.local_path);
             let incomplete_path = PathBuf::from(format!("{}.incomplete", file_path.display()));
-            
+
             match tokio::fs::remove_file(&incomplete_path).await {
                 Ok(_) => deleted += 1,
                 Err(e) => {
                     errors.push(format!("{}: {}", metadata.filename, e));
                 }
             }
-            
+
             // Remove from registry
             registry.downloads.retain(|d| d.url != metadata.url);
         }
-        
+
         // Save updated registry
         registry::save_registry(&registry);
         {
             let mut reg = self.download_registry.lock().await;
             *reg = registry;
         }
-        
+
         if errors.is_empty() {
             *self.status.write().unwrap() = format!("Deleted {} incomplete file(s)", deleted);
         } else {
-            *self.status.write().unwrap() = format!("Deleted {} file(s), {} error(s): {}", deleted, errors.len(), errors.join(", "));
+            *self.status.write().unwrap() = format!(
+                "Deleted {} file(s), {} error(s): {}",
+                deleted,
+                errors.len(),
+                errors.join(", ")
+            );
         }
         self.incomplete_downloads.clear();
     }
@@ -391,56 +420,64 @@ impl App {
     pub async fn confirm_repository_download(&mut self) {
         let models = self.models.read().unwrap().clone();
         let metadata = self.model_metadata.read().unwrap().clone();
-        
+
         let model_selected = self.list_state.selected();
-        
+
         if let (Some(model_idx), Some(meta)) = (model_selected, metadata) {
             if model_idx < models.len() {
                 let model = &models[model_idx];
                 let base_path = self.download_path_input.value().to_string();
-                
+
                 // Filter out directories - only download files
-                let files_to_download: Vec<_> = meta.siblings.iter()
+                let files_to_download: Vec<_> = meta
+                    .siblings
+                    .iter()
                     .filter(|f| {
                         // Skip if it's likely a directory (no size or ends with /)
                         f.size.is_some() && !f.rfilename.ends_with('/')
                     })
                     .collect();
-                
+
                 if files_to_download.is_empty() {
-                    *self.error.write().unwrap() = Some("No files to download in this repository".to_string());
+                    *self.error.write().unwrap() =
+                        Some("No files to download in this repository".to_string());
                     return;
                 }
-                
+
                 let num_files = files_to_download.len();
-                
+
                 // Load registry
                 let mut registry = {
                     let reg = self.download_registry.lock().await;
                     reg.clone()
                 };
-                
+
                 // Add metadata entries for all files
                 for file in &files_to_download {
                     let filename = &file.rfilename;
-                    
+
                     // Validate path
-                    let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
-                        Ok(path) => path,
-                        Err(e) => {
-                            *self.error.write().unwrap() = Some(format!("Invalid filename '{}': {}", filename, e));
-                            continue;
-                        }
-                    };
-                    
-                    let url = format!("https://huggingface.co/{}/resolve/main/{}", model.id, filename);
+                    let validated_path =
+                        match validate_and_sanitize_path(&base_path, &model.id, filename) {
+                            Ok(path) => path,
+                            Err(e) => {
+                                *self.error.write().unwrap() =
+                                    Some(format!("Invalid filename '{}': {}", filename, e));
+                                continue;
+                            }
+                        };
+
+                    let url = format!(
+                        "https://huggingface.co/{}/resolve/main/{}",
+                        model.id, filename
+                    );
                     let local_path_str = validated_path.to_string_lossy().to_string();
-                    
+
                     // Only add if not already in registry
                     if !registry.downloads.iter().any(|d| d.url == url) {
                         // Extract SHA256 from LFS info if available
                         let expected_sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
-                        
+
                         registry.downloads.push(DownloadMetadata {
                             model_id: model.id.clone(),
                             filename: filename.clone(),
@@ -453,7 +490,7 @@ impl App {
                         });
                     }
                 }
-                
+
                 // Save registry with all new entries
                 registry::save_registry(&registry);
                 {
@@ -462,28 +499,25 @@ impl App {
                 }
 
                 // Calculate total bytes for all files
-                let total_queued_bytes: u64 = files_to_download.iter()
-                    .filter_map(|f| f.size)
-                    .sum();
+                let total_queued_bytes: u64 = files_to_download.iter().filter_map(|f| f.size).sum();
 
                 // Increment queue size and bytes
                 {
-                    let mut queue_size = self.download_queue_size.lock().await;
-                    *queue_size += num_files;
-
-                    let mut queue_bytes = self.download_queue_bytes.lock().await;
-                    *queue_bytes += total_queued_bytes;
+                    let mut queue = self.download_queue.lock().await;
+                    queue.add(num_files, total_queued_bytes);
                 }
-                
+
                 // Calculate the model root directory (base/author/model_name)
                 // This is where all files will be organized with their subdirectory structure
                 let model_parts: Vec<&str> = model.id.split('/').collect();
                 let model_root = if model_parts.len() == 2 {
-                    PathBuf::from(&base_path).join(model_parts[0]).join(model_parts[1])
+                    PathBuf::from(&base_path)
+                        .join(model_parts[0])
+                        .join(model_parts[1])
                 } else {
                     PathBuf::from(&base_path)
                 };
-                
+
                 // Send all download requests - each file will preserve its subdirectory structure
                 let mut success_count = 0;
                 let hf_token = self.options.hf_token.clone();
@@ -491,20 +525,29 @@ impl App {
                     let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
                     let file_size = file.size.unwrap_or(0);
 
-                    if self.download_tx.send((
-                        model.id.clone(),
-                        file.rfilename.clone(),
-                        model_root.clone(),
-                        sha256,
-                        hf_token.clone(),
-                        file_size,
-                    )).is_ok() {
+                    if self
+                        .download_tx
+                        .send((
+                            model.id.clone(),
+                            file.rfilename.clone(),
+                            model_root.clone(),
+                            sha256,
+                            hf_token.clone(),
+                            file_size,
+                        ))
+                        .is_ok()
+                    {
                         success_count += 1;
                     }
                 }
-                
+
                 if success_count > 0 {
-                    *self.status.write().unwrap() = format!("Queued {} files from {} to {}", success_count, model.id, model_root.display());
+                    *self.status.write().unwrap() = format!(
+                        "Queued {} files from {} to {}",
+                        success_count,
+                        model.id,
+                        model_root.display()
+                    );
                 } else {
                     *self.error.write().unwrap() = Some("Failed to start downloads".to_string());
                 }
@@ -512,16 +555,14 @@ impl App {
                 // Adjust queue size and bytes if some sends failed
                 if success_count < num_files {
                     let failed_count = num_files - success_count;
-                    let failed_bytes: u64 = files_to_download.iter()
+                    let failed_bytes: u64 = files_to_download
+                        .iter()
                         .skip(success_count)
                         .filter_map(|f| f.size)
                         .sum();
 
-                    let mut queue_size = self.download_queue_size.lock().await;
-                    *queue_size = queue_size.saturating_sub(failed_count);
-
-                    let mut queue_bytes = self.download_queue_bytes.lock().await;
-                    *queue_bytes = queue_bytes.saturating_sub(failed_bytes);
+                    let mut queue = self.download_queue.lock().await;
+                    queue.remove(failed_count, failed_bytes);
                 }
             }
         }

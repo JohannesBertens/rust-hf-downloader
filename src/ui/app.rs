@@ -1,8 +1,8 @@
 // Declare submodules
-mod state;
+mod downloads;
 mod events;
 mod models;
-mod downloads;
+mod state;
 mod verification;
 
 // Re-export App struct
@@ -19,24 +19,24 @@ impl App {
     /// Main application run loop
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.running = true;
-        
+
         // Initialize global download config from options
         self.sync_options_to_config();
-        
+
         // Scan for incomplete downloads on startup
         self.scan_incomplete_downloads().await;
-        
+
         // Set initial status for empty screen
         *self.status.write().unwrap() = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
-        
+
         // Spawn verification worker
         let verification_queue = self.verification_queue.clone();
         let verification_progress = self.verification_progress.clone();
         let verification_queue_size = self.verification_queue_size.clone();
         let status_tx_verify = self.status_tx.clone();
         let download_registry = self.download_registry.clone();
-        
+
         tokio::spawn(async move {
             crate::verification::verification_worker(
                 verification_queue,
@@ -44,28 +44,35 @@ impl App {
                 verification_queue_size,
                 status_tx_verify,
                 download_registry,
-            ).await;
+            )
+            .await;
         });
-        
+
         // Spawn download manager task
         let download_rx = self.download_rx.clone();
         let download_progress = self.download_progress.clone();
-        let download_queue_size = self.download_queue_size.clone();
-        let download_queue_bytes = self.download_queue_bytes.clone();
+        let download_queue = self.download_queue.clone();
         let status_tx = self.status_tx.clone();
         let complete_downloads = self.complete_downloads.clone();
         let verification_queue = self.verification_queue.clone();
         let verification_queue_size = self.verification_queue_size.clone();
         tokio::spawn(async move {
-            let mut rx = download_rx.lock().await;
-            while let Some((model_id, filename, path, sha256, hf_token, total_size)) = rx.recv().await {
+            loop {
+                // Lock only when receiving, release immediately after
+                // This prevents deadlock by not holding download_rx while acquiring other locks
+                let (model_id, filename, path, sha256, hf_token, total_size) = {
+                    let mut rx = download_rx.lock().await;
+                    match rx.recv().await {
+                        Some(msg) => msg,
+                        None => break, // Channel closed
+                    }
+                };
+
+                // download_rx lock is now released before we acquire other locks
                 // Decrement queue size and bytes when we start processing
                 {
-                    let mut queue_size = download_queue_size.lock().await;
-                    *queue_size = queue_size.saturating_sub(1);
-
-                    let mut queue_bytes = download_queue_bytes.lock().await;
-                    *queue_bytes = queue_bytes.saturating_sub(total_size);
+                    let mut queue = download_queue.lock().await;
+                    queue.remove(1, total_size);
                 }
                 start_download(crate::download::DownloadParams {
                     model_id,
@@ -78,26 +85,27 @@ impl App {
                     verification_queue: verification_queue.clone(),
                     verification_queue_size: verification_queue_size.clone(),
                     hf_token,
-                }).await;
+                })
+                .await;
             }
         });
-        
+
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
-            
+
             // Check if we need to search for models after UI render
             if self.needs_search_models {
                 self.needs_search_models = false;
                 self.search_models().await;
             }
-            
+
             // Check if we need to load quantizations after UI render
             if self.needs_load_quantizations {
                 self.needs_load_quantizations = false;
                 self.spawn_load_quantizations();
                 self.prefetch_adjacent_models();
             }
-            
+
             self.handle_crossterm_events().await?;
         }
         Ok(())
@@ -111,92 +119,103 @@ impl App {
         let quantizations = self.quantizations.read().unwrap().clone();
         let model_metadata = self.model_metadata.read().unwrap().clone();
         let file_tree = self.file_tree.read().unwrap().clone();
-        
+
         // For tokio Mutex, use try_lock() to avoid blocking/deadlock
         // Fall back to cached values if lock is held by another task
-        let complete_downloads = self.complete_downloads.try_lock()
+        let complete_downloads = self
+            .complete_downloads
+            .try_lock()
             .map(|guard| {
                 // Update cache when we successfully get the lock
                 self.cached_complete_downloads = guard.clone();
                 guard.clone()
             })
             .unwrap_or_else(|_| self.cached_complete_downloads.clone());
-        
+
         // Render main UI
-        crate::ui::render::render_ui(frame, crate::ui::render::RenderParams {
-            input: &self.input,
-            input_mode: self.input_mode,
-            models: &models,
-            list_state: &mut self.list_state,
-            loading: *self.loading.read().unwrap(),
-            quantizations: &quantizations,
-            quant_file_list_state: &mut self.quant_file_list_state,
-            quant_list_state: &mut self.quant_list_state,
-            loading_quants: *self.loading_quants.read().unwrap(),
-            focused_pane: self.focused_pane,
-            error: &self.error.read().unwrap(),
-            status: &self.status.read().unwrap(),
-            selection_info: &self.selection_info.read().unwrap(),
-            complete_downloads: &complete_downloads,
-            display_mode: *self.display_mode.read().unwrap(),
-            model_metadata: &model_metadata,
-            file_tree: &file_tree,
-            file_tree_state: &mut self.file_tree_state,
-            sort_field: self.sort_field,
-            sort_direction: self.sort_direction,
-            filter_min_downloads: self.filter_min_downloads,
-            filter_min_likes: self.filter_min_likes,
-            focused_filter_field: self.focused_filter_field,
-            panel_areas: &mut self.panel_areas,
-            hovered_panel: &self.hovered_panel,
-            filter_areas: &mut self.filter_areas,
-        });
-        
+        crate::ui::render::render_ui(
+            frame,
+            crate::ui::render::RenderParams {
+                input: &self.input,
+                input_mode: self.input_mode,
+                models: &models,
+                list_state: &mut self.list_state,
+                loading: *self.loading.read().unwrap(),
+                quantizations: &quantizations,
+                quant_file_list_state: &mut self.quant_file_list_state,
+                quant_list_state: &mut self.quant_list_state,
+                loading_quants: *self.loading_quants.read().unwrap(),
+                focused_pane: self.focused_pane,
+                error: &self.error.read().unwrap(),
+                status: &self.status.read().unwrap(),
+                selection_info: &self.selection_info.read().unwrap(),
+                complete_downloads: &complete_downloads,
+                display_mode: *self.display_mode.read().unwrap(),
+                model_metadata: &model_metadata,
+                file_tree: &file_tree,
+                file_tree_state: &mut self.file_tree_state,
+                sort_field: self.sort_field,
+                sort_direction: self.sort_direction,
+                filter_min_downloads: self.filter_min_downloads,
+                filter_min_likes: self.filter_min_likes,
+                focused_filter_field: self.focused_filter_field,
+                panel_areas: &mut self.panel_areas,
+                hovered_panel: &self.hovered_panel,
+                filter_areas: &mut self.filter_areas,
+            },
+        );
+
         // For progress bars, use try_lock() with fallback to cached values
-        let download_progress = self.download_progress.try_lock()
+        let download_progress = self
+            .download_progress
+            .try_lock()
             .map(|guard| {
                 self.cached_download_progress = guard.clone();
                 guard.clone()
             })
             .unwrap_or_else(|_| self.cached_download_progress.clone());
-        
-        let download_queue_size = self.download_queue_size.try_lock()
-            .map(|guard| {
-                self.cached_download_queue_size = *guard;
-                *guard
-            })
-            .unwrap_or(self.cached_download_queue_size);
 
-        let download_queue_bytes = self.download_queue_bytes.try_lock()
+        let download_queue = self
+            .download_queue
+            .try_lock()
             .map(|guard| {
-                self.cached_download_queue_bytes = *guard;
-                *guard
+                self.cached_download_queue = guard.clone();
+                (guard.size, guard.bytes)
             })
-            .unwrap_or(self.cached_download_queue_bytes);
+            .unwrap_or_else(|_| {
+                (
+                    self.cached_download_queue.size,
+                    self.cached_download_queue.bytes,
+                )
+            });
 
-        let verification_progress = self.verification_progress.try_lock()
+        let verification_progress = self
+            .verification_progress
+            .try_lock()
             .map(|guard| {
                 self.cached_verification_progress = guard.clone();
                 guard.clone()
             })
             .unwrap_or_else(|_| self.cached_verification_progress.clone());
-        
-        let verification_queue_size = self.verification_queue_size.try_lock()
+
+        let verification_queue_size = self
+            .verification_queue_size
+            .try_lock()
             .map(|guard| {
                 self.cached_verification_queue_size = *guard;
                 *guard
             })
             .unwrap_or(self.cached_verification_queue_size);
-        
+
         crate::ui::render::render_progress_bars(
             frame,
             &download_progress,
-            download_queue_size,
-            download_queue_bytes,
+            download_queue.0,
+            download_queue.1,
             &verification_progress,
             verification_queue_size,
         );
-        
+
         // Render popups (must be last to appear on top)
         match self.popup_mode {
             PopupMode::SearchPopup => {
@@ -209,10 +228,19 @@ impl App {
                 crate::ui::render::render_download_path_popup(frame, &self.download_path_input);
             }
             PopupMode::Options => {
-                crate::ui::render::render_options_popup(frame, &self.options, &self.options_directory_input, &self.options_token_input);
+                crate::ui::render::render_options_popup(
+                    frame,
+                    &self.options,
+                    &self.options_directory_input,
+                    &self.options_token_input,
+                );
             }
             PopupMode::AuthError { ref model_url } => {
-                let has_token = self.options.hf_token.as_ref().is_some_and(|t| !t.is_empty());
+                let has_token = self
+                    .options
+                    .hf_token
+                    .as_ref()
+                    .is_some_and(|t| !t.is_empty());
                 crate::ui::render::render_auth_error_popup(frame, model_url, has_token);
             }
             PopupMode::None => {}
@@ -225,9 +253,9 @@ impl App {
         if self.popup_mode != crate::models::PopupMode::None {
             return;
         }
-        
+
         let pos = ratatui::layout::Position::new(column, row);
-        
+
         // Check if click is within any filter area first
         for (field_idx, area) in &self.filter_areas {
             if area.contains(pos) {
@@ -235,7 +263,7 @@ impl App {
                 return;
             }
         }
-        
+
         // Check if click is within any panel area
         for (pane, area) in &self.panel_areas {
             if area.contains(pos) {
@@ -250,7 +278,7 @@ impl App {
     fn handle_filter_click(&mut self, field_idx: usize) {
         // Set focused field and cycle its value
         self.focused_filter_field = field_idx;
-        
+
         match field_idx {
             0 => {
                 // Sort field: cycle through Downloads → Likes → Modified → Name → Downloads
@@ -265,22 +293,34 @@ impl App {
             1 => {
                 // Min downloads: cycle through 0, 100, 1k, 10k, 100k, 1M
                 let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
-                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let current_idx = steps
+                    .iter()
+                    .position(|&x| x == self.filter_min_downloads)
+                    .unwrap_or(0);
                 let new_idx = (current_idx + 1) % steps.len();
                 self.filter_min_downloads = steps[new_idx];
-                *self.status.write().unwrap() = format!("Min downloads: {}", crate::utils::format_number(self.filter_min_downloads));
+                *self.status.write().unwrap() = format!(
+                    "Min downloads: {}",
+                    crate::utils::format_number(self.filter_min_downloads)
+                );
             }
             2 => {
                 // Min likes: cycle through 0, 10, 50, 100, 500, 1k, 5k
                 let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
-                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let current_idx = steps
+                    .iter()
+                    .position(|&x| x == self.filter_min_likes)
+                    .unwrap_or(0);
                 let new_idx = (current_idx + 1) % steps.len();
                 self.filter_min_likes = steps[new_idx];
-                *self.status.write().unwrap() = format!("Min likes: {}", crate::utils::format_number(self.filter_min_likes));
+                *self.status.write().unwrap() = format!(
+                    "Min likes: {}",
+                    crate::utils::format_number(self.filter_min_likes)
+                );
             }
             _ => {}
         }
-        
+
         // Re-fetch with new filters
         self.clear_search_results();
         self.needs_search_models = true;
@@ -293,9 +333,9 @@ impl App {
         if self.popup_mode != crate::models::PopupMode::None {
             return;
         }
-        
+
         let pos = ratatui::layout::Position::new(column, row);
-        
+
         // Check if scroll is within any filter area
         for (field_idx, area) in &self.filter_areas {
             if area.contains(pos) {
@@ -303,7 +343,7 @@ impl App {
                 return;
             }
         }
-        
+
         // Navigate in the currently focused pane
         match self.focused_pane {
             crate::models::FocusedPane::Models => {
@@ -347,7 +387,7 @@ impl App {
     fn handle_filter_scroll(&mut self, field_idx: usize, scroll_up: bool) {
         // Set focused field
         self.focused_filter_field = field_idx;
-        
+
         match field_idx {
             0 => {
                 // Sort field: cycle through options
@@ -371,30 +411,50 @@ impl App {
             1 => {
                 // Min downloads: cycle through steps
                 let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
-                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let current_idx = steps
+                    .iter()
+                    .position(|&x| x == self.filter_min_downloads)
+                    .unwrap_or(0);
                 let new_idx = if scroll_up {
-                    if current_idx == 0 { steps.len() - 1 } else { current_idx - 1 }
+                    if current_idx == 0 {
+                        steps.len() - 1
+                    } else {
+                        current_idx - 1
+                    }
                 } else {
                     (current_idx + 1) % steps.len()
                 };
                 self.filter_min_downloads = steps[new_idx];
-                *self.status.write().unwrap() = format!("Min downloads: {}", crate::utils::format_number(self.filter_min_downloads));
+                *self.status.write().unwrap() = format!(
+                    "Min downloads: {}",
+                    crate::utils::format_number(self.filter_min_downloads)
+                );
             }
             2 => {
                 // Min likes: cycle through steps
                 let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
-                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let current_idx = steps
+                    .iter()
+                    .position(|&x| x == self.filter_min_likes)
+                    .unwrap_or(0);
                 let new_idx = if scroll_up {
-                    if current_idx == 0 { steps.len() - 1 } else { current_idx - 1 }
+                    if current_idx == 0 {
+                        steps.len() - 1
+                    } else {
+                        current_idx - 1
+                    }
                 } else {
                     (current_idx + 1) % steps.len()
                 };
                 self.filter_min_likes = steps[new_idx];
-                *self.status.write().unwrap() = format!("Min likes: {}", crate::utils::format_number(self.filter_min_likes));
+                *self.status.write().unwrap() = format!(
+                    "Min likes: {}",
+                    crate::utils::format_number(self.filter_min_likes)
+                );
             }
             _ => {}
         }
-        
+
         // Re-fetch with new filters
         self.clear_search_results();
         self.needs_search_models = true;
@@ -403,21 +463,23 @@ impl App {
     /// Update hover state based on mouse position (called once per frame with coalesced position)
     fn update_hover_state(&mut self, column: u16, row: u16) {
         self.mouse_position = Some((column, row));
-        
+
         // Skip if popup is open
         if self.popup_mode != crate::models::PopupMode::None {
             self.hovered_panel = None;
             return;
         }
-        
+
         // Skip if no panel areas defined
         if self.panel_areas.is_empty() {
             self.hovered_panel = None;
             return;
         }
-        
+
         // Find which panel (if any) the mouse is hovering over
-        self.hovered_panel = self.panel_areas.iter()
+        self.hovered_panel = self
+            .panel_areas
+            .iter()
             .find(|(_, area)| area.contains(ratatui::layout::Position::new(column, row)))
             .map(|(pane, _)| *pane);
     }
@@ -425,24 +487,25 @@ impl App {
     /// Handle crossterm events with event coalescing
     /// Drains all pending events, processing keys immediately but coalescing mouse moves
     async fn handle_crossterm_events(&mut self) -> Result<()> {
-        use crossterm::event::{MouseEventKind, MouseButton};
-        
+        use crossterm::event::{MouseButton, MouseEventKind};
+
         // Check for status messages from download tasks (non-blocking)
         if let Ok(mut rx) = self.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
-                    *self.status.write().unwrap() = format!("Authentication required for {}", model_id);
+                    *self.status.write().unwrap() =
+                        format!("Authentication required for {}", model_id);
                 } else {
                     *self.status.write().unwrap() = msg;
                 }
             }
         }
-        
+
         // Track the last mouse position for coalesced hover update
         let mut last_mouse_position: Option<(u16, u16)> = None;
-        
+
         // Wait for at least one event or timeout
         let delay = tokio::time::sleep(tokio::time::Duration::from_millis(50));
         tokio::select! {
@@ -483,7 +546,7 @@ impl App {
                 // Timeout - just proceed to drain any pending events
             }
         }
-        
+
         // Drain any additional pending events without blocking
         // This coalesces multiple mouse move events into one
         loop {
@@ -503,14 +566,23 @@ impl App {
                                     self.handle_mouse_click(mouse_event.column, mouse_event.row);
                                 }
                                 MouseEventKind::ScrollUp => {
-                                    self.handle_mouse_scroll(true, mouse_event.column, mouse_event.row);
+                                    self.handle_mouse_scroll(
+                                        true,
+                                        mouse_event.column,
+                                        mouse_event.row,
+                                    );
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    self.handle_mouse_scroll(false, mouse_event.column, mouse_event.row);
+                                    self.handle_mouse_scroll(
+                                        false,
+                                        mouse_event.column,
+                                        mouse_event.row,
+                                    );
                                 }
                                 MouseEventKind::Moved => {
                                     // Overwrite - only keep the latest position
-                                    last_mouse_position = Some((mouse_event.column, mouse_event.row));
+                                    last_mouse_position =
+                                        Some((mouse_event.column, mouse_event.row));
                                 }
                                 _ => {}
                             }
@@ -528,7 +600,7 @@ impl App {
                 }
             }
         }
-        
+
         // Apply coalesced hover update once (if mouse moved)
         if let Some((col, row)) = last_mouse_position {
             // Throttle hover updates to ~60fps
@@ -537,7 +609,7 @@ impl App {
                 self.update_hover_state(col, row);
             }
         }
-        
+
         Ok(())
     }
 }

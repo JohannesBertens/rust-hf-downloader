@@ -15,7 +15,6 @@ pub struct ModelInfo {
     pub last_modified: Option<String>,
 }
 
-
 /// Extended model metadata from /api/models/{model_id}
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelMetadata {
@@ -28,9 +27,12 @@ pub struct ModelMetadata {
     #[serde(default)]
     pub card_data: Option<ModelCardData>,
     #[serde(default)]
-    pub siblings: Vec<RepoFile>,  // All files in the repo
+    pub siblings: Vec<RepoFile>, // All files in the repo
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Gated status: "auto", "manual", false, or true
+    #[serde(default)]
+    pub gated: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,12 +50,12 @@ pub struct ModelCardData {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RepoFile {
-    pub rfilename: String,  // API uses 'rfilename' for relative path
+    pub rfilename: String, // API uses 'rfilename' for relative path
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
     #[allow(dead_code)]
-    pub lfs: Option<LfsInfo>,  // Reuse existing LfsInfo struct
+    pub lfs: Option<LfsInfo>, // Reuse existing LfsInfo struct
 }
 
 /// Tree node for hierarchical file display
@@ -98,7 +100,7 @@ pub struct QuantizationInfo {
 #[derive(Debug, Clone)]
 pub struct QuantizationGroup {
     pub quant_type: String,
-    pub files: Vec<QuantizationInfo>,  // All files in this quantization type
+    pub files: Vec<QuantizationInfo>, // All files in this quantization type
     pub total_size: u64,
 }
 
@@ -174,7 +176,7 @@ pub enum FilterPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    #[allow(dead_code)]  // Kept for potential future use (inline editing)
+    #[allow(dead_code)] // Kept for potential future use (inline editing)
     Editing,
 }
 
@@ -208,8 +210,38 @@ pub enum FocusedPane {
 /// Model display mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelDisplayMode {
-    Gguf,      // Show quantizations (current behavior)
-    Standard,  // Show metadata + file tree
+    Gguf,     // Show quantizations (current behavior)
+    Standard, // Show metadata + file tree
+}
+
+/// Combined download queue state to reduce lock complexity
+#[derive(Debug, Default, Clone)]
+pub struct QueueState {
+    /// Number of downloads currently in queue
+    pub size: usize,
+    /// Total bytes of downloads in queue
+    pub bytes: u64,
+}
+
+impl QueueState {
+    pub fn new(size: usize, bytes: u64) -> Self {
+        Self { size, bytes }
+    }
+
+    pub fn add(&mut self, count: usize, bytes: u64) {
+        self.size += count;
+        self.bytes += bytes;
+    }
+
+    pub fn remove(&mut self, count: usize, bytes: u64) {
+        self.size = self.size.saturating_sub(count);
+        self.bytes = self.bytes.saturating_sub(bytes);
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
 }
 
 pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
@@ -258,7 +290,7 @@ pub struct VerificationQueueItem {
     pub expected_sha256: String,
     pub total_size: u64,
     #[allow(dead_code)]
-    pub is_manual: bool,  // True if triggered by 'v' key, false if automatic
+    pub is_manual: bool, // True if triggered by 'v' key, false if automatic
 }
 
 // Default value for rate limit (50.0 MB/s)
@@ -272,7 +304,7 @@ pub struct AppOptions {
     // General
     pub default_directory: String,
     pub hf_token: Option<String>,
-    
+
     // Download Settings
     pub concurrent_threads: usize,
     pub num_chunks: usize,
@@ -288,13 +320,13 @@ pub struct AppOptions {
     pub download_rate_limit_enabled: bool,
     #[serde(default = "default_rate_limit_mbps")]
     pub download_rate_limit_mbps: f64,
-    
+
     // Verification Settings
     pub verification_on_completion: bool,
     pub concurrent_verifications: usize,
     pub verification_buffer_size: usize,
     pub verification_update_interval: usize,
-    
+
     // UI State (not serialized)
     #[serde(skip)]
     pub selected_field: usize,
@@ -302,7 +334,7 @@ pub struct AppOptions {
     pub editing_directory: bool,
     #[serde(skip)]
     pub editing_token: bool,
-    
+
     // Filter & Sort Settings (NEW)
     #[serde(default)]
     pub default_sort_field: SortField,

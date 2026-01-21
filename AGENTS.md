@@ -68,3 +68,59 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks
 - Cached render fields provide fallback when locks unavailable
 - Mouse handler is synchronous to avoid blocking issues
+
+### Mutex Lock Ordering (Critical for Deadlock Prevention)
+
+To prevent deadlocks, all async code must acquire locks in the following order. NEVER hold a higher-numbered lock while acquiring a lower-numbered lock.
+
+```
+Lock Hierarchy (acquire in this order):
+
+1. download_rx (Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>)
+2. download_queue_size (Arc<Mutex<usize>>)
+3. download_queue_bytes (Arc<Mutex<u64>>)
+4. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
+5. complete_downloads (Arc<Mutex<CompleteDownloads>>)
+6. verification_queue (Arc<Mutex<Vec<VerificationQueueItem>>>)
+7. verification_queue_size (Arc<Mutex<usize>>)
+8. verification_progress (Arc<Mutex<Vec<VerificationProgress>>>)
+9. download_registry (Arc<Mutex<DownloadRegistry>>)
+10. RateLimiter internal locks (tokens, rate, last_refill, max_tokens)
+11. status_rx (Arc<Mutex<mpsc::UnboundedReceiver<String>>>)
+
+Key Rules:
+- ALWAYS acquire locks in the order above
+- Release locks before acquiring locks from the same level if needed
+- Use try_lock() for non-blocking access in UI rendering
+- NEVER hold a lock across an await point unless absolutely necessary
+- When receiving from a channel wrapped in Mutex, lock only for the recv() call
+```
+
+**Example - CORRECT pattern (download manager):**
+```rust
+// ✅ Lock only when receiving, release immediately
+loop {
+    let message = {
+        let mut rx = download_rx.lock().await;  // Lock level 1
+        match rx.recv().await {
+            Some(msg) => msg,
+            None => break,
+        }
+    }; // Lock level 1 released
+
+    // Now safe to acquire level 2 and 3
+    let mut queue_size = download_queue_size.lock().await;  // Lock level 2
+    let mut queue_bytes = download_queue_bytes.lock().await;  // Lock level 3
+    // ... process
+}
+```
+
+**Example - INCORRECT pattern (causes deadlock):**
+```rust
+// ❌ WRONG: Holding level 1 while acquiring level 2
+let mut rx = download_rx.lock().await;  // Lock level 1
+while let Some(msg) = rx.recv().await {
+    let mut queue_size = download_queue_size.lock().await;  // Lock level 2
+    // DEADLOCK: If another task holds level 2 and needs level 1
+}
+```

@@ -1,6 +1,6 @@
 # Rust HF Downloader
 
-A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
+A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub. Features both an interactive TUI mode and a headless CLI mode for automation.
 
 ## Demo
 
@@ -92,6 +92,207 @@ rust-hf-downloader
 ```
 
 See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-downloader)
+
+## Headless Mode (CLI)
+
+The application supports a headless mode for automated/CI environments without TUI.
+
+### Basic Usage
+
+#### Search for Models
+
+```bash
+# Basic search
+rust-hf-downloader --headless search "llama"
+
+# With filters
+rust-hf-downloader --headless search "gpt" \
+  --min-downloads 10000 \
+  --min-likes 100
+
+# JSON output for scripting
+rust-hf-downloader --headless --json search "stable diffusion" | \
+  jq '.results[] | select(.downloads > 50000) | .id'
+```
+
+#### Download Models
+
+```bash
+# Download specific quantization
+rust-hf-downloader --headless download \
+  "TheBloke/llama-2-7b-GGUF" \
+  --quantization "Q4_K_M" \
+  --output "/models"
+
+# Download all files
+rust-hf-downloader --headless download \
+  "meta-llama/Llama-3.1-8B" \
+  --all \
+  --output "/models"
+
+# Dry run (show what would be downloaded)
+rust-hf-downloader --headless --dry-run download \
+  "TheBloke/llama-2-7b-GGUF" \
+  --quantization "Q4_K_M"
+```
+
+#### List Available Files
+
+```bash
+# List GGUF quantizations
+rust-hf-downloader --headless list "TheBloke/llama-2-7b-GGUF"
+
+# List all files for non-GGUF model
+rust-hf-downloader --headless list "bert-base-uncased"
+```
+
+#### Resume Downloads
+
+```bash
+# Resume all incomplete downloads
+rust-hf-downloader --headless resume
+```
+
+### CLI Reference
+
+#### Global Flags
+
+- `--headless` - Run in headless mode (required for CLI commands)
+- `--json` - Output in JSON format (for scripting)
+- `--token <TOKEN>` - HuggingFace authentication token
+- `--dry-run` - Show what would be done without executing
+- `-h, --help` - Show help message
+
+#### Commands
+
+**search** - Search for models
+```
+rust-hf-downloader --headless search <QUERY>
+  [--sort <downloads|likes|modified|name>]
+  [--min-downloads <N>]
+  [--min-likes <N>]
+```
+
+**download** - Download a model
+```
+rust-hf-downloader --headless download <MODEL_ID>
+  [--quantization <TYPE>]
+  [--all]
+  [--output <DIR>]
+```
+
+**Note**: If an invalid quantization is specified or no quantization is provided for a GGUF model, the error message will display all available quantizations with file counts and sizes to help you choose correctly.
+
+**list** - List available files
+```
+rust-hf-downloader --headless list <MODEL_ID>
+```
+
+**resume** - Resume incomplete downloads
+```
+rust-hf-downloader --headless resume
+```
+
+### Exit Codes
+
+- `0` - Success
+- `1` - Download/API error
+- `2` - Authentication error (gated model requires token)
+- `3` - Invalid arguments
+
+### CI/CD Examples
+
+#### GitHub Actions
+
+```yaml
+name: Download Model
+on: [push]
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: rust-hf-downloader
+      - name: Download model
+        env:
+          HF_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: |
+          rust-hf-downloader --headless download \
+            "meta-llama/Llama-3.1-8B" \
+            --all \
+            --output "./models" \
+            --token "$HF_TOKEN"
+```
+
+#### Dockerfile
+
+```dockerfile
+FROM rust:1.75-slim
+
+RUN cargo install rust-hf-downloader
+
+# Set default download directory
+ENV HF_HUB_CACHE=/models
+
+ENTRYPOINT ["rust-hf-downloader", "--headless"]
+```
+
+#### Usage with Docker
+
+```bash
+docker run --rm \
+  -v /path/to/models:/models \
+  -e HF_TOKEN=your_token_here \
+  rust-hf-downloader \
+  download "meta-llama/Llama-3.1-8B" --all --output "/models"
+```
+
+### Configuration
+
+Headless mode respects the same configuration file as TUI mode:
+
+- **Location**: `~/.config/jreb/config.toml`
+- **Settings**: Default directory, token, thread count, etc.
+
+Example config:
+
+```toml
+default_directory = "/models"
+concurrent_threads = 8
+num_chunks = 20
+download_rate_limit_enabled = true
+download_rate_limit_mbps = 50.0
+```
+
+### Authentication
+
+For gated models, provide your HuggingFace token. The application performs an early authorization check before starting downloads:
+
+```bash
+# Via CLI flag
+rust-hf-downloader --headless download "model-id" \
+  --token "hf_..." \
+  --quantization "Q4_K_M"
+
+# Via config file
+# Add to ~/.config/jreb/config.toml:
+# hf_token = "hf_..."
+```
+
+**Note**: If you attempt to download a gated model without authentication, the application will:
+- Exit with code 2 (authentication error)
+- Display a helpful error message with:
+  - Link to get a HuggingFace token
+  - Link to accept model terms
+  - Example commands with token
+  - Config file instructions
+
+This early check prevents multiple authorization errors during download attempts.
+
+## TUI Mode (Interactive)
 
 ### Controls
 
