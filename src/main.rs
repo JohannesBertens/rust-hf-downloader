@@ -1,15 +1,15 @@
-mod models;
 mod api;
+mod cli;
 mod config;
 mod download;
-mod verification;
+mod headless;
+mod http_client;
+mod models;
+mod rate_limiter;
 mod registry;
 mod ui;
 mod utils;
-mod http_client;
-mod rate_limiter;
-mod cli;
-mod headless;
+mod verification;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -35,37 +35,59 @@ async fn main() -> color_eyre::Result<()> {
 
         // Spawn download manager task
         let download_progress = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let complete_downloads = std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+        let complete_downloads =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let verification_queue = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let verification_queue_size = std::sync::Arc::new(tokio::sync::Mutex::new(0));
-        let download_queue_size = std::sync::Arc::new(tokio::sync::Mutex::new(0));
-        let download_queue_bytes = std::sync::Arc::new(tokio::sync::Mutex::new(0));
-        let download_registry = std::sync::Arc::new(tokio::sync::Mutex::new(crate::models::DownloadRegistry::default()));
+        let download_queue = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::models::QueueState::new(0, 0),
+        ));
+        let download_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::models::DownloadRegistry::default(),
+        ));
+
+        // Create verification progress tracking
+        let verification_progress = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         // Clone Arcs for the download manager task
         let download_progress_clone = download_progress.clone();
         let complete_downloads_clone = complete_downloads.clone();
         let verification_queue_clone = verification_queue.clone();
         let verification_queue_size_clone = verification_queue_size.clone();
-        let download_queue_size_clone = download_queue_size.clone();
-        let download_queue_bytes_clone = download_queue_bytes.clone();
+        let download_queue_clone = download_queue.clone();
         let progress_tx_clone = progress_tx.clone();
         let _download_registry_clone = download_registry.clone();
+
+        // Spawn verification worker
+        let verification_queue_worker = verification_queue.clone();
+        let verification_progress_worker = verification_progress.clone();
+        let verification_queue_size_worker = verification_queue_size.clone();
+        let progress_tx_verify = progress_tx.clone();
+        let download_registry_verify = download_registry.clone();
+        tokio::spawn(async move {
+            verification::verification_worker(
+                verification_queue_worker,
+                verification_progress_worker,
+                verification_queue_size_worker,
+                progress_tx_verify,
+                download_registry_verify,
+            )
+            .await;
+        });
 
         tokio::spawn(async move {
             use crate::download::DownloadParams;
 
-            let mut rx = download_rx.lock().await;
-            while let Some((model_id, filename, path, sha256, hf_token, total_size)) = rx.recv().await {
-                // Update queue size
-                {
-                    let mut size = download_queue_size_clone.lock().await;
-                    *size += 1;
-                }
-                {
-                    let mut bytes = download_queue_bytes_clone.lock().await;
-                    *bytes += total_size;
-                }
+            loop {
+                // Lock only when receiving, release immediately after
+                // This prevents deadlock by not holding download_rx while acquiring other locks
+                let (model_id, filename, path, sha256, hf_token, total_size) = {
+                    let mut rx = download_rx.lock().await;
+                    match rx.recv().await {
+                        Some(msg) => msg,
+                        None => break, // Channel closed
+                    }
+                };
 
                 // Spawn download task
                 let params = DownloadParams {
@@ -81,15 +103,25 @@ async fn main() -> color_eyre::Result<()> {
                     hf_token,
                 };
 
+                let queue = download_queue_clone.clone();
                 tokio::spawn(async move {
                     download::start_download(params).await;
+                    let mut queue = queue.lock().await;
+                    queue.remove(1, total_size);
                 });
             }
         });
 
         // Spawn progress reporter task
+        let json_mode = cli_args.json;
         tokio::spawn(async move {
+            use std::io::Write;
+
             while let Some(msg) = progress_rx.recv().await {
+                if !json_mode {
+                    print!("\r\x1b[2K");
+                    let _ = std::io::stdout().flush();
+                }
                 eprintln!("{}", msg);
             }
         });
@@ -99,8 +131,10 @@ async fn main() -> color_eyre::Result<()> {
         {
             use tokio::signal::unix::{signal, SignalKind};
             tokio::spawn(async move {
-                let mut sigint = signal(SignalKind::interrupt()).expect("Failed to setup SIGINT handler");
-                let mut sigterm = signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("Failed to setup SIGINT handler");
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler");
 
                 tokio::select! {
                     _ = sigint.recv() => {
@@ -126,7 +160,12 @@ async fn main() -> color_eyre::Result<()> {
 
         // Execute command
         let result = match cli_args.command {
-            Some(cli::Commands::Search { query, sort: _, min_downloads, min_likes }) => {
+            Some(cli::Commands::Search {
+                query,
+                sort: _,
+                min_downloads,
+                min_likes,
+            }) => {
                 headless::run_search(
                     &query,
                     None, // sort_field
@@ -134,9 +173,15 @@ async fn main() -> color_eyre::Result<()> {
                     min_likes,
                     cli_args.token.as_ref(),
                     &reporter,
-                ).await
+                )
+                .await
             }
-            Some(cli::Commands::Download { model_id, quantization, all, output }) => {
+            Some(cli::Commands::Download {
+                model_id,
+                quantization,
+                all,
+                output,
+            }) => {
                 let output_dir = output.unwrap_or_else(|| {
                     let options = config::load_config();
                     options.default_directory
@@ -150,7 +195,8 @@ async fn main() -> color_eyre::Result<()> {
                         &output_dir,
                         cli_args.token,
                         &reporter,
-                    ).await
+                    )
+                    .await
                 } else {
                     headless::run_download(
                         &model_id,
@@ -161,28 +207,30 @@ async fn main() -> color_eyre::Result<()> {
                         &reporter,
                         download_tx,
                         progress_tx,
-                        download_queue_size,
+                        download_queue,
                         download_progress,
+                        verification_queue_size,
+                        verification_progress,
                         shutdown_signal,
-                    ).await
+                    )
+                    .await
                 }
             }
             Some(cli::Commands::List { model_id }) => {
-                headless::run_list(
-                    &model_id,
-                    cli_args.token.as_ref(),
-                    &reporter,
-                ).await
+                headless::run_list(&model_id, cli_args.token.as_ref(), &reporter).await
             }
             Some(cli::Commands::Resume) => {
                 headless::run_resume(
                     &reporter,
                     download_tx,
                     progress_tx,
-                    download_queue_size,
+                    download_queue,
                     download_progress,
+                    verification_queue_size,
+                    verification_progress,
                     shutdown_signal,
-                ).await
+                )
+                .await
             }
             None => {
                 eprintln!("Error: No command specified");

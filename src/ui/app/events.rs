@@ -45,14 +45,17 @@ impl App {
             }
             (_, KeyCode::Char('d')) => {
                 // Allow download from Models pane (for non-GGUF), QuantizationGroups, or QuantizationFiles
-                if self.focused_pane == FocusedPane::Models || 
-                   self.focused_pane == FocusedPane::QuantizationGroups || 
-                   self.focused_pane == FocusedPane::QuantizationFiles {
+                if self.focused_pane == FocusedPane::Models
+                    || self.focused_pane == FocusedPane::QuantizationGroups
+                    || self.focused_pane == FocusedPane::QuantizationFiles
+                {
                     self.trigger_download();
                 }
             }
             (_, KeyCode::Char('v')) => {
-                if self.focused_pane == FocusedPane::QuantizationGroups || self.focused_pane == FocusedPane::QuantizationFiles {
+                if self.focused_pane == FocusedPane::QuantizationGroups
+                    || self.focused_pane == FocusedPane::QuantizationFiles
+                {
                     self.verify_downloaded_file().await;
                 }
             }
@@ -71,29 +74,34 @@ impl App {
                     crate::models::SortField::Modified => crate::models::SortField::Name,
                     crate::models::SortField::Name => crate::models::SortField::Downloads,
                 };
-                
+
                 // Re-fetch with new sort
                 self.clear_search_results();
                 self.needs_search_models = true;
-                
+
                 *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
             }
             (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
                 // Toggle sort direction
                 self.sort_direction = match self.sort_direction {
-                    crate::models::SortDirection::Ascending => crate::models::SortDirection::Descending,
-                    crate::models::SortDirection::Descending => crate::models::SortDirection::Ascending,
+                    crate::models::SortDirection::Ascending => {
+                        crate::models::SortDirection::Descending
+                    }
+                    crate::models::SortDirection::Descending => {
+                        crate::models::SortDirection::Ascending
+                    }
                 };
-                
+
                 // Re-fetch with new direction
                 self.clear_search_results();
                 self.needs_search_models = true;
-                
+
                 let arrow = match self.sort_direction {
                     crate::models::SortDirection::Ascending => "▲",
                     crate::models::SortDirection::Descending => "▼",
                 };
-                *self.status.write().unwrap() = format!("Sort direction: {:?} {}", self.sort_direction, arrow);
+                *self.status.write().unwrap() =
+                    format!("Sort direction: {:?} {}", self.sort_direction, arrow);
             }
             (_, KeyCode::Char('f')) => {
                 // Cycle focused filter field
@@ -110,7 +118,9 @@ impl App {
                 // Increment focused filter (only in Models pane to avoid conflicts)
                 self.modify_focused_filter(1);
             }
-            (_, KeyCode::Char('-') | KeyCode::Char('_')) if self.focused_pane == FocusedPane::Models => {
+            (_, KeyCode::Char('-') | KeyCode::Char('_'))
+                if self.focused_pane == FocusedPane::Models =>
+            {
                 // Decrement focused filter (only in Models pane to avoid conflicts)
                 self.modify_focused_filter(-1);
             }
@@ -121,11 +131,11 @@ impl App {
                 self.filter_min_downloads = 0;
                 self.filter_min_likes = 0;
                 self.focused_filter_field = 0;
-                
+
                 // Re-fetch with reset filters
                 self.clear_search_results();
                 self.needs_search_models = true;
-                
+
                 *self.status.write().unwrap() = "Filters reset to defaults".to_string();
             }
             (_, KeyCode::Char('1')) => {
@@ -321,7 +331,7 @@ impl App {
                         Some(new_token)
                     };
                     self.options.editing_token = false;
-                    
+
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
                         *self.status.write().unwrap() = format!("Failed to save config: {}", e);
@@ -339,9 +349,10 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     // Save the edited directory
-                    self.options.default_directory = self.options_directory_input.value().to_string();
+                    self.options.default_directory =
+                        self.options_directory_input.value().to_string();
                     self.options.editing_directory = false;
-                    
+
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
                         *self.status.write().unwrap() = format!("Failed to save config: {}", e);
@@ -447,14 +458,12 @@ impl App {
 
     /// Navigate to next model in list
     pub fn next(&mut self) {
-        let models_len = futures::executor::block_on(async {
-            self.models.read().unwrap().len()
-        });
-        
+        let models_len = futures::executor::block_on(async { self.models.read().unwrap().len() });
+
         if models_len == 0 {
             return;
         }
-        
+
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i >= models_len - 1 {
@@ -470,14 +479,12 @@ impl App {
 
     /// Navigate to previous model in list
     pub fn previous(&mut self) {
-        let models_len = futures::executor::block_on(async {
-            self.models.read().unwrap().len()
-        });
-        
+        let models_len = futures::executor::block_on(async { self.models.read().unwrap().len() });
+
         if models_len == 0 {
             return;
         }
-        
+
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -498,7 +505,7 @@ impl App {
         if self.focused_pane == pane {
             return;
         }
-        
+
         // Select first item in the target pane if it has items and none selected
         match pane {
             FocusedPane::Models => {
@@ -520,7 +527,9 @@ impl App {
                 if self.quant_file_list_state.selected().is_none() {
                     if let Some(selected_group) = self.quant_list_state.selected() {
                         let quantizations = self.quantizations.read().unwrap();
-                        if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
+                        if selected_group < quantizations.len()
+                            && !quantizations[selected_group].files.is_empty()
+                        {
                             self.quant_file_list_state.select(Some(0));
                         }
                     }
@@ -532,7 +541,11 @@ impl App {
             FocusedPane::FileTree => {
                 // File tree - select first if available and none selected
                 if self.file_tree_state.selected().is_none() {
-                    let tree_has_items = self.file_tree.read().unwrap().as_ref()
+                    let tree_has_items = self
+                        .file_tree
+                        .read()
+                        .unwrap()
+                        .as_ref()
                         .map(|t| !t.children.is_empty())
                         .unwrap_or(false);
                     if tree_has_items {
@@ -541,7 +554,7 @@ impl App {
                 }
             }
         }
-        
+
         self.focused_pane = pane;
     }
 
@@ -568,7 +581,7 @@ impl App {
                 }
             }
         };
-        
+
         self.focus_pane(next_pane);
     }
 
@@ -581,7 +594,9 @@ impl App {
                     let quantizations = futures::executor::block_on(async {
                         self.quantizations.read().unwrap().clone()
                     });
-                    if selected_group < quantizations.len() && !quantizations[selected_group].files.is_empty() {
+                    if selected_group < quantizations.len()
+                        && !quantizations[selected_group].files.is_empty()
+                    {
                         self.quant_file_list_state.select(Some(0));
                     }
                     self.focused_pane = FocusedPane::QuantizationFiles;
@@ -596,14 +611,13 @@ impl App {
 
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
-        let quants_len = futures::executor::block_on(async {
-            self.quantizations.read().unwrap().len()
-        });
-        
+        let quants_len =
+            futures::executor::block_on(async { self.quantizations.read().unwrap().len() });
+
         if quants_len == 0 {
             return;
         }
-        
+
         let i = match self.quant_list_state.selected() {
             Some(i) => {
                 if i >= quants_len - 1 {
@@ -619,14 +633,13 @@ impl App {
 
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
-        let quants_len = futures::executor::block_on(async {
-            self.quantizations.read().unwrap().len()
-        });
-        
+        let quants_len =
+            futures::executor::block_on(async { self.quantizations.read().unwrap().len() });
+
         if quants_len == 0 {
             return;
         }
-        
+
         let i = match self.quant_list_state.selected() {
             Some(i) => {
                 if i == 0 {
@@ -643,17 +656,16 @@ impl App {
     /// Navigate to next file in quantization files list
     pub fn next_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
-            let quantizations = futures::executor::block_on(async {
-                self.quantizations.read().unwrap().clone()
-            });
-            
+            let quantizations =
+                futures::executor::block_on(async { self.quantizations.read().unwrap().clone() });
+
             if selected_group < quantizations.len() {
                 let files_len = quantizations[selected_group].files.len();
-                
+
                 if files_len == 0 {
                     return;
                 }
-                
+
                 let i = match self.quant_file_list_state.selected() {
                     Some(i) => {
                         if i >= files_len - 1 {
@@ -672,17 +684,16 @@ impl App {
     /// Navigate to previous file in quantization files list
     pub fn previous_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
-            let quantizations = futures::executor::block_on(async {
-                self.quantizations.read().unwrap().clone()
-            });
-            
+            let quantizations =
+                futures::executor::block_on(async { self.quantizations.read().unwrap().clone() });
+
             if selected_group < quantizations.len() {
                 let files_len = quantizations[selected_group].files.len();
-                
+
                 if files_len == 0 {
                     return;
                 }
-                
+
                 let i = match self.quant_file_list_state.selected() {
                     Some(i) => {
                         if i == 0 {
@@ -713,15 +724,22 @@ impl App {
                 } else {
                     // Toggle direction with -
                     self.sort_direction = match self.sort_direction {
-                        crate::models::SortDirection::Ascending => crate::models::SortDirection::Descending,
-                        crate::models::SortDirection::Descending => crate::models::SortDirection::Ascending,
+                        crate::models::SortDirection::Ascending => {
+                            crate::models::SortDirection::Descending
+                        }
+                        crate::models::SortDirection::Descending => {
+                            crate::models::SortDirection::Ascending
+                        }
                     };
                 }
             }
             1 => {
                 // Min downloads: 0, 100, 1k, 10k, 100k, 1M
                 let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
-                let current_idx = steps.iter().position(|&x| x == self.filter_min_downloads).unwrap_or(0);
+                let current_idx = steps
+                    .iter()
+                    .position(|&x| x == self.filter_min_downloads)
+                    .unwrap_or(0);
                 let new_idx = if delta > 0 {
                     (current_idx + 1).min(steps.len() - 1)
                 } else {
@@ -732,7 +750,10 @@ impl App {
             2 => {
                 // Min likes: 0, 10, 50, 100, 500, 1k, 5k
                 let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
-                let current_idx = steps.iter().position(|&x| x == self.filter_min_likes).unwrap_or(0);
+                let current_idx = steps
+                    .iter()
+                    .position(|&x| x == self.filter_min_likes)
+                    .unwrap_or(0);
                 let new_idx = if delta > 0 {
                     (current_idx + 1).min(steps.len() - 1)
                 } else {
@@ -742,7 +763,7 @@ impl App {
             }
             _ => {}
         }
-        
+
         // Re-fetch with new filters
         self.clear_search_results();
         self.needs_search_models = true;
@@ -752,32 +773,29 @@ impl App {
     /// Returns true if the preset settings differ from current settings
     fn would_change_settings(&self, preset: crate::models::FilterPreset) -> bool {
         use crate::models::FilterPreset;
-        
-        let (target_sort_field, target_sort_direction, target_min_downloads, target_min_likes) = match preset {
-            FilterPreset::NoFilters => {
-                (SortField::Downloads, SortDirection::Descending, 0, 0)
-            }
-            FilterPreset::Popular => {
-                (SortField::Downloads, SortDirection::Descending, 10_000, 100)
-            }
-            FilterPreset::HighlyRated => {
-                (SortField::Likes, SortDirection::Descending, 0, 1_000)
-            }
-            FilterPreset::Recent => {
-                (SortField::Modified, SortDirection::Descending, 0, 0)
-            }
-        };
-        
-        self.sort_field != target_sort_field ||
-        self.sort_direction != target_sort_direction ||
-        self.filter_min_downloads != target_min_downloads ||
-        self.filter_min_likes != target_min_likes
+
+        let (target_sort_field, target_sort_direction, target_min_downloads, target_min_likes) =
+            match preset {
+                FilterPreset::NoFilters => (SortField::Downloads, SortDirection::Descending, 0, 0),
+                FilterPreset::Popular => {
+                    (SortField::Downloads, SortDirection::Descending, 10_000, 100)
+                }
+                FilterPreset::HighlyRated => {
+                    (SortField::Likes, SortDirection::Descending, 0, 1_000)
+                }
+                FilterPreset::Recent => (SortField::Modified, SortDirection::Descending, 0, 0),
+            };
+
+        self.sort_field != target_sort_field
+            || self.sort_direction != target_sort_direction
+            || self.filter_min_downloads != target_min_downloads
+            || self.filter_min_likes != target_min_likes
     }
 
     /// Apply a filter preset
     pub fn apply_filter_preset(&mut self, preset: crate::models::FilterPreset) {
         use crate::models::FilterPreset;
-        
+
         match preset {
             FilterPreset::NoFilters => {
                 // Default: downloads descending, no filters
@@ -793,7 +811,8 @@ impl App {
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 10_000;
                 self.filter_min_likes = 100;
-                *self.status.write().unwrap() = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
+                *self.status.write().unwrap() =
+                    "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
             }
             FilterPreset::HighlyRated => {
                 // Highly rated: 1k+ likes, sorted by likes
@@ -812,7 +831,7 @@ impl App {
                 *self.status.write().unwrap() = "Preset: Recent".to_string();
             }
         }
-        
+
         // Apply preset by re-searching
         self.clear_search_results();
         self.needs_search_models = true;
@@ -824,7 +843,7 @@ impl App {
         self.options.default_sort_direction = self.sort_direction;
         self.options.default_min_downloads = self.filter_min_downloads;
         self.options.default_min_likes = self.filter_min_likes;
-        
+
         if let Err(e) = crate::config::save_config(&self.options) {
             *self.status.write().unwrap() = format!("Failed to save filter settings: {}", e);
         } else {
@@ -837,81 +856,92 @@ impl App {
         match self.options.selected_field {
             0 => {} // default_directory - use Enter to edit
             1 => {} // hf_token - use Enter to edit
-            2 => { // concurrent_threads (1-32)
-                let new = (self.options.concurrent_threads as i32 + delta)
-                    .clamp(1, 32) as usize;
+            2 => {
+                // concurrent_threads (1-32)
+                let new = (self.options.concurrent_threads as i32 + delta).clamp(1, 32) as usize;
                 self.options.concurrent_threads = new;
             }
-            3 => { // num_chunks (10-100)
-                let new = (self.options.num_chunks as i32 + delta)
-                    .clamp(10, 100) as usize;
+            3 => {
+                // num_chunks (10-100)
+                let new = (self.options.num_chunks as i32 + delta).clamp(10, 100) as usize;
                 self.options.num_chunks = new;
             }
-            4 => { // min_chunk_size (1MB-50MB)
+            4 => {
+                // min_chunk_size (1MB-50MB)
                 let step = 1024 * 1024; // 1MB
                 let new = (self.options.min_chunk_size as i64 + delta as i64 * step)
                     .clamp(1024 * 1024, 50 * 1024 * 1024) as u64;
                 self.options.min_chunk_size = new;
             }
-            5 => { // max_chunk_size (10MB-500MB)
+            5 => {
+                // max_chunk_size (10MB-500MB)
                 let step = 10 * 1024 * 1024; // 10MB
                 let new = (self.options.max_chunk_size as i64 + delta as i64 * step)
                     .clamp(10 * 1024 * 1024, 500 * 1024 * 1024) as u64;
                 self.options.max_chunk_size = new;
             }
-            6 => { // max_retries (0-10, step 1)
-                let new = (self.options.max_retries as i32 + delta)
-                    .clamp(0, 10) as u32;
+            6 => {
+                // max_retries (0-10, step 1)
+                let new = (self.options.max_retries as i32 + delta).clamp(0, 10) as u32;
                 self.options.max_retries = new;
             }
-            7 => { // download_timeout_secs (60-600, step 30)
+            7 => {
+                // download_timeout_secs (60-600, step 30)
                 let new = (self.options.download_timeout_secs as i64 + delta as i64 * 30)
                     .clamp(60, 600) as u64;
                 self.options.download_timeout_secs = new;
             }
-            8 => { // retry_delay_secs (1-10, step 1)
-                let new = (self.options.retry_delay_secs as i64 + delta as i64)
-                    .clamp(1, 10) as u64;
+            8 => {
+                // retry_delay_secs (1-10, step 1)
+                let new = (self.options.retry_delay_secs as i64 + delta as i64).clamp(1, 10) as u64;
                 self.options.retry_delay_secs = new;
             }
-            9 => { // progress_update_interval_ms (100-1000, step 50)
+            9 => {
+                // progress_update_interval_ms (100-1000, step 50)
                 let new = (self.options.progress_update_interval_ms as i64 + delta as i64 * 50)
                     .clamp(100, 1000) as u64;
                 self.options.progress_update_interval_ms = new;
             }
-            10 => { // download_rate_limit_enabled - toggle with +/-
-                self.options.download_rate_limit_enabled = !self.options.download_rate_limit_enabled;
+            10 => {
+                // download_rate_limit_enabled - toggle with +/-
+                self.options.download_rate_limit_enabled =
+                    !self.options.download_rate_limit_enabled;
             }
-            11 => { // download_rate_limit_mbps (0.1-1000.0, step 0.5)
-                let new = (self.options.download_rate_limit_mbps + delta as f64 * 0.5)
-                    .clamp(0.1, 1000.0);
+            11 => {
+                // download_rate_limit_mbps (0.1-1000.0, step 0.5)
+                let new =
+                    (self.options.download_rate_limit_mbps + delta as f64 * 0.5).clamp(0.1, 1000.0);
                 self.options.download_rate_limit_mbps = new;
             }
-            12 => { // verification_on_completion - toggle with +/-
+            12 => {
+                // verification_on_completion - toggle with +/-
                 self.options.verification_on_completion = !self.options.verification_on_completion;
             }
-            13 => { // concurrent_verifications (1-8, step 1)
-                let new = (self.options.concurrent_verifications as i32 + delta)
-                    .clamp(1, 8) as usize;
+            13 => {
+                // concurrent_verifications (1-8, step 1)
+                let new =
+                    (self.options.concurrent_verifications as i32 + delta).clamp(1, 8) as usize;
                 self.options.concurrent_verifications = new;
             }
-            14 => { // verification_buffer_size (64KB-512KB, step 64KB)
+            14 => {
+                // verification_buffer_size (64KB-512KB, step 64KB)
                 let step = 64 * 1024;
                 let new = (self.options.verification_buffer_size as i64 + delta as i64 * step)
                     .clamp(64 * 1024, 512 * 1024) as usize;
                 self.options.verification_buffer_size = new;
             }
-            15 => { // verification_update_interval (50-500, step 50)
+            15 => {
+                // verification_update_interval (50-500, step 50)
                 let new = (self.options.verification_update_interval as i32 + delta * 50)
                     .clamp(50, 500) as usize;
                 self.options.verification_update_interval = new;
             }
             _ => {}
         }
-        
+
         // Sync changes to global config immediately
         self.sync_options_to_config();
-        
+
         // Save to disk
         if let Err(e) = crate::config::save_config(&self.options) {
             *self.status.write().unwrap() = format!("Failed to save config: {}", e);
@@ -920,18 +950,16 @@ impl App {
 
     /// Navigate to next item in file tree
     pub fn next_file_tree_item(&mut self) {
-        let tree = futures::executor::block_on(async {
-            self.file_tree.read().unwrap().clone()
-        });
-        
+        let tree = futures::executor::block_on(async { self.file_tree.read().unwrap().clone() });
+
         if let Some(tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
             let items_len = flat.len();
-            
+
             if items_len == 0 {
                 return;
             }
-            
+
             let i = match self.file_tree_state.selected() {
                 Some(i) => {
                     if i >= items_len - 1 {
@@ -948,18 +976,16 @@ impl App {
 
     /// Navigate to previous item in file tree
     pub fn previous_file_tree_item(&mut self) {
-        let tree = futures::executor::block_on(async {
-            self.file_tree.read().unwrap().clone()
-        });
-        
+        let tree = futures::executor::block_on(async { self.file_tree.read().unwrap().clone() });
+
         if let Some(tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
             let items_len = flat.len();
-            
+
             if items_len == 0 {
                 return;
             }
-            
+
             let i = match self.file_tree_state.selected() {
                 Some(i) => {
                     if i == 0 {
@@ -980,20 +1006,19 @@ impl App {
             Some(idx) => idx,
             None => return,
         };
-        
-        let mut tree = futures::executor::block_on(async {
-            self.file_tree.read().unwrap().clone()
-        });
-        
+
+        let mut tree =
+            futures::executor::block_on(async { self.file_tree.read().unwrap().clone() });
+
         if let Some(ref mut tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(tree);
-            
+
             if selected_idx < flat.len() {
                 let selected_path = flat[selected_idx].path.clone();
-                
+
                 // Find and toggle the node
                 toggle_node_expansion(tree, &selected_path);
-                
+
                 // Update the tree
                 futures::executor::block_on(async {
                     *self.file_tree.write().unwrap() = Some(tree.clone());
@@ -1012,7 +1037,7 @@ fn toggle_node_expansion(node: &mut crate::models::FileTreeNode, target_path: &s
             }
             return true;
         }
-        
+
         if child.is_dir && toggle_node_expansion(child, target_path) {
             return true;
         }

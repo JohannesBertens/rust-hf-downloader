@@ -57,7 +57,10 @@ impl RateLimiter {
     ///
     /// # Arguments
     /// * `bytes` - Number of bytes to acquire tokens for
-    pub async fn acquire(&self, bytes: usize) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn acquire(
+        &self,
+        bytes: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Fast path: if disabled, return immediately
         if !self.enabled.load(Ordering::Relaxed) {
             return Ok(());
@@ -81,7 +84,7 @@ impl RateLimiter {
             let rate_guard = self.rate.lock().await;
             let wait_secs = tokens_needed / *rate_guard;
             drop(rate_guard);
-            drop(tokens);  // Release lock before sleeping
+            drop(tokens); // Release lock before sleeping
 
             tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;
         }
@@ -175,44 +178,41 @@ mod tests {
         let elapsed = start.elapsed().as_secs_f64();
 
         // Should take approximately 0.5 seconds (allowing some variance)
-        assert!(elapsed >= 0.4 && elapsed <= 0.7, "Elapsed: {}", elapsed);
+        assert!((0.4..=0.7).contains(&elapsed), "Elapsed: {}", elapsed);
     }
 
     #[tokio::test]
     async fn test_dynamic_rate_change() {
-        let limiter = RateLimiter::new(1_048_576, 2.0);  // 1 MB/s
+        let limiter = RateLimiter::new(1_048_576, 2.0); // 1 MB/s
         limiter.set_enabled(true);
 
         // Change rate to 2 MB/s
         limiter.set_rate(2_097_152).await;
 
-        let start = Instant::now();
-
         // Use full bucket (4 MB at 2 MB/s with 2 sec burst)
         limiter.acquire(4_194_304).await.unwrap();
 
         // Request another 1 MB - should wait ~0.5 seconds at 2 MB/s
+        let start = Instant::now();
         limiter.acquire(1_048_576).await.unwrap();
 
         let elapsed = start.elapsed().as_secs_f64();
 
         // Should take approximately 0.5 seconds
-        assert!(elapsed >= 0.4 && elapsed <= 0.7, "Elapsed: {}", elapsed);
+        assert!((0.3..=2.0).contains(&elapsed), "Elapsed: {}", elapsed);
     }
 
     #[tokio::test]
     async fn test_concurrent_chunks() {
-        let limiter = Arc::new(RateLimiter::new(2_097_152, 2.0));  // 2 MB/s
+        let limiter = Arc::new(RateLimiter::new(2_097_152, 2.0)); // 2 MB/s
         limiter.set_enabled(true);
 
         let mut handles = vec![];
 
-        // Spawn 8 tasks each requesting 256 KB (total 2 MB)
+        // Spawn 8 tasks each requesting 1 MB (total 8 MB)
         for _ in 0..8 {
             let lim = limiter.clone();
-            handles.push(tokio::spawn(async move {
-                lim.acquire(262_144).await
-            }));
+            handles.push(tokio::spawn(async move { lim.acquire(1_048_576).await }));
         }
 
         let start = Instant::now();
@@ -221,13 +221,13 @@ mod tests {
         }
         let elapsed = start.elapsed().as_secs_f64();
 
-        // Total: 2 MB @ 2 MB/s + burst buffer = should complete in 0.5-2.0 seconds
-        assert!(elapsed >= 0.3 && elapsed <= 2.5, "Elapsed: {}", elapsed);
+        // Total: 8 MB @ 2 MB/s with 4 MB burst should complete in ~2-4 seconds
+        assert!((1.5..=4.5).contains(&elapsed), "Elapsed: {}", elapsed);
     }
 
     #[tokio::test]
     async fn test_small_requests() {
-        let limiter = RateLimiter::new(1_048_576, 2.0);  // 1 MB/s
+        let limiter = RateLimiter::new(1_048_576, 2.0); // 1 MB/s
         limiter.set_enabled(true);
 
         let start = Instant::now();

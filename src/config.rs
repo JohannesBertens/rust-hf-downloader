@@ -20,23 +20,27 @@ fn ensure_config_dir() -> Result<(), std::io::Error> {
 /// Load configuration from disk, or return defaults if not found
 pub fn load_config() -> AppOptions {
     let path = get_config_path();
-    
+
     if !path.exists() {
         return AppOptions::default();
     }
-    
+
     match fs::read_to_string(&path) {
-        Ok(contents) => {
-            match toml::from_str::<AppOptions>(&contents) {
-                Ok(options) => options,
-                Err(e) => {
-                    eprintln!("Warning: Failed to parse config file: {}. Using defaults.", e);
-                    AppOptions::default()
-                }
+        Ok(contents) => match toml::from_str::<AppOptions>(&contents) {
+            Ok(options) => options,
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to parse config file: {}. Using defaults.",
+                    e
+                );
+                AppOptions::default()
             }
-        }
+        },
         Err(e) => {
-            eprintln!("Warning: Failed to read config file: {}. Using defaults.", e);
+            eprintln!(
+                "Warning: Failed to read config file: {}. Using defaults.",
+                e
+            );
             AppOptions::default()
         }
     }
@@ -45,10 +49,10 @@ pub fn load_config() -> AppOptions {
 /// Save configuration to disk
 pub fn save_config(options: &AppOptions) -> Result<(), Box<dyn std::error::Error>> {
     ensure_config_dir()?;
-    
+
     let toml_string = toml::to_string_pretty(options)?;
     fs::write(get_config_path(), toml_string)?;
-    
+
     Ok(())
 }
 

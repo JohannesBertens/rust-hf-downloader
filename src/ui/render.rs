@@ -1,11 +1,14 @@
-use crate::models::{FocusedPane, InputMode, ModelInfo, QuantizationInfo, QuantizationGroup, DownloadProgress, VerificationProgress, ModelDisplayMode, ModelMetadata, FileTreeNode};
+use crate::models::{
+    DownloadProgress, FileTreeNode, FocusedPane, InputMode, ModelDisplayMode, ModelInfo,
+    ModelMetadata, QuantizationGroup, QuantizationInfo, VerificationProgress,
+};
 use crate::utils::{format_number, format_size};
 use ratatui::{
-    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, Gauge, Clear},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    Frame,
 };
 use std::collections::HashMap;
 use tui_input::Input;
@@ -73,18 +76,18 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         hovered_panel,
         filter_areas,
     } = params;
-    
+
     // Clear previous panel and filter areas
     panel_areas.clear();
     filter_areas.clear();
-    
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),   // Filter toolbar
-            Constraint::Min(10),     // Main content (models list)
-            Constraint::Length(12),  // Bottom panels
-            Constraint::Length(4),   // Status bar
+            Constraint::Length(3),  // Filter toolbar
+            Constraint::Min(10),    // Main content (models list)
+            Constraint::Length(12), // Bottom panels
+            Constraint::Length(4),  // Status bar
         ])
         .split(frame.area());
 
@@ -117,16 +120,27 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         .enumerate()
         .map(|(idx, model)| {
             // Extract author from model.id if not provided (e.g., "unsloth/model" -> "unsloth")
-            let author = model.author.as_deref()
+            let author = model
+                .author
+                .as_deref()
                 .or_else(|| model.id.split('/').next())
                 .unwrap_or("unknown");
             let downloads = format_number(model.downloads);
             let likes = format_number(model.likes);
-            
+
             let tags_str = if model.tags.is_empty() {
                 String::new()
             } else {
-                format!(" [{}]", model.tags.iter().take(3).cloned().collect::<Vec<_>>().join(", "))
+                format!(
+                    " [{}]",
+                    model
+                        .tags
+                        .iter()
+                        .take(3)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
             };
 
             let last_modified_str = if let Some(ref modified) = model.last_modified {
@@ -152,7 +166,9 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
                 ),
                 Span::styled(
                     &model.id,
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" by "),
                 Span::styled(author, Style::default().fg(Color::Green)),
@@ -196,38 +212,43 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
     // Split bottom panel into left and right sections
     let bottom_panel_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[2]);
 
     // Render based on display mode
     match display_mode {
         ModelDisplayMode::Gguf => {
-            render_gguf_panels(frame, bottom_panel_chunks, GgufPanelContext {
-                quantizations,
-                quant_list_state,
-                quant_file_list_state,
-                loading_quants,
-                input_mode,
-                focused_pane,
-                complete_downloads,
-                hovered_panel,
-                panel_areas,
-            });
+            render_gguf_panels(
+                frame,
+                bottom_panel_chunks,
+                GgufPanelContext {
+                    quantizations,
+                    quant_list_state,
+                    quant_file_list_state,
+                    loading_quants,
+                    input_mode,
+                    focused_pane,
+                    complete_downloads,
+                    hovered_panel,
+                    panel_areas,
+                },
+            );
         }
         ModelDisplayMode::Standard => {
-            render_standard_panels(frame, bottom_panel_chunks, StandardPanelContext {
-                model_metadata,
-                file_tree,
-                file_tree_state,
-                loading: loading_quants,
-                input_mode,
-                focused_pane,
-                hovered_panel,
-                panel_areas,
-            });
+            render_standard_panels(
+                frame,
+                bottom_panel_chunks,
+                StandardPanelContext {
+                    model_metadata,
+                    file_tree,
+                    file_tree_state,
+                    loading: loading_quants,
+                    input_mode,
+                    focused_pane,
+                    hovered_panel,
+                    panel_areas,
+                },
+            );
         }
     }
 
@@ -247,25 +268,25 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
     } else {
         String::new()
     };
-    
+
     // Check if any filters are non-default
-    let has_filters = filter_min_downloads > 0 
-        || filter_min_likes > 0 
-        || sort_field != crate::models::SortField::Downloads 
+    let has_filters = filter_min_downloads > 0
+        || filter_min_likes > 0
+        || sort_field != crate::models::SortField::Downloads
         || sort_direction != crate::models::SortDirection::Descending;
-    
+
     let base_line2 = if let Some(err) = error {
         format!("Error: {}", err)
     } else {
         status.to_string()
     };
-    
+
     let line2 = if has_filters {
         format!("{} [Filters Active]", base_line2)
     } else {
         base_line2
     };
-    
+
     let status_text = if !line1.is_empty() {
         format!("{}\n{}", line1, line2)
     } else {
@@ -310,7 +331,7 @@ fn render_standard_panels(
         hovered_panel,
         panel_areas,
     } = ctx;
-    
+
     // Helper to determine border style based on focus and hover state
     let get_border_style = |pane: FocusedPane| -> Style {
         if input_mode == InputMode::Normal && focused_pane == pane {
@@ -331,12 +352,10 @@ fn render_standard_panels(
     };
 
     let metadata_content = if let Some(metadata) = model_metadata {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("ID: ", Style::default().fg(Color::Yellow)),
-                Span::raw(&metadata.model_id),
-            ]),
-        ];
+        let mut lines = vec![Line::from(vec![
+            Span::styled("ID: ", Style::default().fg(Color::Yellow)),
+            Span::raw(&metadata.model_id),
+        ])];
 
         if let Some(ref lib) = metadata.library_name {
             lines.push(Line::from(vec![
@@ -382,10 +401,17 @@ fn render_standard_panels(
 
         if !metadata.tags.is_empty() {
             lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("Tags:", Style::default().fg(Color::Yellow)),
-            ]));
-            let tags_str = metadata.tags.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+            lines.push(Line::from(vec![Span::styled(
+                "Tags:",
+                Style::default().fg(Color::Yellow),
+            )]));
+            let tags_str = metadata
+                .tags
+                .iter()
+                .take(8)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
             lines.push(Line::from(Span::raw(tags_str)));
         }
 
@@ -408,9 +434,19 @@ fn render_standard_panels(
     frame.render_widget(metadata_widget, chunks[0]);
 
     // Right side: File tree
-    render_file_tree_panel(frame, chunks[1], file_tree, file_tree_state, input_mode, focused_pane, hovered_panel, panel_areas);
+    render_file_tree_panel(
+        frame,
+        chunks[1],
+        file_tree,
+        file_tree_state,
+        input_mode,
+        focused_pane,
+        hovered_panel,
+        panel_areas,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_file_tree_panel(
     frame: &mut Frame,
     area: Rect,
@@ -443,7 +479,11 @@ fn render_file_tree_panel(
             .map(|node| {
                 let indent = "  ".repeat(node.depth);
                 let icon = if node.is_dir {
-                    if node.expanded { "▾ " } else { "▸ " }
+                    if node.expanded {
+                        "▾ "
+                    } else {
+                        "▸ "
+                    }
                 } else {
                     "  "
                 };
@@ -457,12 +497,17 @@ fn render_file_tree_panel(
                     // Directory: show name, size, and file count
                     spans.push(Span::styled(
                         format!("{}/", node.name),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     ));
-                    
-                    let size_str = node.size.map(format_size).unwrap_or_else(|| String::from("-"));
+
+                    let size_str = node
+                        .size
+                        .map(format_size)
+                        .unwrap_or_else(|| String::from("-"));
                     let file_count = count_files(&node);
-                    
+
                     spans.push(Span::raw(format!("  {}", size_str)));
                     spans.push(Span::styled(
                         format!(" ({} files)", file_count),
@@ -470,7 +515,10 @@ fn render_file_tree_panel(
                     ));
                 } else {
                     // File: show name and size
-                    let size_str = node.size.map(format_size).unwrap_or_else(|| String::from("-"));
+                    let size_str = node
+                        .size
+                        .map(format_size)
+                        .unwrap_or_else(|| String::from("-"));
                     spans.push(Span::raw(node.name.clone()));
                     spans.push(Span::raw(format!("  {}", size_str)));
                 }
@@ -543,11 +591,7 @@ struct GgufPanelContext<'a> {
     panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
 }
 
-fn render_gguf_panels(
-    frame: &mut Frame,
-    chunks: std::rc::Rc<[Rect]>,
-    ctx: GgufPanelContext,
-) {
+fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufPanelContext) {
     let GgufPanelContext {
         quantizations,
         quant_list_state,
@@ -559,7 +603,7 @@ fn render_gguf_panels(
         hovered_panel,
         panel_areas,
     } = ctx;
-    
+
     // Helper to determine border style based on focus and hover state
     let get_border_style = |pane: FocusedPane| -> Style {
         if input_mode == InputMode::Normal && focused_pane == pane {
@@ -584,26 +628,34 @@ fn render_gguf_panels(
         .map(|group| {
             let size_str = format_size(group.total_size);
             let is_downloaded = complete_downloads.contains_key(&group.files[0].filename);
-            
+
             let mut spans = vec![
                 Span::raw(format!("{:>10}  ", size_str)),
                 Span::styled(
                     format!("{:<14} ", group.quant_type),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ];
-            
+
             if is_downloaded {
-                spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
+                spans.push(Span::styled(
+                    " [downloaded]",
+                    Style::default().fg(Color::Green),
+                ));
             } else {
                 let file_count = if group.files.len() > 1 {
                     format!(" ({} files)", group.files.len())
                 } else {
                     String::new()
                 };
-                spans.push(Span::styled(file_count, Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    file_count,
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
-            
+
             let content = Line::from(spans);
             ListItem::new(content)
         })
@@ -650,18 +702,25 @@ fn render_gguf_panels(
         .map(|file| {
             let size_str = format_size(file.size);
             let is_downloaded = complete_downloads.contains_key(&file.filename);
-            
-            let mut spans = vec![
-                Span::raw(format!("{:>10}  ", size_str)),
-            ];
-            
+
+            let mut spans = vec![Span::raw(format!("{:>10}  ", size_str))];
+
             if is_downloaded {
-                spans.push(Span::styled(&file.filename, Style::default().fg(Color::Green)));
-                spans.push(Span::styled(" [downloaded]", Style::default().fg(Color::Green)));
+                spans.push(Span::styled(
+                    &file.filename,
+                    Style::default().fg(Color::Green),
+                ));
+                spans.push(Span::styled(
+                    " [downloaded]",
+                    Style::default().fg(Color::Green),
+                ));
             } else {
-                spans.push(Span::styled(&file.filename, Style::default().fg(Color::White)));
+                spans.push(Span::styled(
+                    &file.filename,
+                    Style::default().fg(Color::White),
+                ));
             }
-            
+
             let content = Line::from(spans);
             ListItem::new(content)
         })
@@ -753,10 +812,8 @@ fn render_download_progress(
     queue_bytes: u64,
 ) {
     // Filter active chunks
-    let active_chunks: Vec<_> = progress.chunks.iter()
-        .filter(|c| c.is_active)
-        .collect();
-    
+    let active_chunks: Vec<_> = progress.chunks.iter().filter(|c| c.is_active).collect();
+
     // Calculate height
     let num_active = active_chunks.len();
     let total_height = if num_active > 0 {
@@ -764,7 +821,7 @@ fn render_download_progress(
     } else {
         3
     };
-    
+
     // Position: top-right
     let progress_area = Rect {
         x: frame.area().width.saturating_sub(52),
@@ -772,9 +829,9 @@ fn render_download_progress(
         width: 52.min(frame.area().width),
         height: total_height.min(frame.area().height),
     };
-    
+
     frame.render_widget(Clear, progress_area);
-    
+
     let percentage = if progress.total > 0 {
         (progress.downloaded as f64 / progress.total as f64 * 100.0) as u16
     } else {
@@ -793,11 +850,17 @@ fn render_download_progress(
     let title = match (queue_size > 0, !remaining_str.is_empty(), eta_str) {
         // Queue + Size + ETA
         (true, true, Some(eta)) => {
-            format!("Downloading ({} queued) {} remaining, ~{}", queue_size, remaining_str, eta)
+            format!(
+                "Downloading ({} queued) {} remaining, ~{}",
+                queue_size, remaining_str, eta
+            )
         }
         // Queue + Size, no ETA (speed = 0)
         (true, true, None) => {
-            format!("Downloading ({} queued) {} remaining", queue_size, remaining_str)
+            format!(
+                "Downloading ({} queued) {} remaining",
+                queue_size, remaining_str
+            )
         }
         // Queue only
         (true, false, _) => {
@@ -812,26 +875,31 @@ fn render_download_progress(
             format!("Downloading {} remaining", remaining_str)
         }
         // Base case
-        _ => {
-            "Downloading".to_string()
-        }
+        _ => "Downloading".to_string(),
     };
-    
+
     // Label with speed and rate limit indicator
     let label = if progress.speed_mbps > 0.0 {
         use std::sync::atomic::Ordering;
-        let rate_limited = crate::download::DOWNLOAD_CONFIG.rate_limit_enabled.load(Ordering::Relaxed);
+        let rate_limited = crate::download::DOWNLOAD_CONFIG
+            .rate_limit_enabled
+            .load(Ordering::Relaxed);
         if rate_limited {
-            let limit_bytes = crate::download::DOWNLOAD_CONFIG.rate_limit_bytes_per_sec.load(Ordering::Relaxed);
+            let limit_bytes = crate::download::DOWNLOAD_CONFIG
+                .rate_limit_bytes_per_sec
+                .load(Ordering::Relaxed);
             let limit_mbps = limit_bytes as f64 / 1_048_576.0;
-            format!("{}% - {:.1}/{:.1} MB/s", percentage, progress.speed_mbps, limit_mbps)
+            format!(
+                "{}% - {:.1}/{:.1} MB/s",
+                percentage, progress.speed_mbps, limit_mbps
+            )
         } else {
             format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
         }
     } else {
         format!("{}%", percentage)
     };
-    
+
     // Overall progress gauge
     let overall_area = Rect {
         x: progress_area.x,
@@ -839,15 +907,15 @@ fn render_download_progress(
         width: progress_area.width,
         height: 3,
     };
-    
+
     let gauge = Gauge::default()
         .block(Block::default().borders(Borders::ALL).title(title))
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
         .percent(percentage)
         .label(label);
-    
+
     frame.render_widget(gauge, overall_area);
-    
+
     // Render active chunk progress
     if !active_chunks.is_empty() {
         let chunks_area = Rect {
@@ -856,14 +924,14 @@ fn render_download_progress(
             width: progress_area.width,
             height: num_active as u16 + 2,
         };
-        
+
         let chunks_block = Block::default()
             .borders(Borders::ALL)
             .title("Active Chunks");
-        
+
         let inner_area = chunks_block.inner(chunks_area);
         frame.render_widget(chunks_block, chunks_area);
-        
+
         for (y_offset, chunk) in active_chunks.into_iter().enumerate() {
             let chunk_area = Rect {
                 x: inner_area.x,
@@ -871,17 +939,17 @@ fn render_download_progress(
                 width: inner_area.width,
                 height: 1,
             };
-            
+
             let chunk_pct = if chunk.total > 0 {
                 (chunk.downloaded as f64 / chunk.total as f64 * 100.0) as u16
             } else {
                 0
             };
-            
+
             let bar_width = chunk_area.width.saturating_sub(20) as usize;
             let filled = (bar_width as f64 * chunk_pct as f64 / 100.0) as usize;
             let empty = bar_width.saturating_sub(filled);
-            
+
             let bar = format!(
                 "#{:<2}[{}{}] {:>6.2} MB/s",
                 chunk.chunk_id + 1,
@@ -889,10 +957,9 @@ fn render_download_progress(
                 " ".repeat(empty),
                 chunk.speed_mbps
             );
-            
-            let chunk_widget = Paragraph::new(bar)
-                .style(Style::default().fg(Color::Yellow));
-            
+
+            let chunk_widget = Paragraph::new(bar).style(Style::default().fg(Color::Yellow));
+
             frame.render_widget(chunk_widget, chunk_area);
         }
     }
@@ -907,36 +974,39 @@ fn render_verification_progress(
     if verifications.is_empty() && queue_size == 0 {
         return;
     }
-    
+
     // Calculate height: each verification gets 3 lines
     let height = 3 + (verifications.len() as u16 * 3);
-    
+
     // Position: bottom-right
     let area = Rect {
         x: frame.area().width.saturating_sub(52),
-        y: frame.area().height.saturating_sub(height.min(frame.area().height)),
+        y: frame
+            .area()
+            .height
+            .saturating_sub(height.min(frame.area().height)),
         width: 52.min(frame.area().width),
         height: height.min(frame.area().height),
     };
-    
+
     frame.render_widget(Clear, area);
-    
+
     // Title with queue info
     let title = if queue_size > 0 {
         format!("Verifying ({} queued)", queue_size)
     } else {
         "Verifying".to_string()
     };
-    
+
     // Main container block
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .border_style(Style::default().fg(Color::Green));
-    
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    
+
     // Render each active verification as a progress bar
     for (i, ver) in verifications.iter().enumerate() {
         let ver_area = Rect {
@@ -945,32 +1015,32 @@ fn render_verification_progress(
             width: inner.width,
             height: 3.min(inner.height.saturating_sub(i as u16 * 3)),
         };
-        
+
         if ver_area.height == 0 {
             break; // No more room
         }
-        
+
         let percentage = if ver.total_bytes > 0 {
             (ver.verified_bytes as f64 / ver.total_bytes as f64 * 100.0) as u16
         } else {
             0
         };
-        
+
         // Truncate filename to fit (show end of filename)
         let display_name = if ver.filename.len() > 35 {
-            format!("...{}", &ver.filename[ver.filename.len()-32..])
+            format!("...{}", &ver.filename[ver.filename.len() - 32..])
         } else {
             ver.filename.clone()
         };
-        
+
         let label = format!("{}%", percentage);
-        
+
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::ALL).title(display_name))
             .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
             .percent(percentage)
             .label(label);
-        
+
         frame.render_widget(gauge, ver_area);
     }
 }
@@ -984,25 +1054,25 @@ pub fn render_resume_popup(
     let popup_height = 10 + incomplete_downloads.len().min(5) as u16;
     let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
     let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-    
+
     let popup_area = Rect {
         x: popup_x,
         y: popup_y,
         width: popup_width,
         height: popup_height,
     };
-    
+
     // Clear the popup area first to remove any underlying content
     frame.render_widget(Clear, popup_area);
-    
+
     // Render popup background
     let popup_block = Block::default()
         .borders(Borders::ALL)
         .title("Resume Incomplete Downloads?")
         .style(Style::default().fg(Color::Yellow).bg(Color::Black));
-    
+
     frame.render_widget(popup_block, popup_area);
-    
+
     // Render message
     let message_area = Rect {
         x: popup_area.x + 2,
@@ -1010,15 +1080,15 @@ pub fn render_resume_popup(
         width: popup_area.width.saturating_sub(4),
         height: 2,
     };
-    
+
     let message = Paragraph::new(format!(
         "Found {} incomplete download(s):\n",
         incomplete_downloads.len()
     ))
     .style(Style::default().fg(Color::White));
-    
+
     frame.render_widget(message, message_area);
-    
+
     // Render list of incomplete files (up to 5)
     let list_area = Rect {
         x: popup_area.x + 2,
@@ -1026,7 +1096,7 @@ pub fn render_resume_popup(
         width: popup_area.width.saturating_sub(4),
         height: incomplete_downloads.len().min(5) as u16,
     };
-    
+
     let file_lines: Vec<Line> = incomplete_downloads
         .iter()
         .take(5)
@@ -1043,12 +1113,11 @@ pub fn render_resume_popup(
             ])
         })
         .collect();
-    
-    let files_widget = Paragraph::new(file_lines)
-        .style(Style::default().fg(Color::White));
-    
+
+    let files_widget = Paragraph::new(file_lines).style(Style::default().fg(Color::White));
+
     frame.render_widget(files_widget, list_area);
-    
+
     // Show "and X more..." if there are more than 5
     if incomplete_downloads.len() > 5 {
         let more_area = Rect {
@@ -1057,13 +1126,14 @@ pub fn render_resume_popup(
             width: popup_area.width.saturating_sub(4),
             height: 1,
         };
-        
-        let more_text = Paragraph::new(format!("  ... and {} more", incomplete_downloads.len() - 5))
-            .style(Style::default().fg(Color::DarkGray));
-        
+
+        let more_text =
+            Paragraph::new(format!("  ... and {} more", incomplete_downloads.len() - 5))
+                .style(Style::default().fg(Color::DarkGray));
+
         frame.render_widget(more_text, more_area);
     }
-    
+
     // Render instructions
     let instructions_area = Rect {
         x: popup_area.x + 2,
@@ -1071,20 +1141,31 @@ pub fn render_resume_popup(
         width: popup_area.width.saturating_sub(4),
         height: 2,
     };
-    
+
     let instructions = Paragraph::new(vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("Y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Y",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" to resume all  |  "),
-            Span::styled("N", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "N",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" to skip  |  "),
-            Span::styled("D", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "D",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" to delete and skip"),
         ]),
     ])
     .style(Style::default().fg(Color::White));
-    
+
     frame.render_widget(instructions, instructions_area);
 }
 
@@ -1094,19 +1175,24 @@ pub fn render_search_popup(frame: &mut Frame, input: &Input) {
     let popup_height = 8;
     let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
     let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-    let area = Rect { x: popup_x, y: popup_y, width: popup_width, height: popup_height };
-    
+    let area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
     // Clear the area
     frame.render_widget(Clear, area);
-    
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Search HuggingFace Models ")
         .style(Style::default().fg(Color::Cyan));
-    
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    
+
     // Input field
     let input_area = Rect {
         x: inner.x + 2,
@@ -1114,24 +1200,20 @@ pub fn render_search_popup(frame: &mut Frame, input: &Input) {
         width: inner.width - 4,
         height: 1,
     };
-    
-    let input_widget = Paragraph::new(input.value())
-        .style(Style::default().fg(Color::Yellow));
+
+    let input_widget = Paragraph::new(input.value()).style(Style::default().fg(Color::Yellow));
     frame.render_widget(input_widget, input_area);
-    
+
     // Show cursor
-    frame.set_cursor_position((
-        input_area.x + input.visual_cursor() as u16,
-        input_area.y,
-    ));
-    
+    frame.set_cursor_position((input_area.x + input.visual_cursor() as u16, input_area.y));
+
     // Help text
     let help = [
         "",
         "Enter search query and press Enter to search",
         "ESC: Cancel",
     ];
-    
+
     for (i, line) in help.iter().enumerate() {
         let area = Rect {
             x: inner.x + 2,
@@ -1139,40 +1221,36 @@ pub fn render_search_popup(frame: &mut Frame, input: &Input) {
             width: inner.width - 4,
             height: 1,
         };
-        let widget = Paragraph::new(*line)
-            .style(Style::default().fg(Color::DarkGray));
+        let widget = Paragraph::new(*line).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(widget, area);
     }
 }
 
-pub fn render_download_path_popup(
-    frame: &mut Frame,
-    download_path_input: &Input,
-) {
+pub fn render_download_path_popup(frame: &mut Frame, download_path_input: &Input) {
     // Calculate centered popup area
     let popup_width = 60.min(frame.area().width.saturating_sub(4));
     let popup_height = 7;
     let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
     let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-    
+
     let popup_area = Rect {
         x: popup_x,
         y: popup_y,
         width: popup_width,
         height: popup_height,
     };
-    
+
     // Clear the popup area first to remove any underlying content
     frame.render_widget(Clear, popup_area);
-    
+
     // Render popup background
     let popup_block = Block::default()
         .borders(Borders::ALL)
         .title("Download Model")
         .style(Style::default().fg(Color::White).bg(Color::Black));
-    
+
     frame.render_widget(popup_block, popup_area);
-    
+
     // Render input label
     let label_area = Rect {
         x: popup_area.x + 2,
@@ -1180,12 +1258,11 @@ pub fn render_download_path_popup(
         width: popup_area.width.saturating_sub(4),
         height: 1,
     };
-    
-    let label = Paragraph::new("Download path:")
-        .style(Style::default().fg(Color::White));
-    
+
+    let label = Paragraph::new("Download path:").style(Style::default().fg(Color::White));
+
     frame.render_widget(label, label_area);
-    
+
     // Render input field
     let input_area = Rect {
         x: popup_area.x + 2,
@@ -1193,22 +1270,22 @@ pub fn render_download_path_popup(
         width: popup_area.width.saturating_sub(4),
         height: 1,
     };
-    
+
     let width = input_area.width.max(3) as usize;
     let scroll = download_path_input.visual_scroll(width);
-    
+
     let input_widget = Paragraph::new(download_path_input.value())
         .style(Style::default().fg(Color::Yellow))
         .scroll((0, scroll as u16));
-    
+
     frame.render_widget(input_widget, input_area);
-    
+
     // Set cursor position
     frame.set_cursor_position((
         input_area.x + ((download_path_input.visual_cursor()).max(scroll) - scroll) as u16,
         input_area.y,
     ));
-    
+
     // Render instructions
     let instructions_area = Rect {
         x: popup_area.x + 2,
@@ -1216,42 +1293,38 @@ pub fn render_download_path_popup(
         width: popup_area.width.saturating_sub(4),
         height: 1,
     };
-    
+
     let instructions = Paragraph::new("Press Enter to confirm, ESC to cancel")
         .style(Style::default().fg(Color::DarkGray));
-    
+
     frame.render_widget(instructions, instructions_area);
 }
 
-pub fn render_auth_error_popup(
-    frame: &mut Frame,
-    model_url: &str,
-    has_token: bool,
-) {
+pub fn render_auth_error_popup(frame: &mut Frame, model_url: &str, has_token: bool) {
     // Calculate centered popup area
     let popup_width = 70.min(frame.area().width.saturating_sub(4));
     let popup_height = if has_token { 13 } else { 17 };
     let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
     let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-    
+
     let popup_area = Rect {
         x: popup_x,
         y: popup_y,
         width: popup_width,
         height: popup_height,
     };
-    
+
     // Clear the popup area first to remove any underlying content
     frame.render_widget(Clear, popup_area);
-    
+
     // Render popup background
     let popup_block = Block::default()
         .borders(Borders::ALL)
         .title("Authentication Required")
         .style(Style::default().fg(Color::Yellow).bg(Color::Black));
-    
+
     frame.render_widget(popup_block, popup_area);
-    
+
     // Render message
     let message_area = Rect {
         x: popup_area.x + 2,
@@ -1259,14 +1332,19 @@ pub fn render_auth_error_popup(
         width: popup_area.width.saturating_sub(4),
         height: popup_area.height.saturating_sub(3),
     };
-    
+
     let mut lines = vec![
         Line::from(Span::styled(
             "This model requires authentication to download.",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from(Span::styled("Steps to access this model:", Style::default().fg(Color::Cyan))),
+        Line::from(Span::styled(
+            "Steps to access this model:",
+            Style::default().fg(Color::Cyan),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("1. ", Style::default().fg(Color::Yellow)),
@@ -1280,7 +1358,7 @@ pub fn render_auth_error_popup(
         ]),
         Line::from(""),
     ];
-    
+
     if has_token {
         lines.push(Line::from(vec![
             Span::styled("3. ", Style::default().fg(Color::Yellow)),
@@ -1293,27 +1371,35 @@ pub fn render_auth_error_popup(
         ]));
         lines.push(Line::from(vec![
             Span::raw("   "),
-            Span::styled("https://huggingface.co/settings/tokens", Style::default().fg(Color::Blue)),
+            Span::styled(
+                "https://huggingface.co/settings/tokens",
+                Style::default().fg(Color::Blue),
+            ),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("4. ", Style::default().fg(Color::Yellow)),
             Span::raw("Press "),
-            Span::styled("'o'", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "'o'",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" and add token in Options"),
         ]));
     }
-    
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Press ESC or Enter to dismiss",
         Style::default().fg(Color::DarkGray),
     )));
-    
+
     let message = Paragraph::new(lines)
         .style(Style::default().fg(Color::White))
         .wrap(Wrap { trim: false });
-    
+
     frame.render_widget(message, message_area);
 }
 
@@ -1331,55 +1417,96 @@ pub fn render_options_popup(
         width: popup_width,
         height: popup_height,
     };
-    
+
     frame.render_widget(Clear, popup_area);
-    
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Options (ESC to close)")
         .border_style(Style::default().fg(Color::Yellow));
-    
+
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
-    
+
     // Render 14 fields with category headers
     let fields = vec![
         // General (indices 0-1)
-        ("Default Directory:", if options.editing_directory { 
-            directory_input.value().to_string() 
-        } else { 
-            options.default_directory.clone() 
-        }),
-        ("HF Token (optional):", if options.editing_token {
-            token_input.value().to_string()
-        } else if let Some(token) = &options.hf_token {
-            if token.is_empty() {
-                "[Not set]".to_string()
+        (
+            "Default Directory:",
+            if options.editing_directory {
+                directory_input.value().to_string()
             } else {
-                "•".repeat(token.len().min(20))
-            }
-        } else {
-            "[Not set]".to_string()
-        }),
+                options.default_directory.clone()
+            },
+        ),
+        (
+            "HF Token (optional):",
+            if options.editing_token {
+                token_input.value().to_string()
+            } else if let Some(token) = &options.hf_token {
+                if token.is_empty() {
+                    "[Not set]".to_string()
+                } else {
+                    "•".repeat(token.len().min(20))
+                }
+            } else {
+                "[Not set]".to_string()
+            },
+        ),
         // Download (indices 2-9)
-        ("Concurrent Threads:", options.concurrent_threads.to_string()),
+        (
+            "Concurrent Threads:",
+            options.concurrent_threads.to_string(),
+        ),
         ("Target Number of Chunks:", options.num_chunks.to_string()),
         ("Min Chunk Size:", format_size(options.min_chunk_size)),
         ("Max Chunk Size:", format_size(options.max_chunk_size)),
         ("Max Retries:", options.max_retries.to_string()),
-        ("Download Timeout (sec):", options.download_timeout_secs.to_string()),
+        (
+            "Download Timeout (sec):",
+            options.download_timeout_secs.to_string(),
+        ),
         ("Retry Delay (sec):", options.retry_delay_secs.to_string()),
-        ("Progress Update Interval (ms):", options.progress_update_interval_ms.to_string()),
+        (
+            "Progress Update Interval (ms):",
+            options.progress_update_interval_ms.to_string(),
+        ),
         // Rate Limiting (indices 10-11)
-        ("Rate Limit:", if options.download_rate_limit_enabled { "Enabled".to_string() } else { "Disabled".to_string() }),
-        ("Max Download Speed (MB/s):", format!("{:.1}", options.download_rate_limit_mbps)),
+        (
+            "Rate Limit:",
+            if options.download_rate_limit_enabled {
+                "Enabled".to_string()
+            } else {
+                "Disabled".to_string()
+            },
+        ),
+        (
+            "Max Download Speed (MB/s):",
+            format!("{:.1}", options.download_rate_limit_mbps),
+        ),
         // Verification (indices 12-15)
-        ("Enable Verification:", if options.verification_on_completion { "Enabled".to_string() } else { "Disabled".to_string() }),
-        ("Concurrent Verifications:", options.concurrent_verifications.to_string()),
-        ("Verification Buffer Size:", format_size(options.verification_buffer_size as u64)),
-        ("Verification Update Interval:", options.verification_update_interval.to_string()),
+        (
+            "Enable Verification:",
+            if options.verification_on_completion {
+                "Enabled".to_string()
+            } else {
+                "Disabled".to_string()
+            },
+        ),
+        (
+            "Concurrent Verifications:",
+            options.concurrent_verifications.to_string(),
+        ),
+        (
+            "Verification Buffer Size:",
+            format_size(options.verification_buffer_size as u64),
+        ),
+        (
+            "Verification Update Interval:",
+            options.verification_update_interval.to_string(),
+        ),
     ];
-    
+
     // Render category headers
     let category_offsets = [
         (0, "General"),
@@ -1387,68 +1514,72 @@ pub fn render_options_popup(
         (10, "Rate Limiting"),
         (12, "Verification"),
     ];
-    
+
     let mut y_offset = 1u16;
     let mut field_idx = 0;
-    
+
     for (cat_idx, (field_start, category_name)) in category_offsets.iter().enumerate() {
         // Render category header
         if cat_idx > 0 {
             y_offset += 1; // Add spacing before category (except first)
         }
-        
+
         let separator = format!("─── {} ", category_name);
         let full_width = inner.width.saturating_sub(4) as usize;
         let separator = format!("{:─<width$}", separator, width = full_width);
-        
+
         let header_area = Rect {
             x: inner.x + 2,
             y: inner.y + y_offset,
             width: inner.width - 4,
             height: 1,
         };
-        
-        let header_widget = Paragraph::new(separator)
-            .style(Style::default().fg(Color::DarkGray));
+
+        let header_widget = Paragraph::new(separator).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(header_widget, header_area);
-        
+
         y_offset += 1;
-        
+
         // Render fields in this category
-        let next_cat_start = category_offsets.get(cat_idx + 1).map(|(s, _)| *s).unwrap_or(fields.len());
+        let next_cat_start = category_offsets
+            .get(cat_idx + 1)
+            .map(|(s, _)| *s)
+            .unwrap_or(fields.len());
         for (label, value) in fields.iter().take(next_cat_start).skip(*field_start) {
-            
-            let area = Rect { 
-                x: inner.x + 2, 
-                y: inner.y + y_offset, 
-                width: inner.width - 4, 
-                height: 1 
+            let area = Rect {
+                x: inner.x + 2,
+                y: inner.y + y_offset,
+                width: inner.width - 4,
+                height: 1,
             };
-            
+
             let style = if field_idx == options.selected_field {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
-            
+
             let text = format!("{} {}", label, value);
             let widget = Paragraph::new(text).style(style);
             frame.render_widget(widget, area);
-            
+
             // Show cursor when editing directory or token
             if options.editing_directory && field_idx == 0 {
-                let cursor_x = area.x + label.len() as u16 + 1 + directory_input.visual_cursor() as u16;
+                let cursor_x =
+                    area.x + label.len() as u16 + 1 + directory_input.visual_cursor() as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             } else if options.editing_token && field_idx == 1 {
                 let cursor_x = area.x + label.len() as u16 + 1 + token_input.visual_cursor() as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             }
-            
+
             y_offset += 1;
             field_idx += 1;
         }
     }
-    
+
     // Controls help (with empty line before)
     let help_y = inner.y + inner.height - 5;
     let help = if options.editing_directory {
@@ -1473,21 +1604,21 @@ pub fn render_options_popup(
             "ESC: Close",
         ]
     };
-    
+
     for (i, line) in help.iter().enumerate() {
-        let area = Rect { 
-            x: inner.x + 2, 
-            y: help_y + i as u16, 
-            width: inner.width - 4, 
-            height: 1 
+        let area = Rect {
+            x: inner.x + 2,
+            y: help_y + i as u16,
+            width: inner.width - 4,
+            height: 1,
         };
-        let widget = Paragraph::new(*line)
-            .style(Style::default().fg(Color::DarkGray));
+        let widget = Paragraph::new(*line).style(Style::default().fg(Color::DarkGray));
         frame.render_widget(widget, area);
     }
 }
 
 /// Render filter and sort toolbar
+#[allow(clippy::too_many_arguments)]
 pub fn render_filter_toolbar(
     frame: &mut Frame,
     area: Rect,
@@ -1498,22 +1629,22 @@ pub fn render_filter_toolbar(
     focused_field: usize,
     filter_areas: &mut Vec<(usize, Rect)>,
 ) {
-    use crate::models::{SortField, SortDirection};
-    
+    use crate::models::{SortDirection, SortField};
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Filters  [Click to cycle | 1-4: Presets | r: Reset | Ctrl+S: Save]")
         .style(Style::default().fg(Color::Cyan));
-    
+
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    
+
     // Sort arrow
     let sort_arrow = match sort_direction {
         SortDirection::Ascending => "▲",
         SortDirection::Descending => "▼",
     };
-    
+
     // Sort name
     let sort_name = match sort_field {
         SortField::Downloads => "Downloads",
@@ -1521,51 +1652,63 @@ pub fn render_filter_toolbar(
         SortField::Modified => "Modified",
         SortField::Name => "Name",
     };
-    
+
     // Build display line with highlighting for focused field
     let sort_style = if focused_field == 0 {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
     };
-    
+
     let downloads_style = if focused_field == 1 {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         Style::default().fg(Color::White)
     };
-    
+
     let likes_style = if focused_field == 2 {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     } else {
         Style::default().fg(Color::White)
     };
-    
+
     // Detect which preset is active (if any)
-    let preset_name = if sort_field == SortField::Modified 
-        && sort_direction == SortDirection::Descending 
-        && min_downloads == 0 
-        && min_likes == 0 {
+    let preset_name = if sort_field == SortField::Modified
+        && sort_direction == SortDirection::Descending
+        && min_downloads == 0
+        && min_likes == 0
+    {
         Some("Recent")
-    } else if sort_field == SortField::Likes 
-        && sort_direction == SortDirection::Descending 
-        && min_downloads == 0 
-        && min_likes == 1_000 {
+    } else if sort_field == SortField::Likes
+        && sort_direction == SortDirection::Descending
+        && min_downloads == 0
+        && min_likes == 1_000
+    {
         Some("Highly Rated")
-    } else if sort_field == SortField::Downloads 
-        && sort_direction == SortDirection::Descending 
-        && min_downloads == 10_000 
-        && min_likes == 100 {
+    } else if sort_field == SortField::Downloads
+        && sort_direction == SortDirection::Descending
+        && min_downloads == 10_000
+        && min_likes == 100
+    {
         Some("Popular")
-    } else if sort_field == SortField::Downloads 
-        && sort_direction == SortDirection::Descending 
-        && min_downloads == 0 
-        && min_likes == 0 {
+    } else if sort_field == SortField::Downloads
+        && sort_direction == SortDirection::Descending
+        && min_downloads == 0
+        && min_likes == 0
+    {
         Some("No Filters")
     } else {
         None
     };
-    
+
     // Calculate text segments for click detection
     // Format: "Sort: {value}  |  Min Downloads: {value}  |  Min Likes: {value}"
     let sort_label = "Sort: ";
@@ -1576,10 +1719,10 @@ pub fn render_filter_toolbar(
     let separator2 = "  |  ";
     let likes_label = "Min Likes: ";
     let likes_value = crate::utils::format_number(min_likes);
-    
+
     // Calculate x positions for each clickable area
     let mut x = inner.x;
-    
+
     // Sort area: includes label and value
     let sort_start = x;
     x += sort_label.len() as u16 + sort_value.len() as u16;
@@ -1590,9 +1733,9 @@ pub fn render_filter_toolbar(
         height: 1,
     };
     filter_areas.push((0, sort_area));
-    
+
     x += separator1.len() as u16;
-    
+
     // Downloads area: includes label and value
     let downloads_start = x;
     x += downloads_label.len() as u16 + downloads_value.len() as u16;
@@ -1603,9 +1746,9 @@ pub fn render_filter_toolbar(
         height: 1,
     };
     filter_areas.push((1, downloads_area));
-    
+
     x += separator2.len() as u16;
-    
+
     // Likes area: includes label and value
     let likes_start = x;
     x += likes_label.len() as u16 + likes_value.len() as u16;
@@ -1616,7 +1759,7 @@ pub fn render_filter_toolbar(
         height: 1,
     };
     filter_areas.push((2, likes_area));
-    
+
     let mut line_parts = vec![
         Span::styled(sort_label, Style::default().fg(Color::DarkGray)),
         Span::styled(sort_value, sort_style),
@@ -1627,20 +1770,20 @@ pub fn render_filter_toolbar(
         Span::styled(likes_label, Style::default().fg(Color::DarkGray)),
         Span::styled(likes_value, likes_style),
     ];
-    
+
     // Add preset indicator if a preset is active
     if let Some(preset) = preset_name {
         line_parts.push(Span::raw("  |  "));
         line_parts.push(Span::styled(
             format!("[{}]", preset),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ));
     }
-    
+
     let line = Line::from(line_parts);
-    
+
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
 }
-
-

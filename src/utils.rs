@@ -12,7 +12,7 @@ pub fn format_size(bytes: u64) -> String {
     const GB: u64 = 1_073_741_824;
     const MB: u64 = 1_048_576;
     const KB: u64 = 1_024;
-    
+
     if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
     } else if bytes >= MB {
