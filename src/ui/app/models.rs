@@ -37,15 +37,32 @@ impl App {
         };
 
         if let Some(results) = cached_results {
+            // Check if query looks like a repository ID (contains /)
+            // If so, and there's an exact match, show only that repository
+            let exact_match_idx = if query.contains('/') {
+                results.iter().position(|m| m.id.to_lowercase() == query.to_lowercase())
+            } else {
+                None
+            };
+
+            let has_exact_match = exact_match_idx.is_some();
+            let filtered_results = if let Some(idx) = exact_match_idx {
+                vec![results[idx].clone()]
+            } else {
+                results
+            };
+
             // Use cached results (instant!)
-            let has_results = !results.is_empty();
+            let has_results = !filtered_results.is_empty();
             let mut models_lock = models.write().unwrap();
-            *models_lock = results;
+            *models_lock = filtered_results;
             *self.loading.write().unwrap() = false;
             self.list_state.select(Some(0));
 
             let filter_status = if min_downloads > 0 || min_likes > 0 {
                 " (cached, filtered from 100)".to_string()
+            } else if has_exact_match {
+                " (cached, exact match)".to_string()
             } else {
                 " (cached)".to_string()
             };
@@ -72,22 +89,39 @@ impl App {
         .await
         {
             Ok(results) => {
-                let has_results = !results.is_empty();
+                // Check if query looks like a repository ID (contains /)
+                // If so, and there's an exact match, show only that repository
+                let exact_match_idx = if query.contains('/') {
+                    results.iter().position(|m| m.id.to_lowercase() == query.to_lowercase())
+                } else {
+                    None
+                };
+
+                let has_exact_match = exact_match_idx.is_some();
+                let filtered_results = if let Some(idx) = exact_match_idx {
+                    vec![results[idx].clone()]
+                } else {
+                    results
+                };
+
+                let has_results = !filtered_results.is_empty();
 
                 // Store in UI state
                 let mut models_lock = models.write().unwrap();
-                *models_lock = results.clone();
+                *models_lock = filtered_results.clone();
                 *self.loading.write().unwrap() = false;
                 self.list_state.select(Some(0));
 
                 // Store in cache
                 let mut cache = self.api_cache.write().unwrap();
-                cache.searches.insert(search_key, results);
+                cache.searches.insert(search_key, filtered_results);
                 drop(cache);
 
                 // Show filter count in status if filters are active
                 let filter_status = if min_downloads > 0 || min_likes > 0 {
                     " (filtered from 100)".to_string()
+                } else if has_exact_match {
+                    " (exact match)".to_string()
                 } else {
                     String::new()
                 };
