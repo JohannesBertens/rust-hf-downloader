@@ -426,12 +426,18 @@ pub fn get_multipart_base_name(filename: &str) -> String {
 
 pub fn is_quantization_directory(dirname: &str) -> bool {
     // Check if directory name looks like a quantization type
-    // Examples: Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, BF16, etc.
+    // Examples: Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, TQ1_0, BF16, etc.
     // Also handles patterns like: cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0
     let upper = dirname.to_uppercase();
 
     // First check if it starts with a known quantization pattern (original behavior)
-    if upper.starts_with('Q') || upper.starts_with("IQ") || upper == "BF16" || upper == "FP16" {
+    if upper.starts_with('Q')
+        || upper.starts_with("IQ")
+        || upper.starts_with("TQ")
+        || upper == "BF16"
+        || upper == "F16"
+        || upper == "FP16"
+    {
         return true;
     }
 
@@ -454,8 +460,15 @@ pub fn is_quantization_directory(dirname: &str) -> bool {
         {
             return true;
         }
+        // TQ followed by digit (TQ1_0, TQ2_0, etc.)
+        if last_part.starts_with("TQ")
+            && last_part.len() > 2
+            && last_part.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
         // Special formats
-        if last_part == "BF16" || last_part == "FP16" || last_part == "FP32" {
+        if last_part == "BF16" || last_part == "F16" || last_part == "FP16" || last_part == "FP32" {
             return true;
         }
     }
@@ -471,7 +484,13 @@ pub fn extract_quantization_type_from_dirname(dirname: &str) -> String {
     let upper = dirname.to_uppercase();
 
     // If it already starts with a quantization pattern, return as-is
-    if upper.starts_with('Q') || upper.starts_with("IQ") || upper == "BF16" || upper == "FP16" {
+    if upper.starts_with('Q')
+        || upper.starts_with("IQ")
+        || upper.starts_with("TQ")
+        || upper == "BF16"
+        || upper == "F16"
+        || upper == "FP16"
+    {
         return upper;
     }
 
@@ -480,7 +499,9 @@ pub fn extract_quantization_type_from_dirname(dirname: &str) -> String {
     if let Some(&last_part) = parts.last() {
         if last_part.starts_with('Q')
             || last_part.starts_with("IQ")
+            || last_part.starts_with("TQ")
             || last_part == "BF16"
+            || last_part == "F16"
             || last_part == "FP16"
             || last_part == "FP32"
         {
@@ -551,6 +572,13 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
         {
             return true;
         }
+        // TQ followed by digit (TQ1_0, TQ2_0, etc.) - ternary packing for TriLMs/BitNet
+        if upper.starts_with("TQ")
+            && upper.len() > 2
+            && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
+        {
+            return true;
+        }
         // MXFP followed by digit (MXFP4, MXFP6, MXFP8, etc.)
         // But not MXFP4_MOE (that should be split to MXFP4)
         if upper.starts_with("MXFP")
@@ -568,7 +596,7 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
             }
         }
         // Special formats
-        if upper == "BF16" || upper == "FP16" || upper == "FP32" {
+        if upper == "BF16" || upper == "F16" || upper == "FP16" || upper == "FP32" {
             return true;
         }
         false
