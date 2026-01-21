@@ -181,6 +181,8 @@ rust-hf-downloader --headless download <MODEL_ID>
   [--output <DIR>]
 ```
 
+**Note**: If an invalid quantization is specified or no quantization is provided for a GGUF model, the error message will display all available quantizations with file counts and sizes to help you choose correctly.
+
 **list** - List available files
 ```
 rust-hf-downloader --headless list <MODEL_ID>
@@ -195,7 +197,7 @@ rust-hf-downloader --headless resume
 
 - `0` - Success
 - `1` - Download/API error
-- `2` - Authentication error
+- `2` - Authentication error (gated model requires token)
 - `3` - Invalid arguments
 
 ### CI/CD Examples
@@ -267,7 +269,7 @@ download_rate_limit_mbps = 50.0
 
 ### Authentication
 
-For gated models, provide your HuggingFace token:
+For gated models, provide your HuggingFace token. The application performs an early authorization check before starting downloads:
 
 ```bash
 # Via CLI flag
@@ -279,6 +281,16 @@ rust-hf-downloader --headless download "model-id" \
 # Add to ~/.config/jreb/config.toml:
 # hf_token = "hf_..."
 ```
+
+**Note**: If you attempt to download a gated model without authentication, the application will:
+- Exit with code 2 (authentication error)
+- Display a helpful error message with:
+  - Link to get a HuggingFace token
+  - Link to accept model terms
+  - Example commands with token
+  - Config file instructions
+
+This early check prevents multiple authorization errors during download attempts.
 
 ## TUI Mode (Interactive)
 
