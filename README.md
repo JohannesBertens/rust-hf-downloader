@@ -1,6 +1,6 @@
 # Rust HF Downloader
 
-A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub. Features both an interactive TUI mode and a headless CLI mode for automation.
+A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub. Features both an interactive TUI mode and a CLI mode for automation.
 
 ## Demo
 
@@ -93,9 +93,9 @@ rust-hf-downloader
 
 See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-downloader)
 
-## Headless Mode (CLI)
+## CLI Mode
 
-The application supports a headless mode for automated/CI environments without TUI.
+The application supports a CLI mode for automated/CI environments without TUI.
 
 ### Basic Usage
 
@@ -157,7 +157,7 @@ rust-hf-downloader --headless resume
 
 #### Global Flags
 
-- `--headless` - Run in headless mode (required for CLI commands)
+- `--headless` - Run in CLI mode (required for CLI commands)
 - `--json` - Output in JSON format (for scripting)
 - `--token <TOKEN>` - HuggingFace authentication token
 - `--dry-run` - Show what would be done without executing
@@ -252,7 +252,7 @@ docker run --rm \
 
 ### Configuration
 
-Headless mode respects the same configuration file as TUI mode:
+CLI mode respects the same configuration file as TUI mode:
 
 - **Location**: `~/.config/jreb/config.toml`
 - **Settings**: Default directory, token, thread count, etc.

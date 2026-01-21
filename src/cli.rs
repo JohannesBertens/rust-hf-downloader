@@ -1,12 +1,12 @@
 use clap::{Parser, Subcommand};
 
-/// TUI for searching and downloading HuggingFace models
+/// TUI and CLI for searching and downloading HuggingFace models
 #[derive(Parser, Debug, Clone)]
 #[command(name = "rust-hf-downloader")]
-#[command(about = "TUI for searching and downloading HuggingFace models", long_about = None)]
-#[command(version = "1.2.2")]
+#[command(about = "TUI and CLI for searching and downloading HuggingFace models", long_about = None)]
+#[command(version = "1.3.0")]
 pub struct Cli {
-    /// Run in headless mode (no TUI)
+    /// Run in CLI mode (no TUI)
     #[arg(long, global = true)]
     pub headless: bool,
 

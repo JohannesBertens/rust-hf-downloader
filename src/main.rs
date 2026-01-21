@@ -19,7 +19,7 @@ async fn main() -> color_eyre::Result<()> {
     use clap::Parser;
     let cli_args = cli::Cli::parse();
 
-    // If --headless flag is present, run in headless mode
+    // If --headless flag is present, run in CLI mode
     if cli_args.headless {
         let json_mode = cli_args.json;
         let reporter = headless::ProgressReporter::new(json_mode);

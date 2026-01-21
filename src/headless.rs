@@ -1,4 +1,4 @@
-//! Headless mode implementation for CLI-only operation
+//! CLI mode implementation for command-line operation
 //!
 //! This module provides functions for running the application without a TUI,
 //! suitable for CI/CD automation and scripting.
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-/// Error type for headless operations
+/// Error type for CLI operations
 #[derive(Debug)]
 #[allow(dead_code)]
 #[allow(clippy::enum_variant_names)]
