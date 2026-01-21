@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug, Clone)]
 #[command(name = "rust-hf-downloader")]
 #[command(about = "TUI and CLI for searching and downloading HuggingFace models", long_about = None)]
-#[command(version = "1.3.0")]
+#[command(version = "1.3.1")]
 pub struct Cli {
     /// Run in CLI mode (no TUI)
     #[arg(long, global = true)]

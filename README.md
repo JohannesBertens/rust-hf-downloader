@@ -522,6 +522,16 @@ Key security features in v0.6.0:
 
 ## Changelog
 
+### Version 1.3.1 (2026-01-21)
+- **Enhancement**: Added support for F16 (half-precision floating point) quantization type
+- **Enhancement**: Added support for TQ (Tensor Quantization) for TriLMs/BitNet ternary packing
+- **Fixed**: Missing F16 quantization detection for models with F16 in root directory
+- **Fixed**: Missing TQ quantization detection (TQ1_0, TQ2_0, etc.)
+- **Impact**: All quantization types now correctly identified and listed for download
+- **Files Modified**: `src/api.rs` (33 lines added)
+- **No Breaking Changes**: All existing functionality preserved
+- See [changelog/RELEASE_NOTES_1.3.1.md](changelog/RELEASE_NOTES_1.3.1.md) for full details
+
 ### Version 1.2.2 (2026-01-08)
 - **Bug Fix**: Fixed color contrast issue on light terminal backgrounds
 - **Visibility**: Status bar and UI text now adapt to terminal theme
