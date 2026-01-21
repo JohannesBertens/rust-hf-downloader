@@ -522,6 +522,10 @@ Key security features in v0.6.0:
 
 ## Changelog
 
+### Version 1.3.2 (2026-01-21)
+- **Version bump**: Updated to version 1.3.2
+- **No Breaking Changes**: All existing functionality preserved
+
 ### Version 1.3.1 (2026-01-21)
 - **Enhancement**: Added support for F16 (half-precision floating point) quantization type
 - **Enhancement**: Added support for TQ (Tensor Quantization) for TriLMs/BitNet ternary packing
