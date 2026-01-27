@@ -1,3 +1,7 @@
+---
+title: Agents Guide — Root
+---
+
 # AGENT.md - AI Agent Guide for Rust HF Downloader
 
 This document provides AI agents with a comprehensive understanding of the Rust HF Downloader codebase, its architecture, and how to work with it.

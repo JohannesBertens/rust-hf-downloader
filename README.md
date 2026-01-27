@@ -55,6 +55,17 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - ⚡ **Async API**: Non-blocking UI with async API calls
 - 🎨 **Colorful Interface**: Syntax-highlighted results for better readability
 
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [CLI Mode](#cli-mode)
+- [TUI Mode (Interactive)](#tui-mode-interactive)
+- [Technical Details](#technical-details)
+- [Changelog](#changelog)
+- [License](#license)
+
 ## Requirements
 
 - **Rust**: 1.75.0 or newer (compatible with Ubuntu 22.04 LTS default compiler)
