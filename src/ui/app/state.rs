@@ -4,8 +4,9 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::Input;
 
@@ -48,7 +49,7 @@ pub struct App {
     pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
     pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<Mutex<usize>>,
+    pub verification_queue_size: Arc<AtomicUsize>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
@@ -79,7 +80,6 @@ pub struct App {
     pub cached_download_progress: Option<DownloadProgress>,
     pub cached_download_queue: crate::models::QueueState, // Combined cache
     pub cached_verification_progress: Vec<VerificationProgress>,
-    pub cached_verification_queue_size: usize,
 }
 
 impl Default for App {
@@ -147,7 +147,7 @@ impl App {
             complete_downloads: Arc::new(Mutex::new(HashMap::new())),
             verification_progress: Arc::new(Mutex::new(Vec::new())),
             verification_queue: Arc::new(Mutex::new(Vec::new())),
-            verification_queue_size: Arc::new(Mutex::new(0)),
+            verification_queue_size: Arc::new(AtomicUsize::new(0)),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -175,7 +175,6 @@ impl App {
             cached_download_progress: None,
             cached_download_queue: crate::models::QueueState::new(0, 0),
             cached_verification_progress: Vec::new(),
-            cached_verification_queue_size: 0,
         }
     }
 

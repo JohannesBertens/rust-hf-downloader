@@ -11,8 +11,8 @@ impl App {
             return;
         }
 
-        *self.loading.write().unwrap() = true;
-        *self.error.write().unwrap() = None;
+        *self.loading.write() = true;
+        *self.error.write() = None;
 
         let models = self.models.clone();
         let token = self.options.hf_token.as_ref();
@@ -32,7 +32,7 @@ impl App {
 
         // Check cache first
         let cached_results = {
-            let cache = self.api_cache.read().unwrap();
+            let cache = self.api_cache.read();
             cache.searches.get(&search_key).cloned()
         };
 
@@ -54,9 +54,9 @@ impl App {
 
             // Use cached results (instant!)
             let has_results = !filtered_results.is_empty();
-            let mut models_lock = models.write().unwrap();
+            let mut models_lock = models.write();
             *models_lock = filtered_results;
-            *self.loading.write().unwrap() = false;
+            *self.loading.write() = false;
             self.list_state.select(Some(0));
 
             let filter_status = if min_downloads > 0 || min_likes > 0 {
@@ -66,7 +66,7 @@ impl App {
             } else {
                 " (cached)".to_string()
             };
-            *self.status.write().unwrap() =
+            *self.status.write() =
                 format!("Found {} models{}", models_lock.len(), filter_status);
 
             drop(models_lock);
@@ -107,13 +107,13 @@ impl App {
                 let has_results = !filtered_results.is_empty();
 
                 // Store in UI state
-                let mut models_lock = models.write().unwrap();
+                let mut models_lock = models.write();
                 *models_lock = filtered_results.clone();
-                *self.loading.write().unwrap() = false;
+                *self.loading.write() = false;
                 self.list_state.select(Some(0));
 
                 // Store in cache
-                let mut cache = self.api_cache.write().unwrap();
+                let mut cache = self.api_cache.write();
                 cache.searches.insert(search_key, filtered_results);
                 drop(cache);
 
@@ -125,7 +125,7 @@ impl App {
                 } else {
                     String::new()
                 };
-                *self.status.write().unwrap() =
+                *self.status.write() =
                     format!("Found {} models{}", models_lock.len(), filter_status);
 
                 drop(models_lock);
@@ -136,20 +136,20 @@ impl App {
                 }
             }
             Err(e) => {
-                *self.loading.write().unwrap() = false;
-                *self.error.write().unwrap() = Some(format!("Failed to fetch models: {}", e));
-                *self.status.write().unwrap() = "Search failed".to_string();
+                *self.loading.write() = false;
+                *self.error.write() = Some(format!("Failed to fetch models: {}", e));
+                *self.status.write() = "Search failed".to_string();
             }
         }
     }
 
     /// Display detailed model information in status bar
     pub async fn show_model_details(&mut self) {
-        let models = self.models.read().unwrap();
+        let models = self.models.read();
         if let Some(selected) = self.list_state.selected() {
             if selected < models.len() {
                 let model = &models[selected];
-                *self.selection_info.write().unwrap() = format!(
+                *self.selection_info.write() = format!(
                     "Selected: {} | URL: https://huggingface.co/{}",
                     model.id, model.id
                 );
@@ -159,13 +159,13 @@ impl App {
 
     /// Display detailed quantization information in status bar
     pub async fn show_quantization_details(&mut self) {
-        let quantizations = self.quantizations.read().unwrap();
+        let quantizations = self.quantizations.read();
         if let Some(selected) = self.quant_list_state.selected() {
             if selected < quantizations.len() {
                 let group = &quantizations[selected];
                 let first_file = &group.files[0];
                 // Keep the model selection in line 1, show quant details in line 2
-                *self.status.write().unwrap() = format!(
+                *self.status.write() = format!(
                     "Type: {} | Size: {} | File: {}",
                     group.quant_type,
                     crate::utils::format_size(group.total_size),
@@ -178,12 +178,12 @@ impl App {
     pub async fn show_file_details(&mut self) {
         if let Some(group_idx) = self.quant_list_state.selected() {
             if let Some(file_idx) = self.quant_file_list_state.selected() {
-                let quantizations = self.quantizations.read().unwrap();
+                let quantizations = self.quantizations.read();
                 if group_idx < quantizations.len() {
                     let group = &quantizations[group_idx];
                     if file_idx < group.files.len() {
                         let file = &group.files[file_idx];
-                        *self.status.write().unwrap() = format!(
+                        *self.status.write() = format!(
                             "File: {} | Size: {} | Type: {}",
                             file.filename,
                             crate::utils::format_size(file.size),
@@ -200,7 +200,7 @@ impl App {
     /// Spawns a background task to avoid blocking UI thread
     pub fn spawn_load_quantizations(&mut self) {
         // Get selected model synchronously
-        let models = self.models.read().unwrap();
+        let models = self.models.read();
         let Some(selected) = self.list_state.selected() else {
             return;
         };
@@ -211,7 +211,7 @@ impl App {
         drop(models);
 
         // Immediate UI feedback (synchronous)
-        *self.loading_quants.write().unwrap() = true;
+        *self.loading_quants.write() = true;
 
         // Clone Arcs for background task
         let quantizations = self.quantizations.clone();
@@ -227,7 +227,7 @@ impl App {
         tokio::spawn(async move {
             // Check metadata cache first (avoids expensive API call)
             let cached_metadata = {
-                let cache = api_cache.read().unwrap();
+                let cache = api_cache.read();
                 cache.metadata.get(&model_id).cloned()
             };
 
@@ -237,20 +237,20 @@ impl App {
                 // Fetch and cache metadata
                 match fetch_model_metadata(&model_id, token.as_ref()).await {
                     Ok(meta) => {
-                        let mut cache = api_cache.write().unwrap();
+                        let mut cache = api_cache.write();
                         cache.metadata.insert(model_id.clone(), meta.clone());
                         meta
                     }
                     Err(e) => {
-                        *loading_quants.write().unwrap() = false;
-                        *error.write().unwrap() =
+                        *loading_quants.write() = false;
+                        *error.write() =
                             Some(format!("Failed to fetch model metadata: {}", e));
 
                         // Clear both states on error
-                        let mut quants_lock = quantizations.write().unwrap();
+                        let mut quants_lock = quantizations.write();
                         quants_lock.clear();
-                        *model_metadata.write().unwrap() = None;
-                        *file_tree.write().unwrap() = None;
+                        *model_metadata.write() = None;
+                        *file_tree.write() = None;
                         return;
                     }
                 }
@@ -261,57 +261,57 @@ impl App {
                 // Placeholder to keep structure
                 if has_gguf_files(&metadata) {
                     // GGUF mode: show quantizations
-                    *display_mode.write().unwrap() = ModelDisplayMode::Gguf;
+                    *display_mode.write() = ModelDisplayMode::Gguf;
 
                     // Check quantization cache
                     let cached_result = {
-                        let cache = api_cache.read().unwrap();
+                        let cache = api_cache.read();
                         cache.quantizations.get(&model_id).cloned()
                     };
 
                     if let Some(cached_groups) = cached_result {
-                        let mut quants_lock = quantizations.write().unwrap();
+                        let mut quants_lock = quantizations.write();
                         *quants_lock = cached_groups;
-                        *loading_quants.write().unwrap() = false;
+                        *loading_quants.write() = false;
 
                         // Reset file tree state
-                        *model_metadata.write().unwrap() = None;
-                        *file_tree.write().unwrap() = None;
+                        *model_metadata.write() = None;
+                        *file_tree.write() = None;
                         return;
                     }
 
                     match fetch_model_files(&model_id, token.as_ref()).await {
                         Ok(quants) => {
-                            let mut quants_lock = quantizations.write().unwrap();
+                            let mut quants_lock = quantizations.write();
                             *quants_lock = quants.clone();
-                            *loading_quants.write().unwrap() = false;
+                            *loading_quants.write() = false;
 
                             // Store in cache
-                            let mut cache = api_cache.write().unwrap();
+                            let mut cache = api_cache.write();
                             cache.quantizations.insert(model_id, quants);
 
                             // Reset file tree state
-                            *model_metadata.write().unwrap() = None;
-                            *file_tree.write().unwrap() = None;
+                            *model_metadata.write() = None;
+                            *file_tree.write() = None;
                         }
                         Err(_) => {
-                            *loading_quants.write().unwrap() = false;
-                            let mut quants_lock = quantizations.write().unwrap();
+                            *loading_quants.write() = false;
+                            let mut quants_lock = quantizations.write();
                             quants_lock.clear();
                         }
                     }
                 } else {
                     // Standard mode: show metadata + file tree
-                    *display_mode.write().unwrap() = ModelDisplayMode::Standard;
+                    *display_mode.write() = ModelDisplayMode::Standard;
 
                     // Clear quantizations
-                    let mut quants_lock = quantizations.write().unwrap();
+                    let mut quants_lock = quantizations.write();
                     quants_lock.clear();
                     drop(quants_lock);
 
                     // Check file tree cache (avoid rebuilding)
                     let cached_tree = {
-                        let cache = api_cache.read().unwrap();
+                        let cache = api_cache.read();
                         cache.file_trees.get(&model_id).cloned()
                     };
 
@@ -320,16 +320,16 @@ impl App {
                     } else {
                         // Build and cache tree
                         let tree = build_file_tree(metadata.siblings.clone());
-                        let mut cache = api_cache.write().unwrap();
+                        let mut cache = api_cache.write();
                         cache.file_trees.insert(model_id.clone(), tree.clone());
                         tree
                     };
 
                     // Store metadata and tree in UI state
-                    *model_metadata.write().unwrap() = Some(metadata);
-                    *file_tree.write().unwrap() = Some(tree);
+                    *model_metadata.write() = Some(metadata);
+                    *file_tree.write() = Some(tree);
 
-                    *loading_quants.write().unwrap() = false;
+                    *loading_quants.write() = false;
                 }
             }
         });
@@ -339,33 +339,33 @@ impl App {
     pub fn clear_model_details(&mut self) {
         // Clear quantizations (GGUF mode)
         futures::executor::block_on(async {
-            self.quantizations.write().unwrap().clear();
+            self.quantizations.write().clear();
         });
 
         // Clear metadata and file tree (Standard mode)
         futures::executor::block_on(async {
-            *self.model_metadata.write().unwrap() = None;
-            *self.file_tree.write().unwrap() = None;
+            *self.model_metadata.write() = None;
+            *self.file_tree.write() = None;
         });
 
         // Set loading state
-        *self.loading_quants.write().unwrap() = true;
-        *self.status.write().unwrap() = "Loading model details...".to_string();
+        *self.loading_quants.write() = true;
+        *self.status.write() = "Loading model details...".to_string();
     }
 
     /// Clear search results immediately (for instant UI feedback during search)
     pub fn clear_search_results(&mut self) {
         // Clear models list
         futures::executor::block_on(async {
-            self.models.write().unwrap().clear();
+            self.models.write().clear();
         });
 
         // Clear model details
         self.clear_model_details();
 
         // Set loading state
-        *self.loading.write().unwrap() = true;
-        *self.status.write().unwrap() = "Searching...".to_string();
+        *self.loading.write() = true;
+        *self.status.write() = "Searching...".to_string();
     }
 
     /// Pre-emptively load adjacent models into cache (1 before, 1 after current selection)
@@ -390,7 +390,7 @@ impl App {
             return; // Skip prefetch if navigating rapidly
         }
 
-        let models = self.models.read().unwrap();
+        let models = self.models.read();
         let Some(selected) = self.list_state.selected() else {
             return;
         };
@@ -429,7 +429,7 @@ impl App {
             for model_id in model_ids {
                 // Check if metadata already cached
                 let metadata_cached = {
-                    let cache = api_cache.read().unwrap();
+                    let cache = api_cache.read();
                     cache.metadata.get(&model_id).cloned()
                 };
 
@@ -439,7 +439,7 @@ impl App {
                     // Fetch and cache metadata
                     match fetch_model_metadata(&model_id, token.as_ref()).await {
                         Ok(meta) => {
-                            let mut cache = api_cache.write().unwrap();
+                            let mut cache = api_cache.write();
                             cache.metadata.insert(model_id.clone(), meta.clone());
                             meta
                         }
@@ -451,27 +451,27 @@ impl App {
                 if has_gguf_files(&metadata) {
                     // GGUF model: prefetch quantizations
                     let quants_cached = {
-                        let cache = api_cache.read().unwrap();
+                        let cache = api_cache.read();
                         cache.quantizations.contains_key(&model_id)
                     };
 
                     if !quants_cached {
                         // Fetch and cache quantizations
                         if let Ok(quants) = fetch_model_files(&model_id, token.as_ref()).await {
-                            let mut cache = api_cache.write().unwrap();
+                            let mut cache = api_cache.write();
                             cache.quantizations.insert(model_id.clone(), quants);
                         }
                     }
                 } else {
                     // Standard model: prefetch file tree
                     let tree_cached = {
-                        let cache = api_cache.read().unwrap();
+                        let cache = api_cache.read();
                         cache.file_trees.contains_key(&model_id)
                     };
 
                     if !tree_cached {
                         let tree = build_file_tree(metadata.siblings.clone());
-                        let mut cache = api_cache.write().unwrap();
+                        let mut cache = api_cache.write();
                         cache.file_trees.insert(model_id, tree);
                     }
                 }

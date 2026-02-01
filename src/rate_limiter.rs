@@ -3,6 +3,25 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+/// Internal state for the rate limiter (consolidated into single mutex)
+struct RateLimiterState {
+    tokens: f64,
+    max_tokens: f64,
+    rate: f64,
+    last_refill: Instant,
+}
+
+impl RateLimiterState {
+    fn new(tokens: f64, max_tokens: f64, rate: f64, last_refill: Instant) -> Self {
+        Self {
+            tokens,
+            max_tokens,
+            rate,
+            last_refill,
+        }
+    }
+}
+
 /// Token bucket rate limiter for download speed control
 ///
 /// Uses a token bucket algorithm where:
@@ -11,17 +30,8 @@ use tokio::sync::Mutex;
 /// - Bucket has a maximum capacity (rate * burst_window)
 /// - Allows short bursts above the average rate for TCP efficiency
 pub struct RateLimiter {
-    /// Currently available tokens
-    tokens: Arc<Mutex<f64>>,
-
-    /// Maximum tokens (bucket capacity)
-    max_tokens: Arc<Mutex<f64>>,
-
-    /// Tokens added per second (bytes/sec)
-    rate: Arc<Mutex<f64>>,
-
-    /// Last time tokens were refilled
-    last_refill: Arc<Mutex<Instant>>,
+    /// Consolidated state (tokens, max_tokens, rate, last_refill)
+    state: Arc<Mutex<RateLimiterState>>,
 
     /// Whether rate limiting is enabled
     enabled: Arc<AtomicBool>,
@@ -41,10 +51,12 @@ impl RateLimiter {
         let max_tokens = rate * burst_seconds;
 
         Self {
-            tokens: Arc::new(Mutex::new(max_tokens)),
-            max_tokens: Arc::new(Mutex::new(max_tokens)),
-            rate: Arc::new(Mutex::new(rate)),
-            last_refill: Arc::new(Mutex::new(Instant::now())),
+            state: Arc::new(Mutex::new(RateLimiterState::new(
+                max_tokens,
+                max_tokens,
+                rate,
+                Instant::now(),
+            ))),
             enabled: Arc::new(AtomicBool::new(false)),
             burst_seconds,
         }
@@ -69,22 +81,26 @@ impl RateLimiter {
         let requested = bytes as f64;
 
         loop {
+            let mut state = self.state.lock().await;
+
+            // Refill tokens based on elapsed time
             let now = Instant::now();
-            self.refill(now).await;
+            let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+            if elapsed > 0.0 {
+                state.tokens = (state.tokens + state.rate * elapsed).min(state.max_tokens);
+                state.last_refill = now;
+            }
 
-            let mut tokens = self.tokens.lock().await;
-
-            if *tokens >= requested {
-                *tokens -= requested;
+            // Check if we have enough tokens
+            if state.tokens >= requested {
+                state.tokens -= requested;
                 return Ok(());
             }
 
-            // Need to wait for tokens to refill
-            let tokens_needed = requested - *tokens;
-            let rate_guard = self.rate.lock().await;
-            let wait_secs = tokens_needed / *rate_guard;
-            drop(rate_guard);
-            drop(tokens); // Release lock before sleeping
+            // Calculate wait time for tokens to refill
+            let tokens_needed = requested - state.tokens;
+            let wait_secs = tokens_needed / state.rate;
+            drop(state); // Release lock before sleeping
 
             tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;
         }
@@ -96,21 +112,13 @@ impl RateLimiter {
     /// * `rate_bytes_per_sec` - New rate in bytes per second
     pub async fn set_rate(&self, rate_bytes_per_sec: u64) {
         let new_rate = rate_bytes_per_sec as f64;
-        let mut rate = self.rate.lock().await;
-        *rate = new_rate;
-
-        // Update max tokens based on new rate
         let new_max = new_rate * self.burst_seconds;
-        drop(rate);
 
-        let mut max_tokens = self.max_tokens.lock().await;
-        *max_tokens = new_max;
-        drop(max_tokens);
-
-        // Cap current tokens to new maximum
-        let mut tokens = self.tokens.lock().await;
-        if *tokens > new_max {
-            *tokens = new_max;
+        let mut state = self.state.lock().await;
+        state.rate = new_rate;
+        state.max_tokens = new_max;
+        if state.tokens > new_max {
+            state.tokens = new_max;
         }
     }
 
@@ -120,26 +128,6 @@ impl RateLimiter {
     /// * `enabled` - Whether to enable rate limiting
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
-    }
-
-    /// Refill tokens based on elapsed time since last refill
-    async fn refill(&self, now: Instant) {
-        let mut last_refill = self.last_refill.lock().await;
-        let elapsed = now.duration_since(*last_refill).as_secs_f64();
-
-        if elapsed > 0.0 {
-            let rate_guard = self.rate.lock().await;
-            let new_tokens = *rate_guard * elapsed;
-            drop(rate_guard);
-
-            let max_tokens_guard = self.max_tokens.lock().await;
-            let max_tok = *max_tokens_guard;
-            drop(max_tokens_guard);
-
-            let mut tokens = self.tokens.lock().await;
-            *tokens = (*tokens + new_tokens).min(max_tok);
-            *last_refill = now;
-        }
     }
 }
 

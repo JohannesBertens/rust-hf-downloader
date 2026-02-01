@@ -22,7 +22,7 @@ pub struct DownloadParams {
     pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
     pub expected_sha256: Option<String>,
     pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<Mutex<usize>>,
+    pub verification_queue_size: Arc<AtomicUsize>,
     pub hf_token: Option<String>,
 }
 

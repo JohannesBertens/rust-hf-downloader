@@ -32,7 +32,7 @@ pub static VERIFICATION_CONFIG: VerificationConfig = VerificationConfig::new();
 pub async fn verification_worker(
     verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    verification_queue_size: Arc<Mutex<usize>>,
+    verification_queue_size: Arc<AtomicUsize>,
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
 ) {
@@ -42,24 +42,20 @@ pub async fn verification_worker(
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
     loop {
-        // Check if there's work to do
+        // Check if there's work to do - remove item and decrement size atomically while holding lock
         let item = {
             let mut queue = verification_queue.lock().await;
             if queue.is_empty() {
                 None
             } else {
-                Some(queue.remove(0))
+                let item = queue.remove(0);
+                // Decrement size atomically while holding the lock
+                verification_queue_size.fetch_sub(1, Ordering::Relaxed);
+                Some(item)
             }
         };
 
         if let Some(item) = item {
-            // Decrement queue size
-            {
-                let mut queue_size = verification_queue_size.lock().await;
-                *queue_size = queue_size.saturating_sub(1);
-            }
-
-            // Spawn verification task
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let verification_progress = verification_progress.clone();
             let status_tx = status_tx.clone();
@@ -224,12 +220,11 @@ async fn calculate_sha256_with_progress(
 /// Queue a file for verification
 pub async fn queue_verification(
     verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    verification_queue_size: Arc<Mutex<usize>>,
+    verification_queue_size: Arc<AtomicUsize>,
     item: VerificationQueueItem,
 ) {
     let mut queue = verification_queue.lock().await;
     queue.push(item);
 
-    let mut queue_size = verification_queue_size.lock().await;
-    *queue_size += 1;
+    verification_queue_size.fetch_add(1, Ordering::Relaxed);
 }

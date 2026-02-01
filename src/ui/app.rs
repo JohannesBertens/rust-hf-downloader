@@ -14,6 +14,7 @@ use color_eyre::Result;
 use crossterm::event::{Event, KeyEventKind};
 use futures::{FutureExt, StreamExt};
 use ratatui::{DefaultTerminal, Frame};
+use std::sync::atomic::Ordering;
 
 impl App {
     /// Main application run loop
@@ -27,7 +28,7 @@ impl App {
         self.scan_incomplete_downloads().await;
 
         // Set initial status for empty screen
-        *self.status.write().unwrap() = "Welcome! Press '/' to search for models".to_string();
+        *self.status.write() = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
 
         // Spawn verification worker
@@ -115,10 +116,10 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         // Get all the data we need for rendering using non-blocking access
         // RwLock reads are safe and fast - use direct access
-        let models = self.models.read().unwrap().clone();
-        let quantizations = self.quantizations.read().unwrap().clone();
-        let model_metadata = self.model_metadata.read().unwrap().clone();
-        let file_tree = self.file_tree.read().unwrap().clone();
+        let models = self.models.read().clone();
+        let quantizations = self.quantizations.read().clone();
+        let model_metadata = self.model_metadata.read().clone();
+        let file_tree = self.file_tree.read().clone();
 
         // For tokio Mutex, use try_lock() to avoid blocking/deadlock
         // Fall back to cached values if lock is held by another task
@@ -140,17 +141,17 @@ impl App {
                 input_mode: self.input_mode,
                 models: &models,
                 list_state: &mut self.list_state,
-                loading: *self.loading.read().unwrap(),
+                loading: *self.loading.read(),
                 quantizations: &quantizations,
                 quant_file_list_state: &mut self.quant_file_list_state,
                 quant_list_state: &mut self.quant_list_state,
-                loading_quants: *self.loading_quants.read().unwrap(),
+                loading_quants: *self.loading_quants.read(),
                 focused_pane: self.focused_pane,
-                error: &self.error.read().unwrap(),
-                status: &self.status.read().unwrap(),
-                selection_info: &self.selection_info.read().unwrap(),
+                error: &self.error.read(),
+                status: &self.status.read(),
+                selection_info: &self.selection_info.read(),
                 complete_downloads: &complete_downloads,
-                display_mode: *self.display_mode.read().unwrap(),
+                display_mode: *self.display_mode.read(),
                 model_metadata: &model_metadata,
                 file_tree: &file_tree,
                 file_tree_state: &mut self.file_tree_state,
@@ -198,14 +199,7 @@ impl App {
             })
             .unwrap_or_else(|_| self.cached_verification_progress.clone());
 
-        let verification_queue_size = self
-            .verification_queue_size
-            .try_lock()
-            .map(|guard| {
-                self.cached_verification_queue_size = *guard;
-                *guard
-            })
-            .unwrap_or(self.cached_verification_queue_size);
+        let verification_queue_size = self.verification_queue_size.load(Ordering::Relaxed);
 
         crate::ui::render::render_progress_bars(
             frame,
@@ -288,7 +282,7 @@ impl App {
                     crate::models::SortField::Modified => crate::models::SortField::Name,
                     crate::models::SortField::Name => crate::models::SortField::Downloads,
                 };
-                *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
+                *self.status.write() = format!("Sort by: {:?}", self.sort_field);
             }
             1 => {
                 // Min downloads: cycle through 0, 100, 1k, 10k, 100k, 1M
@@ -299,7 +293,7 @@ impl App {
                     .unwrap_or(0);
                 let new_idx = (current_idx + 1) % steps.len();
                 self.filter_min_downloads = steps[new_idx];
-                *self.status.write().unwrap() = format!(
+                *self.status.write() = format!(
                     "Min downloads: {}",
                     crate::utils::format_number(self.filter_min_downloads)
                 );
@@ -313,7 +307,7 @@ impl App {
                     .unwrap_or(0);
                 let new_idx = (current_idx + 1) % steps.len();
                 self.filter_min_likes = steps[new_idx];
-                *self.status.write().unwrap() = format!(
+                *self.status.write() = format!(
                     "Min likes: {}",
                     crate::utils::format_number(self.filter_min_likes)
                 );
@@ -406,7 +400,7 @@ impl App {
                         crate::models::SortField::Name => crate::models::SortField::Downloads,
                     }
                 };
-                *self.status.write().unwrap() = format!("Sort by: {:?}", self.sort_field);
+                *self.status.write() = format!("Sort by: {:?}", self.sort_field);
             }
             1 => {
                 // Min downloads: cycle through steps
@@ -425,7 +419,7 @@ impl App {
                     (current_idx + 1) % steps.len()
                 };
                 self.filter_min_downloads = steps[new_idx];
-                *self.status.write().unwrap() = format!(
+                *self.status.write() = format!(
                     "Min downloads: {}",
                     crate::utils::format_number(self.filter_min_downloads)
                 );
@@ -447,7 +441,7 @@ impl App {
                     (current_idx + 1) % steps.len()
                 };
                 self.filter_min_likes = steps[new_idx];
-                *self.status.write().unwrap() = format!(
+                *self.status.write() = format!(
                     "Min likes: {}",
                     crate::utils::format_number(self.filter_min_likes)
                 );
@@ -495,10 +489,10 @@ impl App {
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
-                    *self.status.write().unwrap() =
+                    *self.status.write() =
                         format!("Authentication required for {}", model_id);
                 } else {
-                    *self.status.write().unwrap() = msg;
+                    *self.status.write() = msg;
                 }
             }
         }

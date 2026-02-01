@@ -9,6 +9,7 @@ use crate::models::*;
 use crate::registry;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -437,7 +438,7 @@ pub async fn run_download(
     progress_tx: mpsc::UnboundedSender<String>,
     download_queue: Arc<tokio::sync::Mutex<QueueState>>,
     download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
-    verification_queue_size: Arc<tokio::sync::Mutex<usize>>,
+    verification_queue_size: Arc<AtomicUsize>,
     verification_progress: Arc<tokio::sync::Mutex<Vec<VerificationProgress>>>,
     shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
 ) -> Result<(), HeadlessError> {
@@ -629,7 +630,7 @@ pub async fn wait_for_downloads(
 
 /// Wait for all verifications to complete and report progress
 pub async fn wait_for_verification(
-    verification_queue_size: Arc<tokio::sync::Mutex<usize>>,
+    verification_queue_size: Arc<AtomicUsize>,
     verification_progress: Arc<tokio::sync::Mutex<Vec<VerificationProgress>>>,
     reporter: &ProgressReporter,
     shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
@@ -646,7 +647,7 @@ pub async fn wait_for_verification(
 
     // Show initial 0% progress bar if there's work queued
     {
-        let queue_size = *verification_queue_size.lock().await;
+        let queue_size = verification_queue_size.load(Ordering::Relaxed);
         if queue_size > 0 && !reporter.is_json() {
             print!("\r[{}] 0% verifying...", " ".repeat(40));
             let _ = std::io::stdout().flush();
@@ -656,7 +657,7 @@ pub async fn wait_for_verification(
 
     // If nothing is queued and no progress is active, exit early
     {
-        let queue_size = *verification_queue_size.lock().await;
+        let queue_size = verification_queue_size.load(Ordering::Relaxed);
         let has_progress = !verification_progress.lock().await.is_empty();
         if queue_size == 0 && !has_progress {
             return Ok(());
@@ -707,7 +708,7 @@ pub async fn wait_for_verification(
         drop(progress_guard);
 
         // Check if queue is empty and no active verifications
-        let queue_size = *verification_queue_size.lock().await;
+        let queue_size = verification_queue_size.load(Ordering::Relaxed);
         let has_active = verification_progress
             .try_lock()
             .map(|p| !p.is_empty())
@@ -768,7 +769,7 @@ pub async fn run_resume(
     progress_tx: mpsc::UnboundedSender<String>,
     download_queue: Arc<tokio::sync::Mutex<QueueState>>,
     download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
-    verification_queue_size: Arc<tokio::sync::Mutex<usize>>,
+    verification_queue_size: Arc<AtomicUsize>,
     verification_progress: Arc<tokio::sync::Mutex<Vec<VerificationProgress>>>,
     shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
 ) -> Result<(), HeadlessError> {

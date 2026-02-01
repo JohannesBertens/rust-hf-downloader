@@ -70,6 +70,7 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 
 **Non-blocking design**:
 - Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks
+- Uses `parking_lot::RwLock` which doesn't have poisoning (no `.unwrap()` needed)
 - Cached render fields provide fallback when locks unavailable
 - Mouse handler is synchronous to avoid blocking issues
 
@@ -86,10 +87,10 @@ Lock Hierarchy (acquire in this order):
 4. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
 5. complete_downloads (Arc<Mutex<CompleteDownloads>>)
 6. verification_queue (Arc<Mutex<Vec<VerificationQueueItem>>>)
-7. verification_queue_size (Arc<Mutex<usize>>)
+7. verification_queue_size (Arc<AtomicUsize>) - lock-free atomic counter
 8. verification_progress (Arc<Mutex<Vec<VerificationProgress>>>)
 9. download_registry (Arc<Mutex<DownloadRegistry>>)
-10. RateLimiter internal locks (tokens, rate, last_refill, max_tokens)
+10. RateLimiter state (Arc<Mutex<RateLimiterState>>) - consolidated single lock
 11. status_rx (Arc<Mutex<mpsc::UnboundedReceiver<String>>>)
 
 Key Rules:

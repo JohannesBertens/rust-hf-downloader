@@ -11,6 +11,8 @@ mod ui;
 mod utils;
 mod verification;
 
+use std::sync::atomic::AtomicUsize;
+
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -38,7 +40,7 @@ async fn main() -> color_eyre::Result<()> {
         let complete_downloads =
             std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let verification_queue = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let verification_queue_size = std::sync::Arc::new(tokio::sync::Mutex::new(0));
+        let verification_queue_size = std::sync::Arc::new(AtomicUsize::new(0));
         let download_queue = std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::models::QueueState::new(0, 0),
         ));
