@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelInfo {
@@ -272,12 +274,14 @@ pub struct ApiCache {
 }
 
 /// Progress tracking for an active verification operation
+/// 
+/// NOTE: `verified_bytes` is atomically updated by verification tasks.
+/// Use `load(Ordering::Relaxed)` to read the current value.
+/// This avoids lock contention while multiple files are verified concurrently.
 #[derive(Debug, Clone)]
 pub struct VerificationProgress {
     pub filename: String,
-    #[allow(dead_code)]
-    pub local_path: String,
-    pub verified_bytes: u64,
+    pub verified_bytes: Arc<AtomicU64>,
     pub total_bytes: u64,
     pub speed_mbps: f64,
 }

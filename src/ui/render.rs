@@ -11,6 +11,7 @@ use ratatui::{
     Frame,
 };
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use tui_input::Input;
 
 /// Parameters for rendering the UI
@@ -1021,7 +1022,10 @@ fn render_verification_progress(
         }
 
         let percentage = if ver.total_bytes > 0 {
-            (ver.verified_bytes as f64 / ver.total_bytes as f64 * 100.0) as u16
+            // Ordering::Relaxed is safe here: we only need eventual consistency
+            // for progress percentage display, not strict ordering guarantees
+            let verified = ver.verified_bytes.load(Ordering::Relaxed);
+            (verified as f64 / ver.total_bytes as f64 * 100.0) as u16
         } else {
             0
         };

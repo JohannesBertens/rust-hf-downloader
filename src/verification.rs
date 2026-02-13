@@ -3,7 +3,7 @@ use crate::models::{
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -91,12 +91,12 @@ async fn verify_file(
     }
 
     // Add to active verifications
+    let verified_bytes = Arc::new(AtomicU64::new(0));
     {
         let mut progress = verification_progress.lock().await;
         progress.push(VerificationProgress {
             filename: item.filename.clone(),
-            local_path: item.local_path.clone(),
-            verified_bytes: 0,
+            verified_bytes: verified_bytes.clone(),
             total_bytes: item.total_size,
             speed_mbps: 0.0,
         });
@@ -169,6 +169,18 @@ async fn calculate_sha256_with_progress(
     let mut last_update = start_time;
     let mut last_bytes = 0u64;
 
+    // Get the Arc<AtomicU64> reference for atomic updates
+    let verified_bytes = {
+        let progress = verification_progress.lock().await;
+        progress
+            .iter()
+            .find(|p| p.filename == filename)
+            .map(|p| p.verified_bytes.clone())
+            // NOTE: If progress entry is removed mid-verification (e.g., cancellation),
+            // verified_bytes becomes None. This is safe - we simply stop atomic updates.
+            // The verification will still complete and final progress will be cleared.
+    };
+
     loop {
         let bytes_read = file.read(&mut buffer).await?;
         if bytes_read == 0 {
@@ -186,6 +198,11 @@ async fn calculate_sha256_with_progress(
         #[allow(clippy::manual_is_multiple_of)]
         // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
         if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
+            // Atomic update for verified_bytes - NO LOCK NEEDED!
+            if let Some(ref vb) = verified_bytes {
+                vb.fetch_add(bytes_read as u64, Ordering::Relaxed);
+            }
+
             let now = std::time::Instant::now();
             let elapsed = now.duration_since(last_update).as_secs_f64();
 
@@ -196,7 +213,6 @@ async fn calculate_sha256_with_progress(
                 // Find and update progress by filename (not index)
                 let mut progress = verification_progress.lock().await;
                 if let Some(entry) = progress.iter_mut().find(|p| p.filename == filename) {
-                    entry.verified_bytes = bytes_verified;
                     entry.speed_mbps = speed;
                 }
 
@@ -207,11 +223,9 @@ async fn calculate_sha256_with_progress(
     }
 
     // Final progress update to ensure 100%
-    {
-        let mut progress = verification_progress.lock().await;
-        if let Some(entry) = progress.iter_mut().find(|p| p.filename == filename) {
-            entry.verified_bytes = total_size;
-        }
+    // If verified_bytes is Some, update atomically; otherwise entry was removed (cancellation)
+    if let Some(ref vb) = verified_bytes {
+        vb.store(total_size, Ordering::Relaxed);
     }
 
     Ok(hex::encode(hasher.finalize()))

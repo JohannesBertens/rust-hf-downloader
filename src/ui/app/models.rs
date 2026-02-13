@@ -30,15 +30,14 @@ impl App {
             min_likes,
         };
 
-        // Check cache first
+        // Step 1: Check cache with read lock (fast path)
         let cached_results = {
             let cache = self.api_cache.read();
             cache.searches.get(&search_key).cloned()
         };
 
         if let Some(results) = cached_results {
-            // Check if query looks like a repository ID (contains /)
-            // If so, and there's an exact match, show only that repository
+            // Use cached results (no write lock needed!)
             let exact_match_idx = if query.contains('/') {
                 results.iter().position(|m| m.id.to_lowercase() == query.to_lowercase())
             } else {
@@ -52,7 +51,6 @@ impl App {
                 results
             };
 
-            // Use cached results (instant!)
             let has_results = !filtered_results.is_empty();
             let mut models_lock = models.write();
             *models_lock = filtered_results;
@@ -77,8 +75,8 @@ impl App {
             return;
         }
 
-        // Fetch and cache search results
-        match crate::api::fetch_models_filtered(
+        // Step 2: Fetch from API (if not cached)
+        let results = crate::api::fetch_models_filtered(
             &query,
             sort_field,
             sort_direction,
@@ -86,11 +84,11 @@ impl App {
             min_likes,
             token,
         )
-        .await
-        {
+        .await;
+
+        match results {
             Ok(results) => {
                 // Check if query looks like a repository ID (contains /)
-                // If so, and there's an exact match, show only that repository
                 let exact_match_idx = if query.contains('/') {
                     results.iter().position(|m| m.id.to_lowercase() == query.to_lowercase())
                 } else {
@@ -106,18 +104,24 @@ impl App {
 
                 let has_results = !filtered_results.is_empty();
 
-                // Store in UI state
+                // Step 3: Cache results using Entry API (atomic get-or-insert with write lock)
+                let results_to_store = {
+                    let mut cache = self.api_cache.write();
+                    match cache.searches.entry(search_key.clone()) {
+                        std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(filtered_results.clone());
+                            filtered_results
+                        }
+                    }
+                };
+
+                // Step 4: Use the results (either our cached or another task's)
                 let mut models_lock = models.write();
-                *models_lock = filtered_results.clone();
+                *models_lock = results_to_store.clone();
                 *self.loading.write() = false;
                 self.list_state.select(Some(0));
 
-                // Store in cache
-                let mut cache = self.api_cache.write();
-                cache.searches.insert(search_key, filtered_results);
-                drop(cache);
-
-                // Show filter count in status if filters are active
                 let filter_status = if min_downloads > 0 || min_likes > 0 {
                     " (filtered from 100)".to_string()
                 } else if has_exact_match {
@@ -130,7 +134,6 @@ impl App {
 
                 drop(models_lock);
 
-                // Trigger load for first result if we have results
                 if has_results {
                     self.needs_load_quantizations = true;
                 }
@@ -263,7 +266,7 @@ impl App {
                     // GGUF mode: show quantizations
                     *display_mode.write() = ModelDisplayMode::Gguf;
 
-                    // Check quantization cache
+                    // Check quantization cache with read lock
                     let cached_result = {
                         let cache = api_cache.read();
                         cache.quantizations.get(&model_id).cloned()
@@ -282,13 +285,21 @@ impl App {
 
                     match fetch_model_files(&model_id, token.as_ref()).await {
                         Ok(quants) => {
-                            let mut quants_lock = quantizations.write();
-                            *quants_lock = quants.clone();
-                            *loading_quants.write() = false;
+                            // Double-check and cache using Entry API
+                            let quants_to_store = {
+                                let mut cache = api_cache.write();
+                                match cache.quantizations.entry(model_id.clone()) {
+                                    std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                                    std::collections::hash_map::Entry::Vacant(v) => {
+                                        v.insert(quants.clone());
+                                        quants
+                                    }
+                                }
+                            };
 
-                            // Store in cache
-                            let mut cache = api_cache.write();
-                            cache.quantizations.insert(model_id, quants);
+                            let mut quants_lock = quantizations.write();
+                            *quants_lock = quants_to_store;
+                            *loading_quants.write() = false;
 
                             // Reset file tree state
                             *model_metadata.write() = None;
@@ -309,25 +320,36 @@ impl App {
                     quants_lock.clear();
                     drop(quants_lock);
 
-                    // Check file tree cache (avoid rebuilding)
+                    // Check file tree cache with read lock
                     let cached_tree = {
                         let cache = api_cache.read();
                         cache.file_trees.get(&model_id).cloned()
                     };
 
-                    let tree = if let Some(tree) = cached_tree {
+                    let tree_to_store = if let Some(tree) = cached_tree {
                         tree // Use cached tree
                     } else {
-                        // Build and cache tree
+                        // Build tree
                         let tree = build_file_tree(metadata.siblings.clone());
-                        let mut cache = api_cache.write();
-                        cache.file_trees.insert(model_id.clone(), tree.clone());
-                        tree
+
+                        // Double-check and cache using Entry API
+                        let tree_to_store = {
+                            let mut cache = api_cache.write();
+                            match cache.file_trees.entry(model_id.clone()) {
+                                std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                                std::collections::hash_map::Entry::Vacant(v) => {
+                                    v.insert(tree.clone());
+                                    tree
+                                }
+                            }
+                        };
+
+                        tree_to_store
                     };
 
                     // Store metadata and tree in UI state
-                    *model_metadata.write() = Some(metadata);
-                    *file_tree.write() = Some(tree);
+                    *model_metadata.write() = Some(metadata.clone());
+                    *file_tree.write() = Some(tree_to_store);
 
                     *loading_quants.write() = false;
                 }
@@ -427,7 +449,7 @@ impl App {
         // Spawn background prefetch task (fire-and-forget)
         tokio::spawn(async move {
             for model_id in model_ids {
-                // Check if metadata already cached
+                // Check metadata cache with read lock
                 let metadata_cached = {
                     let cache = api_cache.read();
                     cache.metadata.get(&model_id).cloned()
@@ -436,15 +458,21 @@ impl App {
                 let metadata = if let Some(meta) = metadata_cached {
                     meta // Use cached
                 } else {
-                    // Fetch and cache metadata
-                    match fetch_model_metadata(&model_id, token.as_ref()).await {
+                    // Fetch and cache metadata with double-check using Entry API
+                    let meta_to_store = match fetch_model_metadata(&model_id, token.as_ref()).await {
                         Ok(meta) => {
                             let mut cache = api_cache.write();
-                            cache.metadata.insert(model_id.clone(), meta.clone());
-                            meta
+                            match cache.metadata.entry(model_id.clone()) {
+                                std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                                std::collections::hash_map::Entry::Vacant(v) => {
+                                    v.insert(meta.clone());
+                                    meta
+                                }
+                            }
                         }
                         Err(_) => continue, // Skip on error
-                    }
+                    };
+                    meta_to_store
                 };
 
                 // Process based on model type
@@ -456,10 +484,12 @@ impl App {
                     };
 
                     if !quants_cached {
-                        // Fetch and cache quantizations
+                        // Fetch and cache quantizations with double-check using Entry API
                         if let Ok(quants) = fetch_model_files(&model_id, token.as_ref()).await {
                             let mut cache = api_cache.write();
-                            cache.quantizations.insert(model_id.clone(), quants);
+                            if matches!(cache.quantizations.entry(model_id.clone()), std::collections::hash_map::Entry::Vacant(_)) {
+                                cache.quantizations.insert(model_id.clone(), quants);
+                            }
                         }
                     }
                 } else {
@@ -470,9 +500,12 @@ impl App {
                     };
 
                     if !tree_cached {
+                        // Build and cache file tree with double-check using Entry API
                         let tree = build_file_tree(metadata.siblings.clone());
                         let mut cache = api_cache.write();
-                        cache.file_trees.insert(model_id, tree);
+                        if matches!(cache.file_trees.entry(model_id.clone()), std::collections::hash_map::Entry::Vacant(_)) {
+                            cache.file_trees.insert(model_id.clone(), tree);
+                        }
                     }
                 }
             }
