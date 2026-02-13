@@ -1,4 +1,4 @@
-# Rust HF Downloader
+# Rust HF Downloader v1.4.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub. Features both an interactive TUI mode and a CLI mode for automation.
 
@@ -535,6 +535,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [1.4.0] | 2026-02-13 | Optimized verification progress with AtomicU64 and cache Entry API |
 | [1.3.2] | 2026-01-21 | Exact model match for repository ID searches |
 | [1.3.1] | 2026-01-21 | Added F16 and TQ quantization support |
 | [1.2.2] | 2026-01-08 | Fixed color contrast on light terminals |
