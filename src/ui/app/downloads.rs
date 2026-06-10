@@ -204,7 +204,8 @@ impl App {
 
                     let url = format!(
                         "https://huggingface.co/{}/resolve/main/{}",
-                        model.id, filename
+                        urlencoding::encode(&model.id),
+                        filename
                     );
                     let local_path_str = validated_path.to_string_lossy().to_string();
 
@@ -468,7 +469,8 @@ impl App {
 
                     let url = format!(
                         "https://huggingface.co/{}/resolve/main/{}",
-                        model.id, filename
+                        urlencoding::encode(&model.id),
+                        filename
                     );
                     let local_path_str = validated_path.to_string_lossy().to_string();
 

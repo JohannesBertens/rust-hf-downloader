@@ -99,7 +99,12 @@ impl RateLimiter {
 
             // Calculate wait time for tokens to refill
             let tokens_needed = requested - state.tokens;
-            let wait_secs = tokens_needed / state.rate;
+            // Guard against divide-by-zero: if rate is 0, clamp to 0 to avoid sleep(Infinity)
+            let wait_secs = if state.rate > 0.0 {
+                tokens_needed / state.rate
+            } else {
+                0.0
+            };
             drop(state); // Release lock before sleeping
 
             tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;

@@ -25,12 +25,12 @@ pub fn load_config() -> AppOptions {
         return AppOptions::default();
     }
 
+    // Check permissions before parsing — warns even if config is malformed
+    check_config_permissions();
+
     match fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<AppOptions>(&contents) {
-            Ok(options) => {
-                check_config_permissions();
-                options
-            },
+            Ok(options) => options,
             Err(e) => {
                 eprintln!(
                     "Warning: Configuration file at '{}' is malformed and could not be \

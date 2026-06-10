@@ -238,7 +238,7 @@ pub async fn fetch_model_files(
     model_id: &str,
     token: Option<&String>,
 ) -> Result<Vec<QuantizationGroup>, reqwest::Error> {
-    let url = format!("https://huggingface.co/api/models/{}/tree/main", model_id);
+    let url = format!("https://huggingface.co/api/models/{}/tree/main", urlencoding::encode(model_id));
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;
@@ -281,7 +281,8 @@ pub async fn fetch_model_files(
             // Fetch files from this subdirectory
             let subdir_url = format!(
                 "https://huggingface.co/api/models/{}/tree/main/{}",
-                model_id, file.path
+                urlencoding::encode(model_id),
+                file.path
             );
 
             if let Ok(subdir_response) =
@@ -365,7 +366,7 @@ pub async fn fetch_multipart_sha256s(
     token: Option<&String>,
 ) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
     // Single API call to get all files
-    let url = format!("https://huggingface.co/api/models/{}/tree/main", model_id);
+    let url = format!("https://huggingface.co/api/models/{}/tree/main", urlencoding::encode(model_id));
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;

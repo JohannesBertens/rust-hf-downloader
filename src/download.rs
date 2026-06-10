@@ -174,7 +174,8 @@ pub async fn start_download(params: DownloadParams) {
 
     let url = format!(
         "https://huggingface.co/{}/resolve/main/{}",
-        model_id, sanitized_filename
+        urlencoding::encode(&model_id),
+        sanitized_filename
     );
 
     // Create directory if it doesn't exist
