@@ -25,12 +25,17 @@ pub fn load_config() -> AppOptions {
         return AppOptions::default();
     }
 
+    // Check permissions before parsing — warns even if config is malformed
+    check_config_permissions();
+
     match fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<AppOptions>(&contents) {
             Ok(options) => options,
             Err(e) => {
                 eprintln!(
-                    "Warning: Failed to parse config file: {}. Using defaults.",
+                    "Warning: Configuration file at '{}' is malformed and could not be \
+                     parsed: {}. Falling back to default configuration.",
+                    path.display(),
                     e
                 );
                 AppOptions::default()
@@ -38,7 +43,9 @@ pub fn load_config() -> AppOptions {
         },
         Err(e) => {
             eprintln!(
-                "Warning: Failed to read config file: {}. Using defaults.",
+                "Warning: Unable to read configuration file at '{}': {}. \
+                 Falling back to default configuration.",
+                path.display(),
                 e
             );
             AppOptions::default()
@@ -51,9 +58,57 @@ pub fn save_config(options: &AppOptions) -> Result<(), Box<dyn std::error::Error
     ensure_config_dir()?;
 
     let toml_string = toml::to_string_pretty(options)?;
-    fs::write(get_config_path(), toml_string)?;
+    let config_path = get_config_path();
+    fs::write(&config_path, toml_string)?;
+
+    // Set restrictive permissions to protect sensitive token data stored in config
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(&config_path)?;
+        let mut perms = metadata.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&config_path, perms)?;
+    }
 
     Ok(())
+}
+
+/// Check if the config file has permissions that allow group or other access.
+/// Prints a warning if the file is readable by anyone other than the owner.
+pub fn check_config_permissions() {
+    let path = get_config_path();
+    if !path.exists() {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                let mode = metadata.permissions().mode();
+                // Check if any group (0o070) or other (0o007) permission bits are set
+                if mode & 0o077 != 0 {
+                    eprintln!(
+                        "Warning: Configuration file at '{}' has permissions {:#o}. \
+                         It is recommended to restrict access using 'chmod 600 {}' to \
+                         protect your HuggingFace token.",
+                        path.display(),
+                        mode & 0o777,
+                        path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Could not check permissions of configuration file at '{}': {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

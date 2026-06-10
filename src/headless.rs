@@ -13,13 +13,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+// ─── Error Types ───────────────────────────────────────────────────────────────
+
 /// Error type for CLI operations
 #[derive(Debug)]
-#[allow(dead_code)]
 #[allow(clippy::enum_variant_names)]
 pub enum HeadlessError {
     ApiError(String),
     DownloadError(String),
+    #[allow(dead_code)]
     ConfigError(String),
     IoError(std::io::Error),
     AuthError(String),
@@ -51,16 +53,6 @@ impl From<std::io::Error> for HeadlessError {
     }
 }
 
-/// Type for download messages sent to the download manager
-pub type DownloadMessage = (
-    String,         // model_id
-    String,         // filename
-    PathBuf,        // output path
-    Option<String>, // sha256
-    Option<String>, // hf_token
-    u64,            // total_size
-);
-
 /// Exit code constants
 pub const EXIT_SUCCESS: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
@@ -79,22 +71,7 @@ impl HeadlessError {
     }
 }
 
-/// Format file size in human-readable format
-pub fn format_file_size(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const MB: u64 = 1_048_576;
-    const KB: u64 = 1_024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
+// ─── Utility Functions ─────────────────────────────────────────────────────────
 
 /// Format duration in human-readable format
 #[allow(dead_code)]
@@ -108,6 +85,8 @@ pub fn format_duration(duration: std::time::Duration) -> String {
         format!("{}s", secs)
     }
 }
+
+// ─── Validation ────────────────────────────────────────────────────────────────
 
 /// Validate model ID format (author/model-name)
 pub fn validate_model_id(model_id: &str) -> Result<(), HeadlessError> {
@@ -126,6 +105,8 @@ pub fn validate_model_id(model_id: &str) -> Result<(), HeadlessError> {
 
     Ok(())
 }
+
+// ─── API Operations: Search, List, Download ────────────────────────────────────
 
 /// Search for models with optional filters
 pub async fn search_models(
@@ -184,6 +165,8 @@ pub async fn list_quantizations(
     Ok((quantizations, metadata))
 }
 
+// ─── Download Orchestration ─────────────────────────────────────────────────────
+
 /// Download a model with optional quantization filter
 pub async fn download_model(
     model_id: &str,
@@ -191,8 +174,8 @@ pub async fn download_model(
     download_all: bool,
     output_dir: &str,
     hf_token: Option<String>,
-    progress_tx: mpsc::UnboundedSender<String>,
-    download_tx: mpsc::UnboundedSender<DownloadMessage>,
+    progress_tx: mpsc::Sender<String>,
+    download_tx: mpsc::Sender<(String, String, PathBuf, Option<String>, Option<String>, u64)>,
 ) -> Result<(), HeadlessError> {
     let options = config::load_config();
     let token = hf_token.or(options.hf_token);
@@ -238,9 +221,10 @@ pub async fn download_model(
                     token.clone(),
                     total_size,
                 ))
+                .await
                 .map_err(|e| HeadlessError::DownloadError(e.to_string()))?;
 
-            let _ = progress_tx.send(format!("Queued: {}", quant_file.filename));
+            let _ = progress_tx.try_send(format!("Queued: {}", quant_file.filename));
         }
     } else {
         // Non-GGUF model: download all files from metadata
@@ -264,14 +248,17 @@ pub async fn download_model(
                     token.clone(),
                     size,
                 ))
+                .await
                 .map_err(|e| HeadlessError::DownloadError(e.to_string()))?;
 
-            let _ = progress_tx.send(format!("Queued: {}", file.rfilename));
+            let _ = progress_tx.try_send(format!("Queued: {}", file.rfilename));
         }
     }
 
     Ok(())
 }
+
+// ─── Download Summary Calculations ──────────────────────────────────────────────
 
 /// Calculate download summary for GGUF models
 fn calculate_gguf_download_summary(
@@ -292,7 +279,7 @@ fn calculate_gguf_download_summary(
                             "{} ({} files, {})",
                             q.quant_type,
                             q.files.len(),
-                            format_file_size(q.total_size)
+                            crate::utils::format_size(q.total_size)
                         )
                     })
                     .collect();
@@ -323,7 +310,7 @@ fn calculate_gguf_download_summary(
                     "{} ({} files, {})",
                     q.quant_type,
                     q.files.len(),
-                    format_file_size(q.total_size)
+                    crate::utils::format_size(q.total_size)
                 )
             })
             .collect();
@@ -356,6 +343,8 @@ fn calculate_non_gguf_download_summary(
 
     Ok((files, total_size))
 }
+
+// ─── Dry-Run ────────────────────────────────────────────────────────────────────
 
 /// Run download command in dry-run mode (show what would be downloaded)
 pub async fn run_download_dry_run(
@@ -391,6 +380,8 @@ pub async fn run_download_dry_run(
     Ok(())
 }
 
+// ─── Auth / Gated Model Checks ─────────────────────────────────────────────────
+
 /// Check if a model is gated and requires authentication
 fn check_gated_model(
     metadata: &ModelMetadata,
@@ -425,6 +416,8 @@ fn check_gated_model(
     Ok(())
 }
 
+// ─── Run Commands ───────────────────────────────────────────────────────────────
+
 /// Run download command with summary and progress tracking
 #[allow(clippy::too_many_arguments)]
 pub async fn run_download(
@@ -434,8 +427,8 @@ pub async fn run_download(
     output_dir: &str,
     hf_token: Option<String>,
     reporter: &ProgressReporter,
-    download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    progress_tx: mpsc::UnboundedSender<String>,
+    download_tx: mpsc::Sender<(String, String, PathBuf, Option<String>, Option<String>, u64)>,
+    progress_tx: mpsc::Sender<String>,
     download_queue: Arc<tokio::sync::Mutex<QueueState>>,
     download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
     verification_queue_size: Arc<AtomicUsize>,
@@ -502,8 +495,8 @@ pub async fn run_download(
 
 /// Resume incomplete downloads from registry
 pub async fn resume_downloads(
-    download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    progress_tx: mpsc::UnboundedSender<String>,
+    download_tx: mpsc::Sender<(String, String, PathBuf, Option<String>, Option<String>, u64)>,
+    progress_tx: mpsc::Sender<String>,
 ) -> Result<Vec<DownloadMetadata>, HeadlessError> {
     let registry = registry::load_registry();
     let incomplete: Vec<_> = registry
@@ -514,7 +507,7 @@ pub async fn resume_downloads(
         .collect();
 
     if incomplete.is_empty() {
-        let _ = progress_tx.send("No incomplete downloads found".to_string());
+        let _ = progress_tx.try_send("No incomplete downloads found".to_string());
         return Ok(Vec::new());
     }
 
@@ -539,13 +532,16 @@ pub async fn resume_downloads(
                 None, // Use token from config
                 download.total_size,
             ))
+            .await
             .map_err(|e| HeadlessError::DownloadError(e.to_string()))?;
 
-        let _ = progress_tx.send(format!("Resumed: {}", download.filename));
+        let _ = progress_tx.try_send(format!("Resumed: {}", download.filename));
     }
 
     Ok(incomplete)
 }
+
+// ─── Wait / Progress Tracking ──────────────────────────────────────────────────
 
 /// Wait for all downloads to complete and report progress
 pub async fn wait_for_downloads(
@@ -761,12 +757,14 @@ pub async fn run_list(
     Ok(())
 }
 
+// ─── Resume Operations ─────────────────────────────────────────────────────────
+
 /// Run resume command with formatted output
 #[allow(clippy::too_many_arguments)]
 pub async fn run_resume(
     reporter: &ProgressReporter,
-    download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    progress_tx: mpsc::UnboundedSender<String>,
+    download_tx: mpsc::Sender<(String, String, PathBuf, Option<String>, Option<String>, u64)>,
+    progress_tx: mpsc::Sender<String>,
     download_queue: Arc<tokio::sync::Mutex<QueueState>>,
     download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
     verification_queue_size: Arc<AtomicUsize>,
@@ -809,6 +807,8 @@ pub async fn run_resume(
 
     Ok(())
 }
+
+// ─── Progress Reporter ─────────────────────────────────────────────────────────
 
 /// Progress reporter for console output (text and JSON modes)
 pub struct ProgressReporter {
@@ -1115,7 +1115,7 @@ impl ProgressReporter {
         } else {
             println!("Download Summary:");
             println!("  Files: {}", files.len());
-            println!("  Total Size: {}", format_file_size(total_size));
+            println!("  Total Size: {}", crate::utils::format_size(total_size));
             println!();
 
             if files.len() <= 10 {
@@ -1156,7 +1156,7 @@ impl ProgressReporter {
                 if is_gguf { "GGUF" } else { "Non-GGUF" }
             );
             println!("  Files to download: {}", files.len());
-            println!("  Total size: {}", format_file_size(total_size));
+            println!("  Total size: {}", crate::utils::format_size(total_size));
             println!("  Output directory: {}", output_dir);
             println!();
 
@@ -1191,7 +1191,7 @@ impl ProgressReporter {
         println!();
 
         for group in quantizations {
-            let total_size_str = format_file_size(group.total_size);
+            let total_size_str = crate::utils::format_size(group.total_size);
             println!(
                 "  {} ({} total, {} file{})",
                 group.quant_type,
@@ -1201,7 +1201,7 @@ impl ProgressReporter {
             );
 
             for file in &group.files {
-                let size_str = format_file_size(file.size);
+                let size_str = crate::utils::format_size(file.size);
                 println!("    - {} ({})", file.filename, size_str);
             }
             println!();
@@ -1295,7 +1295,7 @@ impl ProgressReporter {
             });
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
         } else {
-            let total_size_str = format_file_size(total_size);
+            let total_size_str = crate::utils::format_size(total_size);
             println!(
                 "Resuming {} download(s) ({} total):",
                 incomplete.len(),
@@ -1304,7 +1304,7 @@ impl ProgressReporter {
             println!();
 
             for download in incomplete {
-                let size_str = format_file_size(download.total_size);
+                let size_str = crate::utils::format_size(download.total_size);
                 println!("  - {} ({})", download.filename, size_str);
             }
             println!();

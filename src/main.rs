@@ -27,8 +27,8 @@ async fn main() -> color_eyre::Result<()> {
         let reporter = headless::ProgressReporter::new(json_mode);
 
         // Create channels for download manager
-        let (download_tx, download_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (download_tx, download_rx) = tokio::sync::mpsc::channel(1024);
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(1024);
         let download_rx = std::sync::Arc::new(tokio::sync::Mutex::new(download_rx));
 
         // Create shutdown signal
@@ -164,7 +164,6 @@ async fn main() -> color_eyre::Result<()> {
         let result = match cli_args.command {
             Some(cli::Commands::Search {
                 query,
-                sort: _,
                 min_downloads,
                 min_likes,
             }) => {

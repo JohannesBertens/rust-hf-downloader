@@ -1,1 +1,14 @@
 /target
+.fix-linear-issues-state.json
+review*.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -360,15 +360,11 @@ impl App {
     /// Clear model details immediately (for instant UI feedback during navigation)
     pub fn clear_model_details(&mut self) {
         // Clear quantizations (GGUF mode)
-        futures::executor::block_on(async {
-            self.quantizations.write().clear();
-        });
+        self.quantizations.write().clear();
 
-        // Clear metadata and file tree (Standard mode)
-        futures::executor::block_on(async {
-            *self.model_metadata.write() = None;
-            *self.file_tree.write() = None;
-        });
+        // Clear metadata and file tree (Standard mode) — direct parking_lot::RwLock writes
+        *self.model_metadata.write() = None;
+        *self.file_tree.write() = None;
 
         // Set loading state
         *self.loading_quants.write() = true;
@@ -377,10 +373,8 @@ impl App {
 
     /// Clear search results immediately (for instant UI feedback during search)
     pub fn clear_search_results(&mut self) {
-        // Clear models list
-        futures::executor::block_on(async {
-            self.models.write().clear();
-        });
+        // Clear models list — direct parking_lot::RwLock write
+        self.models.write().clear();
 
         // Clear model details
         self.clear_model_details();
@@ -398,13 +392,15 @@ impl App {
         // Check debounce
         let now = std::time::Instant::now();
         let should_prefetch = {
-            let mut last_time =
-                futures::executor::block_on(async { self.last_prefetch_time.lock().await });
-            if now.duration_since(*last_time).as_millis() > PREFETCH_DEBOUNCE_MS {
-                *last_time = now;
-                true
+            if let Ok(mut last_time) = self.last_prefetch_time.try_lock() {
+                if now.duration_since(*last_time).as_millis() > PREFETCH_DEBOUNCE_MS {
+                    *last_time = now;
+                    true
+                } else {
+                    false
+                }
             } else {
-                false
+                true // If lock contended, proceed with prefetch (better than skipping)
             }
         };
 

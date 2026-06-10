@@ -15,7 +15,7 @@ use tui_input::Input;
 pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>, u64);
 
 /// Type alias for download receiver to reduce complexity
-pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
+pub type DownloadReceiver = Arc<Mutex<mpsc::Receiver<DownloadMessage>>>;
 
 /// Main application state container
 #[derive(Debug)]
@@ -39,12 +39,12 @@ pub struct App {
     pub popup_mode: PopupMode,
     pub download_path_input: Input,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
+    pub download_tx: mpsc::Sender<DownloadMessage>,
     pub download_rx: DownloadReceiver,
     pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
     pub incomplete_downloads: Vec<DownloadMetadata>,
-    pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
-    pub status_tx: mpsc::UnboundedSender<String>,
+    pub status_rx: Arc<Mutex<mpsc::Receiver<String>>>,
+    pub status_tx: mpsc::Sender<String>,
     pub download_registry: Arc<Mutex<DownloadRegistry>>,
     pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
     pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
@@ -98,8 +98,8 @@ impl App {
 
         let quant_file_list_state = ListState::default();
 
-        let (download_tx, download_rx) = mpsc::unbounded_channel();
-        let (status_tx, status_rx) = mpsc::unbounded_channel();
+        let (download_tx, download_rx) = mpsc::channel(1024);
+        let (status_tx, status_rx) = mpsc::channel(1024);
 
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();

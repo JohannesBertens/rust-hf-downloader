@@ -33,7 +33,7 @@ pub async fn verification_worker(
     verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     verification_queue_size: Arc<AtomicUsize>,
-    status_tx: mpsc::UnboundedSender<String>,
+    status_tx: mpsc::Sender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
 ) {
     let max_concurrent = VERIFICATION_CONFIG
@@ -76,14 +76,14 @@ pub async fn verification_worker(
 async fn verify_file(
     item: VerificationQueueItem,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    status_tx: mpsc::UnboundedSender<String>,
+    status_tx: mpsc::Sender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
 ) {
     let local_path = PathBuf::from(&item.local_path);
 
     // Check if file exists
     if !local_path.exists() {
-        let _ = status_tx.send(format!(
+        let _ = status_tx.try_send(format!(
             "Error: Cannot verify {}, file not found",
             item.filename
         ));
@@ -102,7 +102,7 @@ async fn verify_file(
         });
     }
 
-    let _ = status_tx.send(format!("Verifying integrity of {}...", item.filename));
+    let _ = status_tx.try_send(format!("Verifying integrity of {}...", item.filename));
 
     // Calculate hash with progress tracking (use filename as identifier)
     match calculate_sha256_with_progress(
@@ -115,9 +115,9 @@ async fn verify_file(
     {
         Ok(calculated_hash) => {
             if calculated_hash == item.expected_sha256 {
-                let _ = status_tx.send(format!("✓ Hash verified for {}", item.filename));
+                let _ = status_tx.try_send(format!("✓ Hash verified for {}", item.filename));
             } else {
-                let _ = status_tx.send(format!(
+                let _ = status_tx.try_send(format!(
                     "✗ Hash mismatch for {}: expected {}..., got {}...",
                     item.filename,
                     &item.expected_sha256[..16],
@@ -137,7 +137,7 @@ async fn verify_file(
             }
         }
         Err(e) => {
-            let _ = status_tx.send(format!(
+            let _ = status_tx.try_send(format!(
                 "Warning: Failed to verify {}: {}",
                 item.filename, e
             ));

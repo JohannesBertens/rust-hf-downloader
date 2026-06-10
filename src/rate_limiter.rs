@@ -83,6 +83,11 @@ impl RateLimiter {
         loop {
             let mut state = self.state.lock().await;
 
+            // If rate is effectively 0, grant tokens immediately to avoid infinite loop
+            if state.rate <= 0.0 || state.max_tokens <= 0.0 {
+                return Ok(());
+            }
+
             // Refill tokens based on elapsed time
             let now = Instant::now();
             let elapsed = now.duration_since(state.last_refill).as_secs_f64();
