@@ -224,7 +224,7 @@ pub async fn download_model(
                 .await
                 .map_err(|e| HeadlessError::DownloadError(e.to_string()))?;
 
-            let _ = progress_tx.send(format!("Queued: {}", quant_file.filename));
+            let _ = progress_tx.try_send(format!("Queued: {}", quant_file.filename));
         }
     } else {
         // Non-GGUF model: download all files from metadata
@@ -251,7 +251,7 @@ pub async fn download_model(
                 .await
                 .map_err(|e| HeadlessError::DownloadError(e.to_string()))?;
 
-            let _ = progress_tx.send(format!("Queued: {}", file.rfilename));
+            let _ = progress_tx.try_send(format!("Queued: {}", file.rfilename));
         }
     }
 
@@ -507,7 +507,7 @@ pub async fn resume_downloads(
         .collect();
 
     if incomplete.is_empty() {
-        let _ = progress_tx.send("No incomplete downloads found".to_string());
+        let _ = progress_tx.try_send("No incomplete downloads found".to_string());
         return Ok(Vec::new());
     }
 
@@ -535,7 +535,7 @@ pub async fn resume_downloads(
             .await
             .map_err(|e| HeadlessError::DownloadError(e.to_string()))?;
 
-        let _ = progress_tx.send(format!("Resumed: {}", download.filename));
+        let _ = progress_tx.try_send(format!("Resumed: {}", download.filename));
     }
 
     Ok(incomplete)

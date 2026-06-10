@@ -27,7 +27,10 @@ pub fn load_config() -> AppOptions {
 
     match fs::read_to_string(&path) {
         Ok(contents) => match toml::from_str::<AppOptions>(&contents) {
-            Ok(options) => options,
+            Ok(options) => {
+                check_config_permissions();
+                options
+            },
             Err(e) => {
                 eprintln!(
                     "Warning: Configuration file at '{}' is malformed and could not be \

@@ -154,7 +154,7 @@ pub async fn start_download(params: DownloadParams) {
     } = params;
 
     // Notify user that download is starting
-    let _ = status_tx.send(format!("Starting download: {}", filename));
+    let _ = status_tx.try_send(format!("Starting download: {}", filename));
 
     // Validate filename to prevent path traversal
     let sanitized_filename = {
@@ -164,7 +164,7 @@ pub async fn start_download(params: DownloadParams) {
             match sanitize_path_component(part) {
                 Some(p) => sanitized_parts.push(p),
                 None => {
-                    let _ = status_tx.send(format!("Error: Invalid filename component: {}", part));
+                    let _ = status_tx.try_send(format!("Error: Invalid filename component: {}", part));
                     return;
                 }
             }
@@ -179,7 +179,7 @@ pub async fn start_download(params: DownloadParams) {
 
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
-        let _ = status_tx.send(format!("Error: Failed to create directory: {}", e));
+        let _ = status_tx.try_send(format!("Error: Failed to create directory: {}", e));
         return;
     }
 
@@ -187,7 +187,7 @@ pub async fn start_download(params: DownloadParams) {
     let canonical_base = match base_path.canonicalize() {
         Ok(path) => path,
         Err(e) => {
-            let _ = status_tx.send(format!("Error: Cannot canonicalize base path: {}", e));
+            let _ = status_tx.try_send(format!("Error: Cannot canonicalize base path: {}", e));
             return;
         }
     };
@@ -200,7 +200,7 @@ pub async fn start_download(params: DownloadParams) {
     if let Some(parent) = final_path.parent() {
         if let Ok(canonical_final_parent) = parent.canonicalize() {
             if !canonical_final_parent.starts_with(&canonical_base) {
-                let _ = status_tx.send("Error: Path traversal detected".to_string());
+                let _ = status_tx.try_send("Error: Path traversal detected".to_string());
                 return;
             }
         }
@@ -215,13 +215,13 @@ pub async fn start_download(params: DownloadParams) {
     // Create parent directories for the file (in case filename contains subdirectories like "Q4_K_M/file.gguf")
     if let Some(parent) = final_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            let _ = status_tx.send(format!("Error: Failed to create parent directory: {}", e));
+            let _ = status_tx.try_send(format!("Error: Failed to create parent directory: {}", e));
             return;
         }
     }
     if let Some(parent) = incomplete_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            let _ = status_tx.send(format!(
+            let _ = status_tx.try_send(format!(
                 "Error: Failed to create parent directory for incomplete file: {}",
                 e
             ));
@@ -231,18 +231,18 @@ pub async fn start_download(params: DownloadParams) {
 
     // Check for incomplete downloads and delete them to restart from beginning
     if incomplete_path.exists() {
-        let _ = status_tx.send(format!(
+        let _ = status_tx.try_send(format!(
             "Found incomplete download for {}, restarting from beginning",
             filename
         ));
         if let Err(e) = tokio::fs::remove_file(&incomplete_path).await {
-            let _ = status_tx.send(format!("Warning: Failed to delete incomplete file: {}", e));
+            let _ = status_tx.try_send(format!("Warning: Failed to delete incomplete file: {}", e));
         }
     }
 
     // Also check for the complete file - if it exists, queue for verification if enabled
     if final_path.exists() {
-        let _ = status_tx.send(format!(
+        let _ = status_tx.try_send(format!(
             "File {} already exists, skipping download",
             filename
         ));
@@ -281,9 +281,9 @@ pub async fn start_download(params: DownloadParams) {
                 )
                 .await;
 
-                let _ = status_tx.send(format!("Queued {} for verification", filename));
+                let _ = status_tx.try_send(format!("Queued {} for verification", filename));
             } else {
-                let _ = status_tx.send(format!(
+                let _ = status_tx.try_send(format!(
                     "File {} exists but no hash available for verification",
                     filename
                 ));
@@ -342,21 +342,21 @@ pub async fn start_download(params: DownloadParams) {
                                 item,
                             )
                             .await;
-                            let _ = status_tx.send(format!(
+                            let _ = status_tx.try_send(format!(
                                 "Download complete, queued for verification: {}",
                                 filename
                             ));
                         } else {
-                            let _ = status_tx.send(format!(
+                            let _ = status_tx.try_send(format!(
                                 "Download complete: {} (no hash available)",
                                 filename
                             ));
                         }
                     } else {
-                        let _ = status_tx.send(format!("Download complete: {}", filename));
+                        let _ = status_tx.try_send(format!("Download complete: {}", filename));
                     }
                 } else {
-                    let _ = status_tx.send(format!(
+                    let _ = status_tx.try_send(format!(
                         "Warning: Download may be incomplete: {} (got {} bytes, expected {})",
                         filename, final_size, expected_size
                     ));
@@ -365,7 +365,7 @@ pub async fn start_download(params: DownloadParams) {
             }
             Err(e) if retries > 0 && is_transient_error(&e) => {
                 retries -= 1;
-                let _ = status_tx.send(format!(
+                let _ = status_tx.try_send(format!(
                     "Download interrupted: {}. Retrying ({} left)...",
                     e, retries
                 ));
@@ -382,7 +382,7 @@ pub async fn start_download(params: DownloadParams) {
                 // Check for 401 Unauthorized errors
                 if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
                     if reqwest_err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                        let _ = status_tx.send(format!("AUTH_ERROR:{}", model_id));
+                        let _ = status_tx.try_send(format!("AUTH_ERROR:{}", model_id));
 
                         // Delete incomplete file
                         if incomplete_path.exists() {
@@ -403,7 +403,7 @@ pub async fn start_download(params: DownloadParams) {
                     }
                 }
 
-                let _ = status_tx.send(format!("Error: Download failed after retries: {}", e));
+                let _ = status_tx.try_send(format!("Error: Download failed after retries: {}", e));
 
                 // Delete incomplete file
                 if incomplete_path.exists() {
@@ -527,7 +527,7 @@ async fn download_chunked(
             Err(e) if e.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
                 // Try raw endpoint as fallback
                 let raw_url = url.replace("/resolve/main/", "/raw/main/");
-                let _ = status_tx.send(format!("404 error, trying raw endpoint for: {}", filename));
+                let _ = status_tx.try_send(format!("404 error, trying raw endpoint for: {}", filename));
 
                 let raw_response = client
                     .get(&raw_url)

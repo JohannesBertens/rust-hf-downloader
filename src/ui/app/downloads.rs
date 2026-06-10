@@ -47,9 +47,7 @@ impl App {
             FocusedPane::Models => {
                 // Download entire model repository (non-GGUF models in Standard mode)
                 if *self.display_mode.read() == crate::models::ModelDisplayMode::Standard {
-                    let metadata = futures::executor::block_on(async {
-                        self.model_metadata.read().clone()
-                    });
+                    let metadata = self.model_metadata.read().clone();
 
                     if let Some(meta) = metadata {
                         let file_count = meta.siblings.len();
@@ -63,9 +61,7 @@ impl App {
             }
             FocusedPane::QuantizationGroups => {
                 // Download entire quantization group
-                let quantizations = futures::executor::block_on(async {
-                    self.quantizations.read().clone()
-                });
+                let quantizations = self.quantizations.read().clone();
 
                 if let Some(selected) = self.quant_list_state.selected() {
                     if selected < quantizations.len() {
@@ -350,14 +346,16 @@ impl App {
 
             total_bytes += metadata.total_size;
 
-            let _ = self.download_tx.send((
-                metadata.model_id.clone(),
-                metadata.filename.clone(),
-                base_path,
-                metadata.expected_sha256.clone(),
-                hf_token.clone(),
-                metadata.total_size,
-            ));
+            let _ = self.download_tx
+                .send((
+                    metadata.model_id.clone(),
+                    metadata.filename.clone(),
+                    base_path,
+                    metadata.expected_sha256.clone(),
+                    hf_token.clone(),
+                    metadata.total_size,
+                ))
+                .await;
         }
 
         // Update queue size and bytes
