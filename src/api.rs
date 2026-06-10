@@ -71,7 +71,7 @@ pub async fn fetch_model_metadata(
     model_id: &str,
     token: Option<&String>,
 ) -> Result<ModelMetadata, reqwest::Error> {
-    let url = format!("https://huggingface.co/api/models/{}", model_id);
+    let url = format!("https://huggingface.co/api/models/{}", urlencoding::encode(model_id));
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let mut metadata: ModelMetadata = response.json().await?;
@@ -102,11 +102,12 @@ fn fetch_recursive_tree<'a>(
 > {
     Box::pin(async move {
         let tree_url = if path.is_empty() {
-            format!("https://huggingface.co/api/models/{}/tree/main", model_id)
+            format!("https://huggingface.co/api/models/{}/tree/main", urlencoding::encode(model_id))
         } else {
             format!(
                 "https://huggingface.co/api/models/{}/tree/main/{}",
-                model_id, path
+                urlencoding::encode(model_id),
+                path
             )
         };
 
@@ -282,7 +283,7 @@ pub async fn fetch_model_files(
             let subdir_url = format!(
                 "https://huggingface.co/api/models/{}/tree/main/{}",
                 urlencoding::encode(model_id),
-                file.path
+                urlencoding::encode(&file.path)
             );
 
             if let Ok(subdir_response) =

@@ -83,6 +83,11 @@ impl RateLimiter {
         loop {
             let mut state = self.state.lock().await;
 
+            // If rate is effectively 0, grant tokens immediately to avoid infinite loop
+            if state.rate <= 0.0 || state.max_tokens <= 0.0 {
+                return Ok(());
+            }
+
             // Refill tokens based on elapsed time
             let now = Instant::now();
             let elapsed = now.duration_since(state.last_refill).as_secs_f64();
@@ -99,12 +104,7 @@ impl RateLimiter {
 
             // Calculate wait time for tokens to refill
             let tokens_needed = requested - state.tokens;
-            // Guard against divide-by-zero: if rate is 0, clamp to 0 to avoid sleep(Infinity)
-            let wait_secs = if state.rate > 0.0 {
-                tokens_needed / state.rate
-            } else {
-                0.0
-            };
+            let wait_secs = tokens_needed / state.rate;
             drop(state); // Release lock before sleeping
 
             tokio::time::sleep(Duration::from_secs_f64(wait_secs)).await;
