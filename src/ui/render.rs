@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use tui_input::Input;
 
+// ─── Types ─────────────────────────────────────────────────────────────────────
+
 /// Parameters for rendering the UI
 pub struct RenderParams<'a> {
     pub input: &'a Input,
@@ -47,6 +49,8 @@ pub struct RenderParams<'a> {
     // Filter toolbar click areas
     pub filter_areas: &'a mut Vec<(usize, Rect)>,
 }
+
+// ─── Main Layout ───────────────────────────────────────────────────────────────
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
     let RenderParams {
@@ -317,6 +321,8 @@ struct StandardPanelContext<'a> {
     panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
 }
 
+// ─── Standard (Non-GGUF) Panels ────────────────────────────────────────────────
+
 fn render_standard_panels(
     frame: &mut Frame,
     chunks: std::rc::Rc<[Rect]>,
@@ -448,6 +454,8 @@ fn render_standard_panels(
 }
 
 #[allow(clippy::too_many_arguments)]
+// ─── File Tree Panel ───────────────────────────────────────────────────────────
+
 fn render_file_tree_panel(
     frame: &mut Frame,
     area: Rect,
@@ -550,6 +558,8 @@ fn render_file_tree_panel(
     frame.render_stateful_widget(tree_list, area, file_tree_state);
 }
 
+// ─── Tree Helpers ──────────────────────────────────────────────────────────────
+
 /// Count total number of files within a node (recursive)
 fn count_files(node: &FileTreeNode) -> usize {
     if node.is_dir {
@@ -591,6 +601,8 @@ struct GgufPanelContext<'a> {
     hovered_panel: &'a Option<FocusedPane>,
     panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
 }
+
+// ─── GGUF Panels ───────────────────────────────────────────────────────────────
 
 fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufPanelContext) {
     let GgufPanelContext {
@@ -745,6 +757,8 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
     panel_areas.push((FocusedPane::QuantizationFiles, chunks[1]));
     frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
 }
+
+// ─── Download / Verification Progress Bars ─────────────────────────────────────
 
 /// Format bytes as GB, rounding up. Returns empty string for 0 bytes.
 fn format_remaining_gb(bytes: u64) -> String {
@@ -1048,6 +1062,8 @@ fn render_verification_progress(
         frame.render_widget(gauge, ver_area);
     }
 }
+
+// ─── Popups ────────────────────────────────────────────────────────────────────
 
 pub fn render_resume_popup(
     frame: &mut Frame,
@@ -1620,6 +1636,8 @@ pub fn render_options_popup(
         frame.render_widget(widget, area);
     }
 }
+
+// ─── Filter Toolbar ────────────────────────────────────────────────────────────
 
 /// Render filter and sort toolbar
 #[allow(clippy::too_many_arguments)]

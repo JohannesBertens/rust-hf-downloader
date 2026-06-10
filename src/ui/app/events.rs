@@ -458,7 +458,7 @@ impl App {
 
     /// Navigate to next model in list
     pub fn next(&mut self) {
-        let models_len = futures::executor::block_on(async { self.models.read().len() });
+        let models_len = self.models.read().len();
 
         if models_len == 0 {
             return;
@@ -479,7 +479,7 @@ impl App {
 
     /// Navigate to previous model in list
     pub fn previous(&mut self) {
-        let models_len = futures::executor::block_on(async { self.models.read().len() });
+        let models_len = self.models.read().len();
 
         if models_len == 0 {
             return;
@@ -590,9 +590,7 @@ impl App {
             FocusedPane::QuantizationGroups => {
                 // When switching to quantization files, select first file if available
                 if let Some(selected_group) = self.quant_list_state.selected() {
-                    let quantizations = futures::executor::block_on(async {
-                        self.quantizations.read().clone()
-                    });
+                    let quantizations = self.quantizations.read().clone();
                     if selected_group < quantizations.len()
                         && !quantizations[selected_group].files.is_empty()
                     {
@@ -610,8 +608,7 @@ impl App {
 
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
-        let quants_len =
-            futures::executor::block_on(async { self.quantizations.read().len() });
+        let quants_len = self.quantizations.read().len();
 
         if quants_len == 0 {
             return;
@@ -632,8 +629,7 @@ impl App {
 
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
-        let quants_len =
-            futures::executor::block_on(async { self.quantizations.read().len() });
+        let quants_len = self.quantizations.read().len();
 
         if quants_len == 0 {
             return;
@@ -655,8 +651,7 @@ impl App {
     /// Navigate to next file in quantization files list
     pub fn next_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
-            let quantizations =
-                futures::executor::block_on(async { self.quantizations.read().clone() });
+            let quantizations = self.quantizations.read().clone();
 
             if selected_group < quantizations.len() {
                 let files_len = quantizations[selected_group].files.len();
@@ -683,8 +678,7 @@ impl App {
     /// Navigate to previous file in quantization files list
     pub fn previous_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
-            let quantizations =
-                futures::executor::block_on(async { self.quantizations.read().clone() });
+            let quantizations = self.quantizations.read().clone();
 
             if selected_group < quantizations.len() {
                 let files_len = quantizations[selected_group].files.len();
@@ -949,7 +943,7 @@ impl App {
 
     /// Navigate to next item in file tree
     pub fn next_file_tree_item(&mut self) {
-        let tree = futures::executor::block_on(async { self.file_tree.read().clone() });
+        let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
@@ -975,7 +969,7 @@ impl App {
 
     /// Navigate to previous item in file tree
     pub fn previous_file_tree_item(&mut self) {
-        let tree = futures::executor::block_on(async { self.file_tree.read().clone() });
+        let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
@@ -1006,23 +1000,23 @@ impl App {
             None => return,
         };
 
-        let mut tree =
-            futures::executor::block_on(async { self.file_tree.read().clone() });
+        let mut tree = self.file_tree.read().clone();
+        let mut needs_update = false;
 
-        if let Some(ref mut tree) = tree {
-            let flat = crate::ui::render::flatten_tree_for_navigation(tree);
+        if let Some(ref mut tree_inner) = tree {
+            let flat = crate::ui::render::flatten_tree_for_navigation(tree_inner);
 
             if selected_idx < flat.len() {
                 let selected_path = flat[selected_idx].path.clone();
 
                 // Find and toggle the node
-                toggle_node_expansion(tree, &selected_path);
-
-                // Update the tree
-                futures::executor::block_on(async {
-                    *self.file_tree.write() = Some(tree.clone());
-                });
+                toggle_node_expansion(tree_inner, &selected_path);
+                needs_update = true;
             }
+        }
+
+        if needs_update {
+            *self.file_tree.write() = tree;
         }
     }
 }

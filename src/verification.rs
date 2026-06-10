@@ -33,7 +33,7 @@ pub async fn verification_worker(
     verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     verification_queue_size: Arc<AtomicUsize>,
-    status_tx: mpsc::UnboundedSender<String>,
+    status_tx: mpsc::Sender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
 ) {
     let max_concurrent = VERIFICATION_CONFIG
@@ -76,7 +76,7 @@ pub async fn verification_worker(
 async fn verify_file(
     item: VerificationQueueItem,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    status_tx: mpsc::UnboundedSender<String>,
+    status_tx: mpsc::Sender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
 ) {
     let local_path = PathBuf::from(&item.local_path);

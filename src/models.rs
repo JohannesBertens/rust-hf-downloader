@@ -56,8 +56,7 @@ pub struct RepoFile {
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
-    #[allow(dead_code)]
-    pub lfs: Option<LfsInfo>, // Reuse existing LfsInfo struct
+    pub lfs: Option<LfsInfo>,
 }
 
 /// Tree node for hierarchical file display
@@ -120,14 +119,15 @@ pub struct ChunkProgress {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DownloadProgress {
+    #[allow(dead_code)]
     pub model_id: String,
     pub filename: String,
     pub downloaded: u64,
     pub total: u64,
     pub speed_mbps: f64,
     pub chunks: Vec<ChunkProgress>,
+    #[allow(dead_code)]
     pub verifying: bool,
 }
 
@@ -178,7 +178,6 @@ pub enum FilterPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    #[allow(dead_code)] // Kept for potential future use (inline editing)
     Editing,
 }
 

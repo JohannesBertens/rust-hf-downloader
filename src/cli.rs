@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug, Clone)]
 #[command(name = "rust-hf-downloader")]
 #[command(about = "TUI and CLI for searching and downloading HuggingFace models", long_about = None)]
-#[command(version = "1.3.2")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct Cli {
     /// Run in CLI mode (no TUI)
     #[arg(long, global = true)]
@@ -14,8 +14,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// HuggingFace authentication token
-    #[arg(long, global = true)]
+    /// HuggingFace authentication token (populated from HF_TOKEN env var in config)
+    #[arg(skip)]
     pub token: Option<String>,
 
     /// Dry run - show what would be done without executing
@@ -32,10 +32,6 @@ pub enum Commands {
     Search {
         /// Search query
         query: String,
-
-        /// Sort field (downloads, likes, modified, name)
-        #[arg(long)]
-        sort: Option<String>,
 
         /// Minimum downloads filter
         #[arg(long)]

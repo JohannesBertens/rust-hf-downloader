@@ -282,6 +282,7 @@ impl App {
                             hf_token.clone(),
                             file_size,
                         ))
+                        .await
                         .is_ok()
                     {
                         success_count += 1;
@@ -535,6 +536,7 @@ impl App {
                             hf_token.clone(),
                             file_size,
                         ))
+                        .await
                         .is_ok()
                     {
                         success_count += 1;
