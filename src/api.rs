@@ -352,7 +352,7 @@ pub async fn fetch_model_files(
         })
         .collect();
 
-    quantization_groups.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    quantization_groups.sort_by_key(|g| std::cmp::Reverse(g.total_size));
 
     Ok(quantization_groups)
 }

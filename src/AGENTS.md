@@ -18,7 +18,7 @@ Data flow (high level):
 
 Threading/async:
 - Tokio runtime; heavy tasks spawned from App; shared state via Arc<Mutex>/Arc<RwLock>
-- Global runtime-tunable atomics in DownloadConfig and VERIFICATION_CONFIG
+- Runtime-tunable config (DownloadConfig / VerificationConfig atomics + RateLimiter) is owned by DownloadRuntime, not globals; threaded into the engine via DownloadParams / verification_worker
 
 Auth model:
 - Optional HF token; only set Authorization header when non-empty; read from config and passed to api/http_client and downloads.
@@ -64,14 +64,14 @@ Key modules
 - start_download(DownloadParams) async orchestrates a safe, parallel, ranged GET download:
   • Validates/sanitizes paths; restarts if .incomplete exists; preserves subdirectories in filename
   • HEAD via Range to get total size; falls back to /raw endpoint on 404
-  • Preallocates file; spawns chunk workers limited by DOWNLOAD_CONFIG.concurrent_threads
+  • Preallocates file; spawns chunk workers limited by download_config.concurrent_threads
   • Updates DownloadProgress and registry continuously; renames .incomplete -> final on success
   • Queues verification when enabled and hash known
 - validate_and_sanitize_path(base_path, model_id, filename) -> PathBuf; blocks traversal
-- DownloadConfig (global atomics) controls chunking, retries, timeouts, and UI update cadence
+- DownloadConfig (atomics, owned by DownloadRuntime) controls chunking, retries, timeouts, and UI update cadence
 
 7) verification.rs
-- VERIFICATION_CONFIG (global atomics)
+- VerificationConfig (atomics, owned by DownloadRuntime)
 - verification_worker: processes VerificationQueueItems with concurrency limit
 - verify_file: streams file, computes SHA256 with progress, updates registry to HashMismatch on mismatch
 - queue_verification: append to queue and increment size

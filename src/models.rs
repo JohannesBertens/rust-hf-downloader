@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -248,6 +249,17 @@ impl QueueState {
 
 pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
 pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
+
+/// Message enqueued onto the download manager channel.
+/// Tuple: (model_id, filename, path, sha256, hf_token, total_size)
+pub type DownloadMessage = (
+    String,
+    String,
+    PathBuf,
+    Option<String>,
+    Option<String>,
+    u64,
+);
 
 // Additional cache types for comprehensive API caching
 pub type MetadataCache = HashMap<String, ModelMetadata>;

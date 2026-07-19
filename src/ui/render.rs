@@ -786,6 +786,7 @@ fn calculate_eta_minutes(remaining_bytes: u64, speed_mbps: f64) -> Option<String
 }
 
 /// Render both download and verification progress bars
+#[allow(clippy::too_many_arguments)]
 pub fn render_progress_bars(
     frame: &mut Frame,
     download_progress: &Option<DownloadProgress>,
@@ -793,10 +794,19 @@ pub fn render_progress_bars(
     download_queue_bytes: u64,
     verification_progress: &[VerificationProgress],
     verification_queue_size: usize,
+    rate_limit_enabled: bool,
+    rate_limit_bytes_per_sec: u64,
 ) {
     // Render download progress (top-right) if active
     if let Some(progress) = download_progress {
-        render_download_progress(frame, progress, download_queue_size, download_queue_bytes);
+        render_download_progress(
+            frame,
+            progress,
+            download_queue_size,
+            download_queue_bytes,
+            rate_limit_enabled,
+            rate_limit_bytes_per_sec,
+        );
     }
 
     // Render verification progress (bottom-right) if active
@@ -811,6 +821,8 @@ fn render_download_progress(
     progress: &DownloadProgress,
     queue_size: usize,
     queue_bytes: u64,
+    rate_limit_enabled: bool,
+    rate_limit_bytes_per_sec: u64,
 ) {
     // Filter active chunks
     let active_chunks: Vec<_> = progress.chunks.iter().filter(|c| c.is_active).collect();
@@ -881,14 +893,8 @@ fn render_download_progress(
 
     // Label with speed and rate limit indicator
     let label = if progress.speed_mbps > 0.0 {
-        use std::sync::atomic::Ordering;
-        let rate_limited = crate::download::DOWNLOAD_CONFIG
-            .rate_limit_enabled
-            .load(Ordering::Relaxed);
-        if rate_limited {
-            let limit_bytes = crate::download::DOWNLOAD_CONFIG
-                .rate_limit_bytes_per_sec
-                .load(Ordering::Relaxed);
+        if rate_limit_enabled {
+            let limit_bytes = rate_limit_bytes_per_sec;
             let limit_mbps = limit_bytes as f64 / 1_048_576.0;
             format!(
                 "{}% - {:.1}/{:.1} MB/s",

@@ -1,17 +1,4 @@
-mod api;
-mod cli;
-mod config;
-mod download;
-mod headless;
-mod http_client;
-mod models;
-mod rate_limiter;
-mod registry;
-mod ui;
-mod utils;
-mod verification;
-
-use std::sync::atomic::AtomicUsize;
+use rust_hf_downloader::{cli, config, headless, runtime, ui};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
@@ -26,105 +13,37 @@ async fn main() -> color_eyre::Result<()> {
         let json_mode = cli_args.json;
         let reporter = headless::ProgressReporter::new(json_mode);
 
-        // Create channels for download manager
-        let (download_tx, download_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
-        let download_rx = std::sync::Arc::new(tokio::sync::Mutex::new(download_rx));
+        // Shared download/verification runtime (channels + state + workers).
+        let rt = runtime::DownloadRuntime::new();
 
-        // Create shutdown signal
+        // Graceful-shutdown signal shared with the long-running commands.
         let shutdown_signal = std::sync::Arc::new(tokio::sync::Mutex::new(false));
         let shutdown_signal_clone = shutdown_signal.clone();
 
-        // Spawn download manager task
-        let download_progress = std::sync::Arc::new(tokio::sync::Mutex::new(None));
-        let complete_downloads =
-            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let verification_queue = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let verification_queue_size = std::sync::Arc::new(AtomicUsize::new(0));
-        let download_queue = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::models::QueueState::new(0, 0),
-        ));
-        let download_registry = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::models::DownloadRegistry::default(),
-        ));
+        // Background workers: verification (SHA256) + concurrent download manager.
+        rt.spawn_verification_worker();
+        rt.spawn_download_manager_concurrent();
 
-        // Create verification progress tracking
-        let verification_progress = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-
-        // Clone Arcs for the download manager task
-        let download_progress_clone = download_progress.clone();
-        let complete_downloads_clone = complete_downloads.clone();
-        let verification_queue_clone = verification_queue.clone();
-        let verification_queue_size_clone = verification_queue_size.clone();
-        let download_queue_clone = download_queue.clone();
-        let progress_tx_clone = progress_tx.clone();
-        let _download_registry_clone = download_registry.clone();
-
-        // Spawn verification worker
-        let verification_queue_worker = verification_queue.clone();
-        let verification_progress_worker = verification_progress.clone();
-        let verification_queue_size_worker = verification_queue_size.clone();
-        let progress_tx_verify = progress_tx.clone();
-        let download_registry_verify = download_registry.clone();
-        tokio::spawn(async move {
-            verification::verification_worker(
-                verification_queue_worker,
-                verification_progress_worker,
-                verification_queue_size_worker,
-                progress_tx_verify,
-                download_registry_verify,
-            )
-            .await;
-        });
-
-        tokio::spawn(async move {
-            use crate::download::DownloadParams;
-
-            loop {
-                // Lock only when receiving, release immediately after
-                // This prevents deadlock by not holding download_rx while acquiring other locks
-                let (model_id, filename, path, sha256, hf_token, total_size) = {
-                    let mut rx = download_rx.lock().await;
-                    match rx.recv().await {
-                        Some(msg) => msg,
-                        None => break, // Channel closed
-                    }
-                };
-
-                // Spawn download task
-                let params = DownloadParams {
-                    model_id,
-                    filename,
-                    base_path: path,
-                    progress: download_progress_clone.clone(),
-                    status_tx: progress_tx_clone.clone(),
-                    complete_downloads: complete_downloads_clone.clone(),
-                    expected_sha256: sha256,
-                    verification_queue: verification_queue_clone.clone(),
-                    verification_queue_size: verification_queue_size_clone.clone(),
-                    hf_token,
-                };
-
-                let queue = download_queue_clone.clone();
-                tokio::spawn(async move {
-                    download::start_download(params).await;
-                    let mut queue = queue.lock().await;
-                    queue.remove(1, total_size);
-                });
-            }
-        });
-
-        // Spawn progress reporter task
-        let json_mode = cli_args.json;
+        // Progress reporter: drain the shared status channel to the terminal.
+        let status_rx = rt.status_rx.clone();
         tokio::spawn(async move {
             use std::io::Write;
-
-            while let Some(msg) = progress_rx.recv().await {
+            let mut rx = status_rx.lock().await;
+            while let Some(msg) = rx.recv().await {
                 if !json_mode {
                     print!("\r\x1b[2K");
                     let _ = std::io::stdout().flush();
                 }
                 eprintln!("{}", msg);
+            }
+        });
+
+        // Auth-required reporter: drain the typed auth channel.
+        let auth_rx = rt.auth_rx.clone();
+        tokio::spawn(async move {
+            let mut rx = auth_rx.lock().await;
+            while let Some(model_id) = rx.recv().await {
+                eprintln!("Authentication required for {}", model_id);
             }
         });
 
@@ -207,12 +126,7 @@ async fn main() -> color_eyre::Result<()> {
                         &output_dir,
                         cli_args.token,
                         &reporter,
-                        download_tx,
-                        progress_tx,
-                        download_queue,
-                        download_progress,
-                        verification_queue_size,
-                        verification_progress,
+                        &rt,
                         shutdown_signal,
                     )
                     .await
@@ -222,17 +136,7 @@ async fn main() -> color_eyre::Result<()> {
                 headless::run_list(&model_id, cli_args.token.as_ref(), &reporter).await
             }
             Some(cli::Commands::Resume) => {
-                headless::run_resume(
-                    &reporter,
-                    download_tx,
-                    progress_tx,
-                    download_queue,
-                    download_progress,
-                    verification_queue_size,
-                    verification_progress,
-                    shutdown_signal,
-                )
-                .await
+                headless::run_resume(&reporter, &rt, shutdown_signal).await
             }
             None => {
                 eprintln!("Error: No command specified");
@@ -249,8 +153,7 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
-    // Original TUI flow (unchanged)
-    // Enable mouse capture for the terminal
+    // TUI flow
     use crossterm::event::EnableMouseCapture;
     use crossterm::execute;
     use std::io::stdout;
@@ -260,7 +163,6 @@ async fn main() -> color_eyre::Result<()> {
     let result = ui::App::new().run(terminal).await;
     ratatui::restore();
 
-    // Disable mouse capture when exiting
     use crossterm::event::DisableMouseCapture;
     execute!(stdout(), DisableMouseCapture)?;
 

@@ -9,6 +9,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, Mutex, Semaphore};
 
 /// Global verification configuration (thread-safe, runtime-modifiable)
+#[derive(Default)]
 pub struct VerificationConfig {
     pub concurrent_verifications: AtomicUsize,
     pub buffer_size: AtomicUsize,
@@ -25,8 +26,6 @@ impl VerificationConfig {
     }
 }
 
-pub static VERIFICATION_CONFIG: VerificationConfig = VerificationConfig::new();
-
 /// Main verification worker that processes the verification queue
 /// Runs continuously in the background, processing items as they arrive
 pub async fn verification_worker(
@@ -35,8 +34,9 @@ pub async fn verification_worker(
     verification_queue_size: Arc<AtomicUsize>,
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
+    verification_config: Arc<VerificationConfig>,
 ) {
-    let max_concurrent = VERIFICATION_CONFIG
+    let max_concurrent = verification_config
         .concurrent_verifications
         .load(Ordering::Relaxed);
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
@@ -60,9 +60,17 @@ pub async fn verification_worker(
             let verification_progress = verification_progress.clone();
             let status_tx = status_tx.clone();
             let download_registry = download_registry.clone();
+            let verification_config = verification_config.clone();
 
             tokio::spawn(async move {
-                verify_file(item, verification_progress, status_tx, download_registry).await;
+                verify_file(
+                    item,
+                    verification_progress,
+                    status_tx,
+                    download_registry,
+                    verification_config,
+                )
+                .await;
                 drop(permit);
             });
         } else {
@@ -78,6 +86,7 @@ async fn verify_file(
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
+    verification_config: Arc<VerificationConfig>,
 ) {
     let local_path = PathBuf::from(&item.local_path);
 
@@ -110,6 +119,7 @@ async fn verify_file(
         &verification_progress,
         &item.filename,
         item.total_size,
+        &verification_config,
     )
     .await
     {
@@ -157,10 +167,11 @@ async fn calculate_sha256_with_progress(
     verification_progress: &Arc<Mutex<Vec<VerificationProgress>>>,
     filename: &str,
     total_size: u64,
+    verification_config: &VerificationConfig,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let mut file = tokio::fs::File::open(file_path).await?;
     let mut hasher = Sha256::new();
-    let buffer_size = VERIFICATION_CONFIG.buffer_size.load(Ordering::Relaxed);
+    let buffer_size = verification_config.buffer_size.load(Ordering::Relaxed);
     let mut buffer = vec![0u8; buffer_size];
 
     let mut bytes_verified = 0u64;
@@ -192,7 +203,7 @@ async fn calculate_sha256_with_progress(
         iteration += 1;
 
         // Update progress at configured interval to avoid excessive mutex locks
-        let update_interval = VERIFICATION_CONFIG
+        let update_interval = verification_config
             .update_interval_iterations
             .load(Ordering::Relaxed);
         #[allow(clippy::manual_is_multiple_of)]

@@ -23,3 +23,16 @@ pub fn format_size(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+
+/// Format a duration as a compact human-readable string (e.g. "1m 30s").
+#[allow(dead_code)]
+pub fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}

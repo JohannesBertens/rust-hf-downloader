@@ -45,7 +45,8 @@ Files and roles
 
 Important queues and channels
 - download_tx/rx: (model_id, filename, base_path, expected_sha256, hf_token)
-- status_tx/rx: strings consumed by run loop to update status and popups (e.g., AUTH_ERROR:<model_id>)
+- status_tx/rx: info strings consumed by run loop to update the status line
+- auth_tx/rx: typed channel carrying model_ids that hit a gated/auth error (drives the AuthError popup)
 - verification_queue(+size) and verification_progress: shared with verification worker
 
 Caching strategy

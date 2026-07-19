@@ -8,7 +8,6 @@ mod verification;
 // Re-export App struct
 pub use state::App;
 
-use crate::download::start_download;
 use crate::models::PopupMode;
 use color_eyre::Result;
 use crossterm::event::{Event, KeyEventKind};
@@ -31,65 +30,9 @@ impl App {
         *self.status.write() = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
 
-        // Spawn verification worker
-        let verification_queue = self.verification_queue.clone();
-        let verification_progress = self.verification_progress.clone();
-        let verification_queue_size = self.verification_queue_size.clone();
-        let status_tx_verify = self.status_tx.clone();
-        let download_registry = self.download_registry.clone();
-
-        tokio::spawn(async move {
-            crate::verification::verification_worker(
-                verification_queue,
-                verification_progress,
-                verification_queue_size,
-                status_tx_verify,
-                download_registry,
-            )
-            .await;
-        });
-
-        // Spawn download manager task
-        let download_rx = self.download_rx.clone();
-        let download_progress = self.download_progress.clone();
-        let download_queue = self.download_queue.clone();
-        let status_tx = self.status_tx.clone();
-        let complete_downloads = self.complete_downloads.clone();
-        let verification_queue = self.verification_queue.clone();
-        let verification_queue_size = self.verification_queue_size.clone();
-        tokio::spawn(async move {
-            loop {
-                // Lock only when receiving, release immediately after
-                // This prevents deadlock by not holding download_rx while acquiring other locks
-                let (model_id, filename, path, sha256, hf_token, total_size) = {
-                    let mut rx = download_rx.lock().await;
-                    match rx.recv().await {
-                        Some(msg) => msg,
-                        None => break, // Channel closed
-                    }
-                };
-
-                // download_rx lock is now released before we acquire other locks
-                // Decrement queue size and bytes when we start processing
-                {
-                    let mut queue = download_queue.lock().await;
-                    queue.remove(1, total_size);
-                }
-                start_download(crate::download::DownloadParams {
-                    model_id,
-                    filename,
-                    base_path: path,
-                    progress: download_progress.clone(),
-                    status_tx: status_tx.clone(),
-                    complete_downloads: complete_downloads.clone(),
-                    expected_sha256: sha256,
-                    verification_queue: verification_queue.clone(),
-                    verification_queue_size: verification_queue_size.clone(),
-                    hf_token,
-                })
-                .await;
-            }
-        });
+        // Spawn background workers (verification + serial download manager).
+        self.runtime.spawn_verification_worker();
+        self.runtime.spawn_download_manager_serial();
 
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
@@ -123,8 +66,7 @@ impl App {
 
         // For tokio Mutex, use try_lock() to avoid blocking/deadlock
         // Fall back to cached values if lock is held by another task
-        let complete_downloads = self
-            .complete_downloads
+        let complete_downloads = self.runtime.complete_downloads
             .try_lock()
             .map(|guard| {
                 // Update cache when we successfully get the lock
@@ -167,8 +109,7 @@ impl App {
         );
 
         // For progress bars, use try_lock() with fallback to cached values
-        let download_progress = self
-            .download_progress
+        let download_progress = self.runtime.download_progress
             .try_lock()
             .map(|guard| {
                 self.cached_download_progress = guard.clone();
@@ -176,8 +117,7 @@ impl App {
             })
             .unwrap_or_else(|_| self.cached_download_progress.clone());
 
-        let download_queue = self
-            .download_queue
+        let download_queue = self.runtime.download_queue
             .try_lock()
             .map(|guard| {
                 self.cached_download_queue = guard.clone();
@@ -190,8 +130,7 @@ impl App {
                 )
             });
 
-        let verification_progress = self
-            .verification_progress
+        let verification_progress = self.runtime.verification_progress
             .try_lock()
             .map(|guard| {
                 self.cached_verification_progress = guard.clone();
@@ -199,7 +138,7 @@ impl App {
             })
             .unwrap_or_else(|_| self.cached_verification_progress.clone());
 
-        let verification_queue_size = self.verification_queue_size.load(Ordering::Relaxed);
+        let verification_queue_size = self.runtime.verification_queue_size.load(Ordering::Relaxed);
 
         crate::ui::render::render_progress_bars(
             frame,
@@ -208,6 +147,14 @@ impl App {
             download_queue.1,
             &verification_progress,
             verification_queue_size,
+            self.runtime
+                .download_config
+                .rate_limit_enabled
+                .load(Ordering::Relaxed),
+            self.runtime
+                .download_config
+                .rate_limit_bytes_per_sec
+                .load(Ordering::Relaxed),
         );
 
         // Render popups (must be last to appear on top)
@@ -484,16 +431,17 @@ impl App {
         use crossterm::event::{MouseButton, MouseEventKind};
 
         // Check for status messages from download tasks (non-blocking)
-        if let Ok(mut rx) = self.status_rx.try_lock() {
+        if let Ok(mut rx) = self.runtime.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
-                if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
-                    let model_url = format!("https://huggingface.co/{}", model_id);
-                    self.popup_mode = PopupMode::AuthError { model_url };
-                    *self.status.write() =
-                        format!("Authentication required for {}", model_id);
-                } else {
-                    *self.status.write() = msg;
-                }
+                *self.status.write() = msg;
+            }
+        }
+        // Check for auth-required signals (typed channel, no magic-string parsing)
+        if let Ok(mut rx) = self.runtime.auth_rx.try_lock() {
+            while let Ok(model_id) = rx.try_recv() {
+                let model_url = format!("https://huggingface.co/{}", model_id);
+                self.popup_mode = PopupMode::AuthError { model_url };
+                *self.status.write() = format!("Authentication required for {}", model_id);
             }
         }
 

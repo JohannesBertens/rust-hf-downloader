@@ -3,22 +3,12 @@ use crossterm::event::EventStream;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tui_input::Input;
 
-/// Type alias for download message tuple
-/// Tuple: (model_id, filename, path, sha256, hf_token, total_size)
-pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>, u64);
-
-/// Type alias for download receiver to reduce complexity
-pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
-
 /// Main application state container
-#[derive(Debug)]
 pub struct App {
     pub running: bool,
     pub event_stream: EventStream,
@@ -38,18 +28,8 @@ pub struct App {
     pub api_cache: Arc<RwLock<crate::models::ApiCache>>,
     pub popup_mode: PopupMode,
     pub download_path_input: Input,
-    pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    pub download_rx: DownloadReceiver,
-    pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
+    pub runtime: crate::runtime::DownloadRuntime,
     pub incomplete_downloads: Vec<DownloadMetadata>,
-    pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
-    pub status_tx: mpsc::UnboundedSender<String>,
-    pub download_registry: Arc<Mutex<DownloadRegistry>>,
-    pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
-    pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<AtomicUsize>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
@@ -98,9 +78,6 @@ impl App {
 
         let quant_file_list_state = ListState::default();
 
-        let (download_tx, download_rx) = mpsc::unbounded_channel();
-        let (status_tx, status_rx) = mpsc::unbounded_channel();
-
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
 
@@ -136,18 +113,8 @@ impl App {
             api_cache: Arc::new(RwLock::new(crate::models::ApiCache::default())),
             popup_mode: PopupMode::None,
             download_path_input,
-            download_progress: Arc::new(Mutex::new(None)),
-            download_tx,
-            download_rx: Arc::new(Mutex::new(download_rx)),
-            download_queue: Arc::new(Mutex::new(crate::models::QueueState::new(0, 0))),
+            runtime: crate::runtime::DownloadRuntime::new(),
             incomplete_downloads: Vec::new(),
-            status_rx: Arc::new(Mutex::new(status_rx)),
-            status_tx,
-            download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
-            complete_downloads: Arc::new(Mutex::new(HashMap::new())),
-            verification_progress: Arc::new(Mutex::new(Vec::new())),
-            verification_queue: Arc::new(Mutex::new(Vec::new())),
-            verification_queue_size: Arc::new(AtomicUsize::new(0)),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -183,58 +150,59 @@ impl App {
         use std::sync::atomic::Ordering;
 
         // Download config
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .concurrent_threads
             .store(self.options.concurrent_threads, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .target_chunks
             .store(self.options.num_chunks, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .min_chunk_size
             .store(self.options.min_chunk_size, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .max_chunk_size
             .store(self.options.max_chunk_size, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .enable_verification
             .store(self.options.verification_on_completion, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .max_retries
             .store(self.options.max_retries, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .download_timeout_secs
             .store(self.options.download_timeout_secs, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .retry_delay_secs
             .store(self.options.retry_delay_secs, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .progress_update_interval_ms
             .store(self.options.progress_update_interval_ms, Ordering::Relaxed);
 
         // Rate limiting config
         let rate_limit_enabled = self.options.download_rate_limit_enabled;
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .rate_limit_enabled
             .store(rate_limit_enabled, Ordering::Relaxed);
         let bytes_per_sec = (self.options.download_rate_limit_mbps * 1_048_576.0) as u64;
-        crate::download::DOWNLOAD_CONFIG
+        self.runtime.download_config
             .rate_limit_bytes_per_sec
             .store(bytes_per_sec, Ordering::Relaxed);
 
         // Update rate limiter asynchronously
+        let rate_limiter = self.runtime.rate_limiter.clone();
         tokio::spawn(async move {
-            crate::download::RATE_LIMITER.set_rate(bytes_per_sec).await;
-            crate::download::RATE_LIMITER.set_enabled(rate_limit_enabled);
+            rate_limiter.set_rate(bytes_per_sec).await;
+            rate_limiter.set_enabled(rate_limit_enabled);
         });
 
         // Verification config
-        crate::verification::VERIFICATION_CONFIG
+        self.runtime.verification_config
             .concurrent_verifications
             .store(self.options.concurrent_verifications, Ordering::Relaxed);
-        crate::verification::VERIFICATION_CONFIG
+        self.runtime.verification_config
             .buffer_size
             .store(self.options.verification_buffer_size, Ordering::Relaxed);
-        crate::verification::VERIFICATION_CONFIG
+        self.runtime.verification_config
             .update_interval_iterations
             .store(self.options.verification_update_interval, Ordering::Relaxed);
     }

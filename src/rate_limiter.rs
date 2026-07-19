@@ -29,6 +29,7 @@ impl RateLimiterState {
 /// - Tokens refill at a configured rate (bytes/sec)
 /// - Bucket has a maximum capacity (rate * burst_window)
 /// - Allows short bursts above the average rate for TCP efficiency
+#[derive(Clone)]
 pub struct RateLimiter {
     /// Consolidated state (tokens, max_tokens, rate, last_refill)
     state: Arc<Mutex<RateLimiterState>>,

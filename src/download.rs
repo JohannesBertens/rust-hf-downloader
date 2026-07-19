@@ -1,10 +1,9 @@
 use crate::models::{
-    ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus,
-    VerificationQueueItem,
+    ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadRegistry,
+    DownloadStatus, VerificationQueueItem,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::registry;
-use once_cell::sync::Lazy;
 use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -19,7 +18,11 @@ pub struct DownloadParams {
     pub base_path: PathBuf,
     pub progress: Arc<Mutex<Option<DownloadProgress>>>,
     pub status_tx: mpsc::UnboundedSender<String>,
+    pub auth_tx: mpsc::UnboundedSender<String>,
     pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
+    pub download_registry: Arc<Mutex<DownloadRegistry>>,
+    pub download_config: Arc<DownloadConfig>,
+    pub rate_limiter: RateLimiter,
     pub expected_sha256: Option<String>,
     pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     pub verification_queue_size: Arc<AtomicUsize>,
@@ -34,6 +37,9 @@ struct ChunkedDownloadParams<'a> {
     progress: &'a Arc<Mutex<Option<DownloadProgress>>>,
     status_tx: &'a mpsc::UnboundedSender<String>,
     complete_downloads: &'a Arc<Mutex<CompleteDownloads>>,
+    download_registry: &'a Arc<Mutex<DownloadRegistry>>,
+    download_config: &'a Arc<DownloadConfig>,
+    rate_limiter: &'a RateLimiter,
     filename: &'a str,
     expected_sha256: &'a Option<String>,
     hf_token: &'a Option<String>,
@@ -146,7 +152,11 @@ pub async fn start_download(params: DownloadParams) {
         base_path,
         progress,
         status_tx,
+        auth_tx,
         complete_downloads,
+        download_registry,
+        download_config,
+        rate_limiter,
         expected_sha256,
         verification_queue,
         verification_queue_size,
@@ -247,17 +257,27 @@ pub async fn start_download(params: DownloadParams) {
             filename
         ));
 
-        // Update registry as complete
-        let mut registry = registry::load_registry();
-        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-            entry.status = DownloadStatus::Complete;
+        // Update registry as complete (in-memory source of truth, then persist)
+        let completed_entry = {
+            let mut registry = download_registry.lock().await;
+            let entry = registry
+                .downloads
+                .iter_mut()
+                .find(|d| d.url == url)
+                .map(|entry| {
+                    entry.status = DownloadStatus::Complete;
+                    entry.clone()
+                });
+            registry::save_registry(&registry);
+            entry
+        };
+        if let Some(entry) = completed_entry {
             let mut complete = complete_downloads.lock().await;
-            complete.insert(filename.clone(), entry.clone());
+            complete.insert(filename.clone(), entry);
         }
-        registry::save_registry(&registry);
 
         // Queue verification if enabled AND hash is available
-        let verification_enabled = DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
+        let verification_enabled = download_config.enable_verification.load(Ordering::Relaxed);
         if verification_enabled {
             if let Some(expected_hash) = &expected_sha256 {
                 // Get file size for progress tracking
@@ -295,7 +315,7 @@ pub async fn start_download(params: DownloadParams) {
         return;
     }
 
-    let mut retries = DOWNLOAD_CONFIG.max_retries.load(Ordering::Relaxed);
+    let mut retries = download_config.max_retries.load(Ordering::Relaxed);
 
     loop {
         let chunked_params = ChunkedDownloadParams {
@@ -305,6 +325,9 @@ pub async fn start_download(params: DownloadParams) {
             progress: &progress,
             status_tx: &status_tx,
             complete_downloads: &complete_downloads,
+            download_registry: &download_registry,
+            download_config: &download_config,
+            rate_limiter: &rate_limiter,
             filename: &filename,
             expected_sha256: &expected_sha256,
             hf_token: &hf_token,
@@ -315,25 +338,29 @@ pub async fn start_download(params: DownloadParams) {
                 // Verify the download is complete
                 if final_size == expected_size && expected_size > 0 {
                     // Update registry: mark as complete and update URL if it changed (raw fallback)
-                    let mut registry = registry::load_registry();
-                    if let Some(entry) = registry
-                        .downloads
-                        .iter_mut()
-                        .find(|d| d.url == url || d.url == successful_url)
-                    {
-                        entry.status = DownloadStatus::Complete;
-                        entry.downloaded_size = final_size;
-                        entry.url = successful_url.clone(); // Update with successful URL
-
-                        // Update in-memory complete downloads map
+                    let completed_entry = {
+                        let mut registry = download_registry.lock().await;
+                        let entry = registry
+                            .downloads
+                            .iter_mut()
+                            .find(|d| d.url == url || d.url == successful_url)
+                            .map(|entry| {
+                                entry.status = DownloadStatus::Complete;
+                                entry.downloaded_size = final_size;
+                                entry.url = successful_url.clone();
+                                entry.clone()
+                            });
+                        registry::save_registry(&registry);
+                        entry
+                    };
+                    if let Some(entry) = completed_entry {
                         let mut complete = complete_downloads.lock().await;
-                        complete.insert(filename.clone(), entry.clone());
+                        complete.insert(filename.clone(), entry);
                     }
-                    registry::save_registry(&registry);
 
                     // Queue verification if enabled AND hash is available
                     let verification_enabled =
-                        DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
+                        download_config.enable_verification.load(Ordering::Relaxed);
                     if verification_enabled {
                         if let Some(item) = verification_item {
                             crate::verification::queue_verification(
@@ -369,7 +396,7 @@ pub async fn start_download(params: DownloadParams) {
                     "Download interrupted: {}. Retrying ({} left)...",
                     e, retries
                 ));
-                let retry_delay = DOWNLOAD_CONFIG.retry_delay_secs.load(Ordering::Relaxed);
+                let retry_delay = download_config.retry_delay_secs.load(Ordering::Relaxed);
                 tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
 
                 // Delete incomplete file to restart from beginning
@@ -382,7 +409,7 @@ pub async fn start_download(params: DownloadParams) {
                 // Check for 401 Unauthorized errors
                 if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
                     if reqwest_err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                        let _ = status_tx.send(format!("AUTH_ERROR:{}", model_id));
+                        let _ = auth_tx.send(model_id.clone());
 
                         // Delete incomplete file
                         if incomplete_path.exists() {
@@ -390,12 +417,16 @@ pub async fn start_download(params: DownloadParams) {
                         }
 
                         // Update registry with failed state
-                        let mut registry = registry::load_registry();
-                        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-                            entry.status = DownloadStatus::Incomplete;
-                            entry.downloaded_size = 0;
+                        {
+                            let mut registry = download_registry.lock().await;
+                            if let Some(entry) =
+                                registry.downloads.iter_mut().find(|d| d.url == url)
+                            {
+                                entry.status = DownloadStatus::Incomplete;
+                                entry.downloaded_size = 0;
+                            }
+                            registry::save_registry(&registry);
                         }
-                        registry::save_registry(&registry);
 
                         let mut prog = progress.lock().await;
                         *prog = None;
@@ -411,12 +442,14 @@ pub async fn start_download(params: DownloadParams) {
                 }
 
                 // Update registry with failed state
-                let mut registry = registry::load_registry();
-                if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-                    entry.status = DownloadStatus::Incomplete;
-                    entry.downloaded_size = 0;
+                {
+                    let mut registry = download_registry.lock().await;
+                    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                        entry.status = DownloadStatus::Incomplete;
+                        entry.downloaded_size = 0;
+                    }
+                    registry::save_registry(&registry);
                 }
-                registry::save_registry(&registry);
 
                 let mut prog = progress.lock().await;
                 *prog = None;
@@ -440,6 +473,7 @@ fn is_transient_error(e: &Box<dyn std::error::Error + Send + Sync>) -> bool {
 }
 
 // Global download configuration (thread-safe, runtime-modifiable)
+#[derive(Default)]
 pub struct DownloadConfig {
     pub concurrent_threads: AtomicUsize,
     pub target_chunks: AtomicUsize,
@@ -472,21 +506,10 @@ impl DownloadConfig {
     }
 }
 
-// Global static configuration
-pub static DOWNLOAD_CONFIG: DownloadConfig = DownloadConfig::new();
-
-// Global rate limiter instance (initialized lazily)
-pub static RATE_LIMITER: Lazy<RateLimiter> = Lazy::new(|| {
-    let rate = DOWNLOAD_CONFIG
-        .rate_limit_bytes_per_sec
-        .load(Ordering::Relaxed);
-    RateLimiter::new(rate, 2.0) // 2 second burst window (fixed)
-});
-
-fn calculate_chunk_size(file_size: u64) -> usize {
-    let target_chunks = DOWNLOAD_CONFIG.target_chunks.load(Ordering::Relaxed) as u64;
-    let min_size = DOWNLOAD_CONFIG.min_chunk_size.load(Ordering::Relaxed);
-    let max_size = DOWNLOAD_CONFIG.max_chunk_size.load(Ordering::Relaxed);
+fn calculate_chunk_size(file_size: u64, config: &DownloadConfig) -> usize {
+    let target_chunks = config.target_chunks.load(Ordering::Relaxed) as u64;
+    let min_size = config.min_chunk_size.load(Ordering::Relaxed);
+    let max_size = config.max_chunk_size.load(Ordering::Relaxed);
     let ideal_size = file_size / target_chunks;
     ideal_size.clamp(min_size, max_size) as usize
 }
@@ -505,13 +528,16 @@ async fn download_chunked(
         progress,
         status_tx,
         complete_downloads: _complete_downloads,
+        download_registry,
+        download_config,
+        rate_limiter,
         filename,
         expected_sha256,
         hf_token,
     } = params;
 
     let local_path_str = final_path.to_string_lossy().to_string();
-    let timeout_secs = DOWNLOAD_CONFIG
+    let timeout_secs = download_config
         .download_timeout_secs
         .load(Ordering::Relaxed);
     let client = crate::http_client::build_client_with_token(
@@ -563,29 +589,31 @@ async fn download_chunked(
         return Err("Could not determine file size".into());
     }
 
-    // Update metadata entry in registry
-    let mut registry = registry::load_registry();
+    // Update metadata entry in registry (in-memory source of truth, then persist)
+    {
+        let mut registry = download_registry.lock().await;
 
-    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-        entry.total_size = total_size;
-        entry.downloaded_size = 0;
-    } else {
-        registry.downloads.push(DownloadMetadata {
-            model_id: model_id.to_string(),
-            filename: filename.to_string(),
-            url: url.to_string(),
-            local_path: local_path_str.clone(),
-            total_size,
-            downloaded_size: 0,
-            status: DownloadStatus::Incomplete,
-            expected_sha256: expected_sha256.clone(),
-        });
+        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+            entry.total_size = total_size;
+            entry.downloaded_size = 0;
+        } else {
+            registry.downloads.push(DownloadMetadata {
+                model_id: model_id.to_string(),
+                filename: filename.to_string(),
+                url: url.to_string(),
+                local_path: local_path_str.clone(),
+                total_size,
+                downloaded_size: 0,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: expected_sha256.clone(),
+            });
+        }
+
+        registry::save_registry(&registry);
     }
 
-    registry::save_registry(&registry);
-
     // Calculate dynamic chunk size based on file size
-    let chunk_size = calculate_chunk_size(total_size);
+    let chunk_size = calculate_chunk_size(total_size, download_config);
 
     // Initialize progress with chunk tracking
     let num_chunks = total_size.div_ceil(chunk_size as u64) as usize;
@@ -616,7 +644,7 @@ async fn download_chunked(
     drop(file); // Close to allow multiple handles
 
     // Step 3: Download chunks in parallel
-    let max_concurrent = DOWNLOAD_CONFIG.concurrent_threads.load(Ordering::Relaxed);
+    let max_concurrent = download_config.concurrent_threads.load(Ordering::Relaxed);
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let mut handles = Vec::new();
 
@@ -637,6 +665,8 @@ async fn download_chunked(
         let progress = progress.clone();
         let last_update_time = last_update_time.clone();
         let last_downloaded_bytes = last_downloaded_bytes.clone();
+        let download_config = download_config.clone();
+        let rate_limiter = rate_limiter.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -677,6 +707,8 @@ async fn download_chunked(
                 &progress_downloaded,
                 &last_update_time,
                 &last_downloaded_bytes,
+                &download_config,
+                &rate_limiter,
             )
             .await;
 
@@ -752,6 +784,8 @@ async fn download_chunk_with_progress(
     progress_downloaded: &Arc<Mutex<u64>>,
     last_update_time: &Arc<Mutex<std::time::Instant>>,
     last_downloaded_bytes: &Arc<Mutex<u64>>,
+    download_config: &DownloadConfig,
+    rate_limiter: &RateLimiter,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let range = format!("bytes={}-{}", start, stop);
 
@@ -780,8 +814,8 @@ async fn download_chunk_with_progress(
         let bytes = item?;
 
         // Rate limiting: acquire tokens before writing
-        if DOWNLOAD_CONFIG.rate_limit_enabled.load(Ordering::Relaxed) {
-            RATE_LIMITER.acquire(bytes.len()).await?;
+        if download_config.rate_limit_enabled.load(Ordering::Relaxed) {
+            rate_limiter.acquire(bytes.len()).await?;
         }
 
         file.write_all(&bytes).await?;
@@ -798,7 +832,7 @@ async fn download_chunk_with_progress(
         // Update chunk progress and total speed at configured interval
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(*last_update).as_secs_f64();
-        let interval_secs = DOWNLOAD_CONFIG
+        let interval_secs = download_config
             .progress_update_interval_ms
             .load(Ordering::Relaxed) as f64
             / 1000.0;

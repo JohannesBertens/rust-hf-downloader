@@ -15,7 +15,7 @@ impl App {
 
         // Update the app's registry
         {
-            let mut reg = self.download_registry.lock().await;
+            let mut reg = self.runtime.download_registry.lock().await;
             *reg = registry.clone();
         }
 
@@ -26,7 +26,7 @@ impl App {
         let complete_map = registry::get_complete_downloads(&registry);
 
         {
-            let mut complete = self.complete_downloads.lock().await;
+            let mut complete = self.runtime.complete_downloads.lock().await;
             *complete = complete_map;
         }
 
@@ -190,7 +190,7 @@ impl App {
 
                 // Load registry and add metadata entries for all files
                 let mut registry = {
-                    let reg = self.download_registry.lock().await;
+                    let reg = self.runtime.download_registry.lock().await;
                     reg.clone()
                 };
 
@@ -240,7 +240,7 @@ impl App {
                 // Save registry with all new entries
                 registry::save_registry(&registry);
                 {
-                    let mut reg = self.download_registry.lock().await;
+                    let mut reg = self.runtime.download_registry.lock().await;
                     *reg = registry;
                 }
 
@@ -249,7 +249,7 @@ impl App {
 
                 // Increment queue size and bytes by number of files
                 {
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.runtime.download_queue.lock().await;
                     queue.add(num_files, total_queued_bytes);
                 }
 
@@ -272,8 +272,7 @@ impl App {
                         0 // Fallback for safety
                     };
 
-                    if self
-                        .download_tx
+                    if self.runtime.download_tx
                         .send((
                             model.id.clone(),
                             filename.clone(),
@@ -316,7 +315,7 @@ impl App {
                         .map(|f| f.size)
                         .sum();
 
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.runtime.download_queue.lock().await;
                     queue.remove(failed_count, failed_bytes);
                 }
             }
@@ -349,7 +348,7 @@ impl App {
 
             total_bytes += metadata.total_size;
 
-            let _ = self.download_tx.send((
+            let _ = self.runtime.download_tx.send((
                 metadata.model_id.clone(),
                 metadata.filename.clone(),
                 base_path,
@@ -361,7 +360,7 @@ impl App {
 
         // Update queue size and bytes
         {
-            let mut queue = self.download_queue.lock().await;
+            let mut queue = self.runtime.download_queue.lock().await;
             queue.add(count, total_bytes);
         }
 
@@ -376,7 +375,7 @@ impl App {
 
         // Load registry
         let mut registry = {
-            let reg = self.download_registry.lock().await;
+            let reg = self.runtime.download_registry.lock().await;
             reg.clone()
         };
 
@@ -399,7 +398,7 @@ impl App {
         // Save updated registry
         registry::save_registry(&registry);
         {
-            let mut reg = self.download_registry.lock().await;
+            let mut reg = self.runtime.download_registry.lock().await;
             *reg = registry;
         }
 
@@ -448,7 +447,7 @@ impl App {
 
                 // Load registry
                 let mut registry = {
-                    let reg = self.download_registry.lock().await;
+                    let reg = self.runtime.download_registry.lock().await;
                     reg.clone()
                 };
 
@@ -494,7 +493,7 @@ impl App {
                 // Save registry with all new entries
                 registry::save_registry(&registry);
                 {
-                    let mut reg = self.download_registry.lock().await;
+                    let mut reg = self.runtime.download_registry.lock().await;
                     *reg = registry;
                 }
 
@@ -503,7 +502,7 @@ impl App {
 
                 // Increment queue size and bytes
                 {
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.runtime.download_queue.lock().await;
                     queue.add(num_files, total_queued_bytes);
                 }
 
@@ -525,8 +524,7 @@ impl App {
                     let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
                     let file_size = file.size.unwrap_or(0);
 
-                    if self
-                        .download_tx
+                    if self.runtime.download_tx
                         .send((
                             model.id.clone(),
                             file.rfilename.clone(),
@@ -561,7 +559,7 @@ impl App {
                         .filter_map(|f| f.size)
                         .sum();
 
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.runtime.download_queue.lock().await;
                     queue.remove(failed_count, failed_bytes);
                 }
             }

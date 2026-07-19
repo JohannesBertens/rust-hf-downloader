@@ -7,6 +7,7 @@ use crate::api;
 use crate::config;
 use crate::models::*;
 use crate::registry;
+use crate::utils::format_size;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,16 +52,6 @@ impl From<std::io::Error> for HeadlessError {
     }
 }
 
-/// Type for download messages sent to the download manager
-pub type DownloadMessage = (
-    String,         // model_id
-    String,         // filename
-    PathBuf,        // output path
-    Option<String>, // sha256
-    Option<String>, // hf_token
-    u64,            // total_size
-);
-
 /// Exit code constants
 pub const EXIT_SUCCESS: i32 = 0;
 pub const EXIT_ERROR: i32 = 1;
@@ -76,36 +67,6 @@ impl HeadlessError {
             | HeadlessError::ConfigError(_)
             | HeadlessError::IoError(_) => EXIT_ERROR,
         }
-    }
-}
-
-/// Format file size in human-readable format
-pub fn format_file_size(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    const MB: u64 = 1_048_576;
-    const KB: u64 = 1_024;
-
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
-/// Format duration in human-readable format
-#[allow(dead_code)]
-pub fn format_duration(duration: std::time::Duration) -> String {
-    let secs = duration.as_secs();
-    if secs >= 3600 {
-        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("{}m {}s", secs / 60, secs % 60)
-    } else {
-        format!("{}s", secs)
     }
 }
 
@@ -292,7 +253,7 @@ fn calculate_gguf_download_summary(
                             "{} ({} files, {})",
                             q.quant_type,
                             q.files.len(),
-                            format_file_size(q.total_size)
+                            format_size(q.total_size)
                         )
                     })
                     .collect();
@@ -323,7 +284,7 @@ fn calculate_gguf_download_summary(
                     "{} ({} files, {})",
                     q.quant_type,
                     q.files.len(),
-                    format_file_size(q.total_size)
+                    format_size(q.total_size)
                 )
             })
             .collect();
@@ -434,12 +395,7 @@ pub async fn run_download(
     output_dir: &str,
     hf_token: Option<String>,
     reporter: &ProgressReporter,
-    download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    progress_tx: mpsc::UnboundedSender<String>,
-    download_queue: Arc<tokio::sync::Mutex<QueueState>>,
-    download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
-    verification_queue_size: Arc<AtomicUsize>,
-    verification_progress: Arc<tokio::sync::Mutex<Vec<VerificationProgress>>>,
+    runtime: &crate::runtime::DownloadRuntime,
     shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
 ) -> Result<(), HeadlessError> {
     // Validate model ID first
@@ -463,7 +419,7 @@ pub async fn run_download(
 
     // Update queue state before enqueueing downloads
     {
-        let mut queue = download_queue.lock().await;
+        let mut queue = runtime.download_queue.lock().await;
         queue.add(files_to_download.len(), total_size);
     }
 
@@ -474,15 +430,15 @@ pub async fn run_download(
         download_all,
         output_dir,
         hf_token,
-        progress_tx,
-        download_tx,
+        runtime.status_tx.clone(),
+        runtime.download_tx.clone(),
     )
     .await?;
 
     // Wait for downloads to complete
     wait_for_downloads(
-        download_queue,
-        download_progress,
+        runtime.download_queue.clone(),
+        runtime.download_progress.clone(),
         reporter,
         shutdown_signal.clone(),
     )
@@ -490,8 +446,8 @@ pub async fn run_download(
 
     // Wait for verification to complete
     wait_for_verification(
-        verification_queue_size,
-        verification_progress,
+        runtime.verification_queue_size.clone(),
+        runtime.verification_progress.clone(),
         reporter,
         shutdown_signal,
     )
@@ -765,15 +721,11 @@ pub async fn run_list(
 #[allow(clippy::too_many_arguments)]
 pub async fn run_resume(
     reporter: &ProgressReporter,
-    download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    progress_tx: mpsc::UnboundedSender<String>,
-    download_queue: Arc<tokio::sync::Mutex<QueueState>>,
-    download_progress: Arc<tokio::sync::Mutex<Option<DownloadProgress>>>,
-    verification_queue_size: Arc<AtomicUsize>,
-    verification_progress: Arc<tokio::sync::Mutex<Vec<VerificationProgress>>>,
+    runtime: &crate::runtime::DownloadRuntime,
     shutdown_signal: Arc<tokio::sync::Mutex<bool>>,
 ) -> Result<(), HeadlessError> {
-    let incomplete = resume_downloads(download_tx, progress_tx).await?;
+    let incomplete =
+        resume_downloads(runtime.download_tx.clone(), runtime.status_tx.clone()).await?;
 
     if incomplete.is_empty() {
         reporter.report_no_incomplete();
@@ -785,14 +737,14 @@ pub async fn run_resume(
     // Update queue state before downloads begin
     {
         let total_size: u64 = incomplete.iter().map(|d| d.total_size).sum();
-        let mut queue = download_queue.lock().await;
+        let mut queue = runtime.download_queue.lock().await;
         queue.add(incomplete.len(), total_size);
     }
 
     // Wait for downloads to complete
     wait_for_downloads(
-        download_queue,
-        download_progress,
+        runtime.download_queue.clone(),
+        runtime.download_progress.clone(),
         reporter,
         shutdown_signal.clone(),
     )
@@ -800,8 +752,8 @@ pub async fn run_resume(
 
     // Wait for verification to complete
     wait_for_verification(
-        verification_queue_size,
-        verification_progress,
+        runtime.verification_queue_size.clone(),
+        runtime.verification_progress.clone(),
         reporter,
         shutdown_signal,
     )
@@ -1115,7 +1067,7 @@ impl ProgressReporter {
         } else {
             println!("Download Summary:");
             println!("  Files: {}", files.len());
-            println!("  Total Size: {}", format_file_size(total_size));
+            println!("  Total Size: {}", format_size(total_size));
             println!();
 
             if files.len() <= 10 {
@@ -1156,7 +1108,7 @@ impl ProgressReporter {
                 if is_gguf { "GGUF" } else { "Non-GGUF" }
             );
             println!("  Files to download: {}", files.len());
-            println!("  Total size: {}", format_file_size(total_size));
+            println!("  Total size: {}", format_size(total_size));
             println!("  Output directory: {}", output_dir);
             println!();
 
@@ -1191,7 +1143,7 @@ impl ProgressReporter {
         println!();
 
         for group in quantizations {
-            let total_size_str = format_file_size(group.total_size);
+            let total_size_str = format_size(group.total_size);
             println!(
                 "  {} ({} total, {} file{})",
                 group.quant_type,
@@ -1201,7 +1153,7 @@ impl ProgressReporter {
             );
 
             for file in &group.files {
-                let size_str = format_file_size(file.size);
+                let size_str = format_size(file.size);
                 println!("    - {} ({})", file.filename, size_str);
             }
             println!();
@@ -1295,7 +1247,7 @@ impl ProgressReporter {
             });
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
         } else {
-            let total_size_str = format_file_size(total_size);
+            let total_size_str = format_size(total_size);
             println!(
                 "Resuming {} download(s) ({} total):",
                 incomplete.len(),
@@ -1304,7 +1256,7 @@ impl ProgressReporter {
             println!();
 
             for download in incomplete {
-                let size_str = format_file_size(download.total_size);
+                let size_str = format_size(download.total_size);
                 println!("  - {} ({})", download.filename, size_str);
             }
             println!();
