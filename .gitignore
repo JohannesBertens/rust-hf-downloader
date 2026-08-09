@@ -1,1 +1,4 @@
 /target
+# pi-coding-agent subagent scratch dir
+.pi-subagents/
+
