@@ -693,7 +693,6 @@ mod tests {
             card_data: None,
             siblings: siblings.iter().map(|s| repo_file(s, 1)).collect(),
             tags: Vec::new(),
-            gated: serde_json::Value::Null,
         }
     }
 

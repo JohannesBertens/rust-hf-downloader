@@ -23,3 +23,33 @@ pub fn format_size(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bytes_below_kb_boundary() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn kb_boundary_switches_to_kb() {
+        assert_eq!(format_size(1024), "1.00 KB");
+    }
+
+    #[test]
+    fn mb_and_gb_boundaries() {
+        assert_eq!(format_size(1_048_576), "1.00 MB");
+        assert_eq!(format_size(1_073_741_824), "1.00 GB");
+        assert_eq!(format_size(5_368_709_120), "5.00 GB");
+    }
+
+    #[test]
+    fn format_number_abbreviates() {
+        assert_eq!(format_number(999), "999");
+        assert_eq!(format_number(1_000), "1.0K");
+        assert_eq!(format_number(1_234_567), "1.2M");
+    }
+}

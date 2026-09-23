@@ -32,9 +32,6 @@ pub struct ModelMetadata {
     pub siblings: Vec<RepoFile>, // All files in the repo
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Gated status: "auto", "manual", false, or true
-    #[serde(default)]
-    pub gated: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -1633,7 +1633,7 @@ pub fn render_options_popup(
     // fits; otherwise flow directly after the field list so the help block
     // can never overlap the last fields on short terminals.
     let content_rows = y_offset;
-    let help_y = if inner.height >= content_rows + help_n + 1 {
+    let help_y = if inner.height > content_rows + help_n {
         inner.y + inner.height - help_n - 1
     } else {
         inner.y + content_rows
