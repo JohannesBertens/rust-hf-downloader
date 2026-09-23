@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## [2.0.0] - 2026-09-23
+
+### Version 2.0.0 (2026-09-23)
+- **Breaking**: Removed headless/CLI mode entirely; the binary is TUI-only now
+- **Removed**: `clap` and direct `serde_json` dependencies, `examples/headless/`
+- **Testing**: Added snapshot test suite (insta) and unit tests for api/models/utils
+- **Fixed**: Options popup help/field collision on short terminals; shard filename truncation
+- **Files Modified**: `src/main.rs`, `src/cli.rs` (deleted), `src/headless.rs` (deleted), `src/ui/render.rs`, `src/api.rs`, `src/models.rs`, `src/utils.rs`, `src/config.rs`, `Cargo.toml`, `README.md`
+- **Migration**: CLI/automation users must pin v1.4.0 or drive the TUI via a PTY harness
+
 ## [1.4.0] - 2026-02-13
 
 ### Version 1.4.0 (2026-02-13)
