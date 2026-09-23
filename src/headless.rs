@@ -1326,3 +1326,90 @@ fn print_tree_node(node: &FileTreeNode, depth: usize) {
         print_tree_node(child, depth + 1);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- validate_model_id ----
+
+    #[test]
+    fn valid_model_id_passes() {
+        assert!(validate_model_id("author/model").is_ok());
+        assert!(validate_model_id("meta-llama/Llama-2-7b-hf").is_ok());
+    }
+
+    #[test]
+    fn model_id_without_slash_fails() {
+        assert!(validate_model_id("model").is_err());
+    }
+
+    #[test]
+    fn model_id_with_too_many_slashes_fails() {
+        assert!(validate_model_id("a/b/c").is_err());
+    }
+
+    #[test]
+    fn model_id_with_empty_components_fails() {
+        assert!(validate_model_id("/model").is_err());
+        assert!(validate_model_id("author/").is_err());
+    }
+
+    // ---- format_file_size ----
+
+    #[test]
+    fn size_bytes_below_kb() {
+        assert_eq!(format_file_size(0), "0 B");
+        assert_eq!(format_file_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn size_kb_boundary() {
+        assert_eq!(format_file_size(1024), "1.00 KB");
+        assert_eq!(format_file_size(1536), "1.50 KB");
+    }
+
+    #[test]
+    fn size_mb_boundary() {
+        // 1 MB - 1 byte stays in the KB bucket and rounds up to 1024.00.
+        assert_eq!(format_file_size(1_048_575), "1024.00 KB");
+        assert_eq!(format_file_size(1_048_576), "1.00 MB");
+    }
+
+    #[test]
+    fn size_gb_boundary() {
+        assert_eq!(format_file_size(1_073_741_823), "1024.00 MB");
+        assert_eq!(format_file_size(1_073_741_824), "1.00 GB");
+    }
+
+    // ---- HeadlessError::exit_code ----
+
+    #[test]
+    fn auth_error_maps_to_exit_code_2() {
+        let err = HeadlessError::AuthError("bad token".to_string());
+        assert_eq!(err.exit_code(), EXIT_AUTH_ERROR);
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn api_and_io_errors_map_to_exit_code_1() {
+        assert_eq!(
+            HeadlessError::ApiError("boom".to_string()).exit_code(),
+            EXIT_ERROR
+        );
+        assert_eq!(HeadlessError::ApiError("boom".to_string()).exit_code(), 1);
+        assert_eq!(
+            HeadlessError::DownloadError("boom".to_string()).exit_code(),
+            EXIT_ERROR
+        );
+        assert_eq!(
+            HeadlessError::ConfigError("boom".to_string()).exit_code(),
+            EXIT_ERROR
+        );
+        assert_eq!(
+            HeadlessError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+                .exit_code(),
+            EXIT_ERROR
+        );
+    }
+}
