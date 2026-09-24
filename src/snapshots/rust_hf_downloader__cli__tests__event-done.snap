@@ -1,0 +1,17 @@
+---
+source: src/cli.rs
+assertion_line: 1442
+expression: json
+---
+{
+  "type": "done",
+  "summary": {
+    "files": 3,
+    "downloaded": 2,
+    "skipped": 1,
+    "verified": 3,
+    "failed": 0,
+    "hash_mismatch": 0,
+    "total_bytes": 4947802324
+  }
+}

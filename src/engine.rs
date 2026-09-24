@@ -62,6 +62,11 @@ pub struct EngineState {
     /// for JSON events and exit codes.
     pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
     pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
+    /// Per-file download outcomes, streamed by the manager as each file
+    /// finishes (the join handle additionally returns the full list). The TUI
+    /// ignores this channel; the CLI consumes it for live events.
+    pub outcome_tx: mpsc::UnboundedSender<FileOutcome>,
+    pub outcome_rx: Arc<Mutex<mpsc::UnboundedReceiver<FileOutcome>>>,
     /// Session-lifetime verification counters (HUD footer / CLI summary)
     pub verification_results: VerificationResultCounters,
 }
@@ -74,6 +79,7 @@ impl EngineState {
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
+        let (outcome_tx, outcome_rx) = mpsc::unbounded_channel();
 
         (
             Self {
@@ -91,6 +97,8 @@ impl EngineState {
                 download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
                 verify_tx,
                 verify_rx: Arc::new(Mutex::new(verify_rx)),
+                outcome_tx,
+                outcome_rx: Arc::new(Mutex::new(outcome_rx)),
                 verification_results: VerificationResultCounters::default(),
             },
             download_tx,
@@ -165,6 +173,10 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 hf_token,
             })
             .await;
+
+            // Stream per-file outcomes to live consumers (the join handle
+            // still returns the complete list for drain-based callers).
+            let _ = state.outcome_tx.send(outcome.clone());
 
             outcomes.push(outcome);
         }

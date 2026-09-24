@@ -1,0 +1,11 @@
+---
+source: src/cli.rs
+assertion_line: 1442
+expression: json
+---
+{
+  "type": "file_complete",
+  "filename": "model-Q4_K_M.gguf",
+  "status": "downloaded",
+  "bytes": 4947802324
+}

@@ -57,6 +57,10 @@ pub struct App {
     /// the channel stays connected for the engine's lifetime.
     pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
     pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
+    /// Per-file download outcomes streamed by the engine manager (the TUI
+    /// does not read this channel; the CLI renders live events from it).
+    pub outcome_tx: mpsc::UnboundedSender<FileOutcome>,
+    pub outcome_rx: Arc<Mutex<mpsc::UnboundedReceiver<FileOutcome>>>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
@@ -112,6 +116,7 @@ impl App {
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
+        let (outcome_tx, outcome_rx) = mpsc::unbounded_channel();
 
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
@@ -164,6 +169,8 @@ impl App {
             verification_in_flight: Arc::new(AtomicUsize::new(0)),
             verify_tx,
             verify_rx: Arc::new(Mutex::new(verify_rx)),
+            outcome_tx,
+            outcome_rx: Arc::new(Mutex::new(outcome_rx)),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -217,6 +224,8 @@ impl App {
             download_registry: self.download_registry.clone(),
             verify_tx: self.verify_tx.clone(),
             verify_rx: self.verify_rx.clone(),
+            outcome_tx: self.outcome_tx.clone(),
+            outcome_rx: self.outcome_rx.clone(),
             verification_results: self.verification_results.clone(),
         }
     }
