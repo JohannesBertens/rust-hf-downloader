@@ -1,6 +1,6 @@
 use crate::models::{
     ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus,
-    VerificationQueueItem,
+    FileOutcome, VerificationQueueItem,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::registry;
@@ -62,26 +62,47 @@ pub fn sanitize_path_component(component: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Canonicalized nearest existing ancestor of `path` (path itself excluded).
+/// Used to keep containment checks symlink-consistent when the base
+/// directory does not exist yet (e.g. a first download into ~/models).
+fn nearest_existing_ancestor(path: &std::path::Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        let parent = current.parent()?;
+        if parent.as_os_str().is_empty() {
+            return None;
+        }
+        if let Ok(canonical) = parent.canonicalize() {
+            return Some(canonical);
+        }
+        current = parent;
+    }
+}
+
 pub fn validate_and_sanitize_path(
     base_path: &str,
     model_id: &str,
     filename: &str,
 ) -> Result<PathBuf, String> {
-    // Validate base path
-    let base = PathBuf::from(base_path);
+    // Validate base path (relative paths resolve against the current dir,
+    // preserving the previous behavior)
+    let mut base = PathBuf::from(base_path);
+    if !base.is_absolute() {
+        base = std::env::current_dir()
+            .map_err(|e| format!("Cannot determine current directory: {}", e))?
+            .join(&base);
+    }
 
-    // Canonicalize base path if it exists, otherwise just validate it doesn't contain traversal
+    // Canonicalize base path if it exists; otherwise resolve to its nearest
+    // existing ancestor so the containment checks below stay correct (and
+    // symlink-consistent) for a not-yet-created base directory.
     let canonical_base = if base.exists() {
         base.canonicalize()
             .map_err(|e| format!("Invalid base path: {}", e))?
     } else {
-        // For non-existent paths, ensure they're absolute or under home/current dir
-        if base.is_absolute() {
-            base.clone()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| format!("Cannot determine current directory: {}", e))?
-                .join(&base)
+        match nearest_existing_ancestor(&base) {
+            Some(ancestor) => ancestor,
+            None => base.clone(),
         }
     };
 
@@ -106,8 +127,10 @@ pub fn validate_and_sanitize_path(
         sanitized_filename_parts.push(sanitized);
     }
 
-    // Build the final path: base/author/model_name/[subdir/]filename
-    let mut final_path = canonical_base.join(&author).join(&model_name);
+    // Build the final path: base/author/model_name/[subdir/]filename.
+    // Built from the *original* base, not the canonical anchor, so a
+    // not-yet-created base directory keeps its place in the result.
+    let mut final_path = base.join(&author).join(&model_name);
     for part in sanitized_filename_parts {
         final_path = final_path.join(&part);
     }
@@ -118,12 +141,18 @@ pub fn validate_and_sanitize_path(
             return Err("Path traversal detected: final path escapes base directory".to_string());
         }
     } else {
-        // File doesn't exist yet, check parent directories
+        // File doesn't exist yet, check parent directories. The first
+        // existing ancestor of the final path must be under the base — or an
+        // *ancestor of* the base, which is the normal first-download case
+        // where the base directory has not been created yet (no symlink can
+        // exist under a nonexistent path, so containment still holds).
         let mut check_path = final_path.clone();
         while let Some(parent) = check_path.parent() {
             if parent.exists() {
                 if let Ok(canonical_parent) = parent.canonicalize() {
-                    if !canonical_parent.starts_with(&canonical_base) {
+                    if !canonical_parent.starts_with(&canonical_base)
+                        && !canonical_base.starts_with(&canonical_parent)
+                    {
                         return Err(
                             "Path traversal detected: parent path escapes base directory"
                                 .to_string(),
@@ -139,7 +168,7 @@ pub fn validate_and_sanitize_path(
     Ok(final_path)
 }
 
-pub async fn start_download(params: DownloadParams) {
+pub async fn start_download(params: DownloadParams) -> FileOutcome {
     let DownloadParams {
         model_id,
         filename,
@@ -165,22 +194,25 @@ pub async fn start_download(params: DownloadParams) {
                 Some(p) => sanitized_parts.push(p),
                 None => {
                     let _ = status_tx.send(format!("Error: Invalid filename component: {}", part));
-                    return;
+                    return FileOutcome::Failed {
+                        filename: filename.clone(),
+                        reason: format!("invalid filename component: {}", part),
+                    };
                 }
             }
         }
         sanitized_parts.join("/")
     };
 
-    let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}",
-        model_id, sanitized_filename
-    );
+    let url = crate::api::resolve_url(&model_id, &sanitized_filename);
 
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
         let _ = status_tx.send(format!("Error: Failed to create directory: {}", e));
-        return;
+        return FileOutcome::Failed {
+            filename: filename.clone(),
+            reason: format!("failed to create directory: {}", e),
+        };
     }
 
     // Canonicalize base path for safety checks
@@ -188,7 +220,10 @@ pub async fn start_download(params: DownloadParams) {
         Ok(path) => path,
         Err(e) => {
             let _ = status_tx.send(format!("Error: Cannot canonicalize base path: {}", e));
-            return;
+            return FileOutcome::Failed {
+                filename: filename.clone(),
+                reason: format!("cannot canonicalize base path: {}", e),
+            };
         }
     };
 
@@ -201,7 +236,10 @@ pub async fn start_download(params: DownloadParams) {
         if let Ok(canonical_final_parent) = parent.canonicalize() {
             if !canonical_final_parent.starts_with(&canonical_base) {
                 let _ = status_tx.send("Error: Path traversal detected".to_string());
-                return;
+                return FileOutcome::Failed {
+                    filename: filename.clone(),
+                    reason: "path traversal detected".to_string(),
+                };
             }
         }
     }
@@ -216,7 +254,10 @@ pub async fn start_download(params: DownloadParams) {
     if let Some(parent) = final_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
             let _ = status_tx.send(format!("Error: Failed to create parent directory: {}", e));
-            return;
+            return FileOutcome::Failed {
+                filename: filename.clone(),
+                reason: format!("failed to create parent directory: {}", e),
+            };
         }
     }
     if let Some(parent) = incomplete_path.parent() {
@@ -225,7 +266,10 @@ pub async fn start_download(params: DownloadParams) {
                 "Error: Failed to create parent directory for incomplete file: {}",
                 e
             ));
-            return;
+            return FileOutcome::Failed {
+                filename: filename.clone(),
+                reason: format!("failed to create parent directory: {}", e),
+            };
         }
     }
 
@@ -247,6 +291,11 @@ pub async fn start_download(params: DownloadParams) {
             filename
         ));
 
+        let file_size = tokio::fs::metadata(&final_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         // Update registry as complete
         let mut registry = registry::load_registry();
         if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
@@ -260,12 +309,6 @@ pub async fn start_download(params: DownloadParams) {
         let verification_enabled = DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
         if verification_enabled {
             if let Some(expected_hash) = &expected_sha256 {
-                // Get file size for progress tracking
-                let file_size = tokio::fs::metadata(&final_path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-
                 let item = VerificationQueueItem {
                     filename: filename.clone(),
                     local_path: final_path.to_string_lossy().to_string(),
@@ -292,11 +335,14 @@ pub async fn start_download(params: DownloadParams) {
 
         let mut prog = progress.lock().await;
         *prog = None;
-        return;
+        return FileOutcome::AlreadyExists {
+            filename: filename.clone(),
+            bytes: file_size,
+        };
     }
 
     let mut retries = DOWNLOAD_CONFIG.max_retries.load(Ordering::Relaxed);
-
+    let outcome;
     loop {
         let chunked_params = ChunkedDownloadParams {
             url: &url,
@@ -355,11 +401,22 @@ pub async fn start_download(params: DownloadParams) {
                     } else {
                         let _ = status_tx.send(format!("Download complete: {}", filename));
                     }
+                    outcome = FileOutcome::Complete {
+                        filename: filename.clone(),
+                        bytes: final_size,
+                    };
                 } else {
                     let _ = status_tx.send(format!(
                         "Warning: Download may be incomplete: {} (got {} bytes, expected {})",
                         filename, final_size, expected_size
                     ));
+                    outcome = FileOutcome::Failed {
+                        filename: filename.clone(),
+                        reason: format!(
+                            "incomplete download: got {} bytes, expected {}",
+                            final_size, expected_size
+                        ),
+                    };
                 }
                 break;
             }
@@ -397,9 +454,10 @@ pub async fn start_download(params: DownloadParams) {
                         }
                         registry::save_registry(&registry);
 
-                        let mut prog = progress.lock().await;
-                        *prog = None;
-                        return;
+                        outcome = FileOutcome::AuthRequired {
+                            model_id: model_id.clone(),
+                        };
+                        break;
                     }
                 }
 
@@ -418,9 +476,11 @@ pub async fn start_download(params: DownloadParams) {
                 }
                 registry::save_registry(&registry);
 
-                let mut prog = progress.lock().await;
-                *prog = None;
-                return;
+                outcome = FileOutcome::Failed {
+                    filename: filename.clone(),
+                    reason: format!("download failed after retries: {}", e),
+                };
+                break;
             }
         }
     }
@@ -428,6 +488,8 @@ pub async fn start_download(params: DownloadParams) {
     // Clear progress when done
     let mut prog = progress.lock().await;
     *prog = None;
+
+    outcome
 }
 
 #[allow(clippy::borrowed_box)]
@@ -862,4 +924,56 @@ async fn download_chunk_with_progress(
     file.flush().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_accepts_not_yet_created_base_directory() {
+        // Regression: a first-ever download into a fresh base directory was
+        // falsely rejected as path traversal (the parent-walk found an
+        // ancestor OF the base, which is normal when the base doesn't exist).
+        let home = std::env::temp_dir().join(format!("validate-test-{}", std::process::id()));
+        let base = home.join("models"); // deliberately not created
+        let path = validate_and_sanitize_path(base.to_str().unwrap(), "a/b", "x.gguf");
+        assert!(path.is_ok(), "fresh base rejected: {:?}", path);
+        assert_eq!(path.unwrap(), base.join("a").join("b").join("x.gguf"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn validate_accepts_existing_base_directory() {
+        let home =
+            std::env::temp_dir().join(format!("validate-test-exists-{}", std::process::id()));
+        let base = home.join("models");
+        std::fs::create_dir_all(base.join("a/b")).unwrap();
+        let path = validate_and_sanitize_path(base.to_str().unwrap(), "a/b", "sub/dir/x.gguf");
+        assert!(path.is_ok());
+        assert_eq!(
+            path.unwrap(),
+            base.join("a")
+                .join("b")
+                .join("sub")
+                .join("dir")
+                .join("x.gguf")
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn validate_rejects_traversal_and_bad_model_ids() {
+        let home = std::env::temp_dir().join(format!("validate-test-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let base = home.to_str().unwrap().to_string();
+
+        // traversal in filename
+        assert!(validate_and_sanitize_path(&base, "a/b", "../escape.gguf").is_err());
+        assert!(validate_and_sanitize_path(&base, "a/b", "sub/../../escape.gguf").is_err());
+        // bad model ids
+        assert!(validate_and_sanitize_path(&base, "nodash", "x.gguf").is_err());
+        assert!(validate_and_sanitize_path(&base, "a/b/c", "x.gguf").is_err());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

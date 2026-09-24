@@ -1,0 +1,13 @@
+---
+source: src/cli.rs
+assertion_line: 1442
+expression: json
+---
+{
+  "type": "progress",
+  "filename": "model-Q4_K_M.gguf",
+  "downloaded_bytes": 1048576,
+  "total_bytes": 4947802324,
+  "speed_mbps": 62.4,
+  "percent": 0.021183
+}

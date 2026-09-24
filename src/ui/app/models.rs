@@ -39,7 +39,9 @@ impl App {
         if let Some(results) = cached_results {
             // Use cached results (no write lock needed!)
             let exact_match_idx = if query.contains('/') {
-                results.iter().position(|m| m.id.to_lowercase() == query.to_lowercase())
+                results
+                    .iter()
+                    .position(|m| m.id.to_lowercase() == query.to_lowercase())
             } else {
                 None
             };
@@ -64,8 +66,7 @@ impl App {
             } else {
                 " (cached)".to_string()
             };
-            *self.status.write() =
-                format!("Found {} models{}", models_lock.len(), filter_status);
+            *self.status.write() = format!("Found {} models{}", models_lock.len(), filter_status);
 
             drop(models_lock);
 
@@ -82,6 +83,7 @@ impl App {
             sort_direction,
             min_downloads,
             min_likes,
+            100,
             token,
         )
         .await;
@@ -90,7 +92,9 @@ impl App {
             Ok(results) => {
                 // Check if query looks like a repository ID (contains /)
                 let exact_match_idx = if query.contains('/') {
-                    results.iter().position(|m| m.id.to_lowercase() == query.to_lowercase())
+                    results
+                        .iter()
+                        .position(|m| m.id.to_lowercase() == query.to_lowercase())
                 } else {
                     None
                 };
@@ -246,8 +250,7 @@ impl App {
                     }
                     Err(e) => {
                         *loading_quants.write() = false;
-                        *error.write() =
-                            Some(format!("Failed to fetch model metadata: {}", e));
+                        *error.write() = Some(format!("Failed to fetch model metadata: {}", e));
 
                         // Clear both states on error
                         let mut quants_lock = quantizations.write();
@@ -289,7 +292,9 @@ impl App {
                             let quants_to_store = {
                                 let mut cache = api_cache.write();
                                 match cache.quantizations.entry(model_id.clone()) {
-                                    std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                                    std::collections::hash_map::Entry::Occupied(o) => {
+                                        o.get().clone()
+                                    }
                                     std::collections::hash_map::Entry::Vacant(v) => {
                                         v.insert(quants.clone());
                                         quants
@@ -459,7 +464,8 @@ impl App {
                     meta // Use cached
                 } else {
                     // Fetch and cache metadata with double-check using Entry API
-                    let meta_to_store = match fetch_model_metadata(&model_id, token.as_ref()).await {
+                    let meta_to_store = match fetch_model_metadata(&model_id, token.as_ref()).await
+                    {
                         Ok(meta) => {
                             let mut cache = api_cache.write();
                             match cache.metadata.entry(model_id.clone()) {
@@ -487,7 +493,10 @@ impl App {
                         // Fetch and cache quantizations with double-check using Entry API
                         if let Ok(quants) = fetch_model_files(&model_id, token.as_ref()).await {
                             let mut cache = api_cache.write();
-                            if matches!(cache.quantizations.entry(model_id.clone()), std::collections::hash_map::Entry::Vacant(_)) {
+                            if matches!(
+                                cache.quantizations.entry(model_id.clone()),
+                                std::collections::hash_map::Entry::Vacant(_)
+                            ) {
                                 cache.quantizations.insert(model_id.clone(), quants);
                             }
                         }
@@ -503,7 +512,10 @@ impl App {
                         // Build and cache file tree with double-check using Entry API
                         let tree = build_file_tree(metadata.siblings.clone());
                         let mut cache = api_cache.write();
-                        if matches!(cache.file_trees.entry(model_id.clone()), std::collections::hash_map::Entry::Vacant(_)) {
+                        if matches!(
+                            cache.file_trees.entry(model_id.clone()),
+                            std::collections::hash_map::Entry::Vacant(_)
+                        ) {
                             cache.file_trees.insert(model_id.clone(), tree);
                         }
                     }

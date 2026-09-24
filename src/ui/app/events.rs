@@ -590,9 +590,8 @@ impl App {
             FocusedPane::QuantizationGroups => {
                 // When switching to quantization files, select first file if available
                 if let Some(selected_group) = self.quant_list_state.selected() {
-                    let quantizations = futures::executor::block_on(async {
-                        self.quantizations.read().clone()
-                    });
+                    let quantizations =
+                        futures::executor::block_on(async { self.quantizations.read().clone() });
                     if selected_group < quantizations.len()
                         && !quantizations[selected_group].files.is_empty()
                     {
@@ -610,8 +609,7 @@ impl App {
 
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
-        let quants_len =
-            futures::executor::block_on(async { self.quantizations.read().len() });
+        let quants_len = futures::executor::block_on(async { self.quantizations.read().len() });
 
         if quants_len == 0 {
             return;
@@ -632,8 +630,7 @@ impl App {
 
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
-        let quants_len =
-            futures::executor::block_on(async { self.quantizations.read().len() });
+        let quants_len = futures::executor::block_on(async { self.quantizations.read().len() });
 
         if quants_len == 0 {
             return;
@@ -810,8 +807,7 @@ impl App {
                 self.sort_direction = SortDirection::Descending;
                 self.filter_min_downloads = 10_000;
                 self.filter_min_likes = 100;
-                *self.status.write() =
-                    "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
+                *self.status.write() = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
             }
             FilterPreset::HighlyRated => {
                 // Highly rated: 1k+ likes, sorted by likes
@@ -1006,8 +1002,7 @@ impl App {
             None => return,
         };
 
-        let mut tree =
-            futures::executor::block_on(async { self.file_tree.read().clone() });
+        let mut tree = futures::executor::block_on(async { self.file_tree.read().clone() });
 
         if let Some(ref mut tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(tree);

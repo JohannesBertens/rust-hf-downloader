@@ -1,0 +1,12 @@
+---
+source: src/cli.rs
+assertion_line: 1442
+expression: json
+---
+{
+  "type": "verification_result",
+  "filename": "model-Q4_K_M.gguf",
+  "ok": false,
+  "expected_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "actual_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.2.0
+# Rust HF Downloader v2.3.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -28,6 +28,7 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
   - HuggingFace authentication token
   - Settings persist across restarts
 - ⌨️ **Vim-like Controls**: Efficient keyboard navigation
+- 🤖 **Scriptable CLI**: One-shot `download` subcommand with human or JSON Lines output (`--json`), stable exit codes, and `HF_ENDPOINT` mirror/test override — built for scripts and AI-agent skills (see [CLI Mode](#cli-mode-one-shot-download))
 - 📊 **Rich Display**: View model details including downloads, likes, and tags
 - 📦 **Quantization Details**: See all available quantized versions (Q2, Q4, Q5, Q8, IQ4_XS, MXFP4, etc.) with file sizes
 - 📥 **Smart Downloads**: Download models directly from the TUI with:
@@ -61,6 +62,7 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [TUI Mode (Interactive)](#tui-mode-interactive)
+- [CLI Mode (One-shot Download)](#cli-mode-one-shot-download)
 - [Technical Details](#technical-details)
 - [Changelog](#changelog)
 - [License](#license)
@@ -237,6 +239,93 @@ The **Quantization Details** section shows all available GGUF quantized versions
 - Search for image models: `/` → type `stable-diffusion` → `Enter`
 - Search for translation models: `/` → type `translation` → `Enter`
 
+## CLI Mode (One-shot Download)
+
+Running the binary **without arguments launches the TUI** as before. A single
+non-interactive subcommand is available for scripts, cron jobs, and AI-agent
+skills:
+
+```bash
+# Search HuggingFace (query-only; table or JSON array)
+rust-hf-downloader search "qwen 2.5 gguf" --sort downloads --limit 20
+rust-hf-downloader search "mistral gguf" --min-downloads 1000 --json | jq '.[0].id'
+
+# Download a specific quantization
+rust-hf-downloader download bartowski/Qwen2.5-7B-GGUF --quant Q4_K_M
+
+# Exact file(s), whole repo, custom destination
+rust-hf-downloader download org/model --file README.md --file config.json
+rust-hf-downloader download org/model --all -o /data/models
+
+# Machine-readable output for scripts and agents
+rust-hf-downloader download org/model --quant Q4_K_M --json | jq -c 'select(.type=="progress")'
+```
+
+### Search
+
+`search` is a query-only command — one bounded API call, no engine state:
+
+```bash
+rust-hf-downloader search "qwen 2.5 gguf" [--sort downloads|likes|modified|name]
+                                        [--direction asc|desc]
+                                        [--min-downloads N] [--min-likes N]
+                                        [--limit N] [--json]
+```
+
+Unspecified flags fall back to the config defaults the TUI's filter toolbar
+uses. Output rule: **queries emit one JSON document** (an array, `--json`),
+**pipelines emit NDJSON events** (`download --json`) — on failure a single
+`{"type":"error",…}` line is the only stdout output. A successful search
+with zero results exits `0` with `[]` (scripts distinguish by array length).
+The full-text `search` term itself is matched server-side by HuggingFace;
+`--min-downloads`/`--min-likes` filter client-side, `--sort name` and
+ascending sorts apply client-side too (the API only sorts descending).
+
+### Selectors
+
+| Selector | Meaning |
+|---|---|
+| *(none)* | Works only when the repo has exactly one downloadable file; otherwise exits 64 listing every file |
+| `--quant Q4_K_M` | All files of that quantization (case-insensitive; includes every part of multi-part GGUFs) |
+| `--file PATH` | Exact repo-relative path (repeatable) |
+| `--all` | Everything in the repository |
+
+Selectors are mutually exclusive. Ambiguity is never guessed: the failure
+output includes the structured file list so an agent can pick a selector and
+re-invoke in one round-trip.
+
+### Other options
+
+`-o/--output DIR` (default: config `default_directory`, usually `~/models`),
+`--token TOKEN` (default `$HF_TOKEN`, then config), `--no-verify`,
+`-q/--quiet`, and `HF_ENDPOINT` (base-URL override for mirrors such as
+`https://hf-mirror.com` or local testing).
+
+### Output and exit codes
+
+Human mode prints progress to **stderr** (single-line rewrites when
+interactive) and the summary to **stdout**. `--json` emits NDJSON events on
+**stdout** — `resolved`, `download_start`, `progress` (500 ms throttle),
+`file_complete`, `verification_start`, `verification_result`, `done` — and on
+failure the `error` event is **always the last line**:
+
+```json
+{"type":"error","code":"ambiguous","message":"model has 2 downloadable file(s); …","available":[{"filename":"model-Q4_K_M.gguf","size_bytes":4947802324,"sha256":"…"}, …]}
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | All files present (downloaded or already existed); verification OK or skipped |
+| 1 | Download failed after retries, or a hash mismatch |
+| 2 | Authentication required (`--token` / `$HF_TOKEN` / config token) |
+| 64 | Usage error, unknown file, or ambiguous selection |
+| 130 | Interrupted (Ctrl-C); unfinished files restart from scratch on the next run |
+
+CLI downloads share the TUI's engine, config, and `~/models/hf-downloads.toml`
+registry, so files downloaded headlessly show up in the TUI's resume/complete
+views. Events and behavior are covered end-to-end by integration tests
+against a mock HuggingFace server.
+
 ## Technical Details
 
 ### Architecture
@@ -246,7 +335,7 @@ The **Quantization Details** section shows all available GGUF quantized versions
 - **TUI Framework**: [ratatui](https://github.com/ratatui/ratatui)
 - **HTTP Client**: reqwest with async support and streaming downloads
 - **TLS Backend**: rustls (pure Rust TLS implementation)
-- **API**: HuggingFace REST API (`https://huggingface.co/api/models`)
+- **API**: HuggingFace REST API (`https://huggingface.co/api/models`); override the base URL with `HF_ENDPOINT` (mirrors, testing)
 - **Text Input**: tui-input for search box handling
 - **Download Management**:
   - Adaptive chunk sizing (targets ~20 chunks per file, 5MB-100MB range)
@@ -274,7 +363,9 @@ rust-hf-downloader/
 ├── README.md               # This file
 ├── changelog/              # Release notes for all versions
 └── src/
-    ├── main.rs             # Entry point
+    ├── main.rs             # Entry point (TUI by default; `download` subcommand dispatch)
+    ├── cli.rs              # One-shot download CLI (args, resolution, reporters)
+    ├── engine.rs           # Shared download engine (manager + verification bootstrap)
     ├── models.rs           # Data structures & types
     ├── config.rs           # Configuration persistence (v0.9.0)
     ├── utils.rs            # Formatting utilities
@@ -335,6 +426,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.3.0] | 2026-09-24 | CLI: one-shot `download` + query-only `search` subcommands (JSON output, exit codes, HF_ENDPOINT); shared download engine extracted |
 | [2.2.0] | 2026-09-24 | Activity HUD: compact matrix queue view (chunks, parallel verification, queue) |
 | [2.1.0] | 2026-09-24 | Verification: truthful progress/ETA, blocking-thread hashing, 4-way concurrency |
 | [2.0.0] | 2026-09-23 | Breaking: removed headless/CLI mode; TUI-only binary; snapshot test suite |
