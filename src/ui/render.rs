@@ -848,7 +848,9 @@ pub fn render_activity_hud(frame: &mut Frame, area: Rect, data: &ActivityHudData
         return;
     }
 
-    let w = area.width as usize;
+    // Row builders lay out against the block's INNER width (borders excluded)
+    // so every fixed-width column lands on the same x across all rows.
+    let w = area.width.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
     // --- Download row ---
@@ -938,9 +940,21 @@ impl HudColumns {
     }
 
     /// Middle space available for bar (+ chunk map on the DL row).
+    /// `total_w` is the block's inner width; the middle must be filled
+    /// exactly (bar or padding) so the right block aligns on every row.
     fn middle_w(&self, total_w: usize) -> usize {
-        total_w.saturating_sub(4 + self.name_w + 1 + 1 + self.right_w() + 2) // borders + paddings
+        total_w.saturating_sub(4 + self.name_w + 1 + 1 + self.right_w())
     }
+}
+
+/// Pad a (possibly truncated) name to exactly `width` chars so every row's
+/// middle section starts on the same column (fixed-width column layout).
+fn pad_name(name: &str, width: usize) -> String {
+    format!(
+        "{:<width$}",
+        truncate_name_middle(name, width),
+        width = width
+    )
 }
 
 fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
@@ -967,7 +981,7 @@ fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
     };
 
     let mut spans = vec!["DL ".into_cyan(), Span::raw("  ")];
-    spans.push(Span::raw(truncate_name_middle(&p.filename, cols.name_w)));
+    spans.push(Span::raw(pad_name(&p.filename, cols.name_w)));
     spans.push(Span::raw(" "));
 
     // Bar + (if room) "ch n/total" chunk map filling the remaining space
@@ -995,9 +1009,7 @@ fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
         }
     }
     if bar_w > 0 {
-        let (filled, bar) = bar_spans(pct, bar_w, Color::Cyan);
-        spans.push(bar);
-        let _ = filled;
+        spans.push(bar_spans(pct, bar_w, Color::Cyan));
     }
     if map_cells > 0 {
         spans.push(Span::raw(" "));
@@ -1037,11 +1049,11 @@ fn verification_hud_line(ver: &VerificationProgress, w: usize) -> Line<'static> 
     };
 
     let mut spans = vec!["VF ".into_green(), Span::raw("  ")];
-    spans.push(Span::raw(truncate_name_middle(&ver.filename, cols.name_w)));
+    spans.push(Span::raw(pad_name(&ver.filename, cols.name_w)));
     spans.push(Span::raw(" "));
     let middle = cols.middle_w(w);
     if middle >= 8 {
-        spans.push(bar_spans(pct, middle, Color::Green).1);
+        spans.push(bar_spans(pct, middle, Color::Green));
     }
     spans.push(right_block_spans(
         &cols,
@@ -1059,27 +1071,21 @@ fn queue_hud_line(name: &str, size: Option<u64>, w: usize, dim: bool) -> Line<'s
         .unwrap_or_else(|| "--".to_string());
     let name_span = if dim {
         Span::styled(
-            truncate_name_middle(name, cols.name_w),
+            pad_name(name, cols.name_w),
             Style::default().fg(Color::DarkGray),
         )
     } else {
-        Span::raw(truncate_name_middle(name, cols.name_w))
+        Span::raw(pad_name(name, cols.name_w))
     };
 
     let mut spans = vec!["Q  ".into_gray(), Span::raw("  ")];
     spans.push(name_span);
     spans.push(Span::raw(" "));
-    // Dim dotted rail fills the middle so the right block stays aligned
+    // Whitespace fills the middle (no decorative filler): fixed-column
+    // layout — stable columns + whitespace separation beat dotted rails,
+    // which read as noise and mask misalignment.
     let middle = cols.middle_w(w);
-    if middle > 0 {
-        let mut rail = String::new();
-        while rail.chars().count() + 5 <= middle {
-            rail.push_str("\u{b7}    ");
-        }
-        let used = rail.chars().count();
-        rail.push_str(&" ".repeat(middle - used));
-        spans.push(Span::styled(rail, Style::default().fg(Color::DarkGray)));
-    }
+    spans.push(Span::raw(" ".repeat(middle)));
     spans.push(right_block_spans(
         &cols,
         None,
@@ -1136,17 +1142,13 @@ fn hud_footer_line(data: &ActivityHudData<'_>, w: usize) -> Line<'static> {
     Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)))
 }
 
-/// Filled/empty bar spans; `filled` count is returned for potential reuse.
-fn bar_spans(pct: u16, width: usize, color: Color) -> (usize, Span<'static>) {
-    let filled = (width as f64 * pct as f64 / 100.0).round() as usize;
-    let filled = filled.min(width);
+/// Filled/empty bar span in the given color, exactly `width` cells wide.
+fn bar_spans(pct: u16, width: usize, color: Color) -> Span<'static> {
+    let filled = ((width as f64 * pct as f64 / 100.0).round() as usize).min(width);
     let empty = width - filled;
-    (
-        filled,
-        Span::styled(
-            format!("{}{}", "█".repeat(filled), "░".repeat(empty)),
-            Style::default().fg(color),
-        ),
+    Span::styled(
+        format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
+        Style::default().fg(color),
     )
 }
 
@@ -2189,6 +2191,13 @@ mod hud_tests {
         assert_eq!(truncate_name_middle("ab", 5), "ab");
         // UTF-8 safe
         assert_eq!(truncate_name_middle("模　型　名　称.gguf", 7), "模　型~guf");
+    }
+
+    #[test]
+    fn pad_name_pads_to_fixed_column_width() {
+        assert_eq!(pad_name("ab", 6), "ab    ");
+        assert_eq!(pad_name("abcdefg", 6), "abc~fg"); // truncates to width, no pad needed
+        assert_eq!(pad_name("模　型.gguf", 12).chars().count(), 12);
     }
 
     #[test]
