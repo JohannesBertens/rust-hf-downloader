@@ -5,15 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [2.1.0] - 2026-09-24
 
+### Version 2.1.0 (2026-09-24)
 - **Performance**: Verification read+hash loop now runs on a single blocking thread with sync reads
   (was: one tokio blocking-pool dispatch per buffer, ~160k hops per 20 GiB file) - ~12% faster
   on a warm cache (1.87 -> 2.10 GiB/s measured)
 - **Performance**: Default `concurrent_verifications` 2 -> 4; multi-shard models verify in parallel
   (each file hashes at ~2 GiB/s on SHA-NI CPUs)
+- **Performance**: Default `verification_buffer_size` 128 KiB -> 1 MiB
 - **Fixed**: Verification progress bar now tracks actual bytes (previously advanced at
   1/update_interval of real speed); gauge shows throughput + ETA
+- **No Breaking Changes**: All existing TUI functionality preserved
 
 ## [2.0.0] - 2026-09-23
 
