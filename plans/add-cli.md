@@ -1,6 +1,6 @@
 # Plan: Add a CLI one-shot download mode (`download` subcommand)
 
-**Status:** implemented on `feature/cli-download` (all phases; see §9 for deviations)
+**Status:** implemented on `feature/cli-download`; shipped in **v2.3.0** (see §9–§10)
 **Goal:** `rust-hf-downloader download <model_id> [selectors] [flags]` downloads a model
 non-interactively with CLI feedback (human progress or JSON Lines), designed for scripts and
 AI-agent skill usage. The TUI remains the default when the binary is started with no arguments.
