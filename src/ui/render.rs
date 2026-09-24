@@ -1000,6 +1000,18 @@ fn render_download_progress(
 }
 
 /// Render verification progress bar in bottom-right corner
+/// Format a duration in seconds as a compact human-readable ETA string
+/// (e.g. "42s", "3m 12s", "1h 05m")
+fn format_eta(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 fn render_verification_progress(
     frame: &mut Frame,
     verifications: &[VerificationProgress],
@@ -1063,6 +1075,22 @@ fn render_verification_progress(
             0
         };
 
+        // Speed + ETA from the current throughput; ETA is only meaningful
+        // once speed has been measured (first ~200ms window)
+        let verified_now = ver.verified_bytes.load(Ordering::Relaxed);
+        let speed_str = if ver.speed_mbps > 0.0 {
+            format!(" {:.2} GB/s", ver.speed_mbps / 1024.0)
+        } else {
+            String::new()
+        };
+        let eta_str = if ver.speed_mbps > 0.0 && ver.total_bytes > verified_now {
+            let remaining =
+                (ver.total_bytes - verified_now) as f64 / (ver.speed_mbps * 1_048_576.0);
+            format!(" ETA {}", format_eta(remaining as u64))
+        } else {
+            String::new()
+        };
+
         // Truncate filename to fit (show end of filename)
         let display_name = if ver.filename.len() > 35 {
             format!("...{}", &ver.filename[ver.filename.len() - 32..])
@@ -1070,7 +1098,7 @@ fn render_verification_progress(
             ver.filename.clone()
         };
 
-        let label = format!("{}%", percentage);
+        let label = format!("{}%{}{}", percentage, speed_str, eta_str);
 
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::ALL).title(display_name))

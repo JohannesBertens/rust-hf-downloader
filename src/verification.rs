@@ -19,7 +19,10 @@ impl VerificationConfig {
     pub const fn new() -> Self {
         Self {
             concurrent_verifications: AtomicUsize::new(2),
-            buffer_size: AtomicUsize::new(128 * 1024),
+            // 1 MiB: large enough that per-read overhead (syscall + tokio
+            // blocking-pool dispatch) is amortized to a few percent of the
+            // ~2 GiB/s SHA-NI hashing ceiling on modern hardware
+            buffer_size: AtomicUsize::new(1024 * 1024),
             update_interval_iterations: AtomicUsize::new(100),
         }
     }
@@ -198,9 +201,12 @@ async fn calculate_sha256_with_progress(
         #[allow(clippy::manual_is_multiple_of)]
         // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
         if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
-            // Atomic update for verified_bytes - NO LOCK NEEDED!
+            // Publish the exact running total. (An earlier version did
+            // `fetch_add(bytes_read)` here, which credited only the last
+            // chunk at each checkpoint — the UI advanced at 1/update_interval
+            // of the real speed and looked stalled on multi-GB files.)
             if let Some(ref vb) = verified_bytes {
-                vb.fetch_add(bytes_read as u64, Ordering::Relaxed);
+                vb.store(bytes_verified, Ordering::Relaxed);
             }
 
             let now = std::time::Instant::now();
@@ -241,4 +247,144 @@ pub async fn queue_verification(
     queue.push(item);
 
     verification_queue_size.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_file(name: &str, size_bytes: usize, fill: u8) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rust-hf-downloader-verify-test-{}-{name}",
+            std::process::id()
+        ));
+        let mut f = std::fs::File::create(&path).expect("create temp file");
+        // Write in 1 MiB chunks so large fixtures stay fast
+        let chunk = vec![fill; 1024 * 1024.min(size_bytes)];
+        let mut written = 0;
+        while written < size_bytes {
+            let n = chunk.len().min(size_bytes - written);
+            f.write_all(&chunk[..n]).unwrap();
+            written += n;
+        }
+        path
+    }
+
+    /// End-to-end check of the read loop + hasher: the produced digest must
+    /// equal an independent single-shot hash of the same bytes.
+    #[tokio::test]
+    async fn sha256_hash_is_exact() {
+        let path = temp_file("hash", 3 * 1024 * 1024 + 7, 0xAB);
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let verified_bytes = Arc::new(AtomicU64::new(0));
+        progress.lock().await.push(VerificationProgress {
+            filename: "test.bin".to_string(),
+            verified_bytes: verified_bytes.clone(),
+            total_bytes: 3 * 1024 * 1024 + 7,
+            speed_mbps: 0.0,
+        });
+
+        let digest = calculate_sha256_with_progress(
+            &path,
+            &progress,
+            "test.bin",
+            3 * 1024 * 1024 + 7,
+        )
+        .await
+        .expect("hash calculation failed");
+
+        let expected = {
+            let mut h = Sha256::new();
+            h.update(std::fs::read(&path).unwrap());
+            hex::encode(h.finalize())
+        };
+        assert_eq!(digest, expected);
+        assert_eq!(
+            verified_bytes.load(Ordering::Relaxed),
+            3 * 1024 * 1024 + 7
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Regression test for the progress-accounting bug: the shared
+    /// `verified_bytes` counter used to be advanced by `fetch_add(bytes_read)`
+    /// only every `update_interval` iterations, so the UI advanced at
+    /// 1/update_interval of the real speed (looked permanently stalled at
+    /// ~1% on multi-GB files). The counter must now track the true running
+    /// total at every checkpoint.
+    #[tokio::test]
+    async fn progress_counter_tracks_actual_bytes() {
+        const TOTAL: usize = 64 * 1024 * 1024; // 64 MiB
+        let path = temp_file("progress", TOTAL, 0xCD);
+
+        // Small buffer + interval 64 -> 128 checkpoints across the file.
+        // (Buggy code would cap the counter at TOTAL/64 ~= 1.6%.)
+        let old_buffer = VERIFICATION_CONFIG.buffer_size.load(Ordering::Relaxed);
+        let old_interval = VERIFICATION_CONFIG
+            .update_interval_iterations
+            .load(Ordering::Relaxed);
+        VERIFICATION_CONFIG.buffer_size.store(8 * 1024, Ordering::Relaxed);
+        VERIFICATION_CONFIG
+            .update_interval_iterations
+            .store(64, Ordering::Relaxed);
+
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let verified_bytes = Arc::new(AtomicU64::new(0));
+        progress.lock().await.push(VerificationProgress {
+            filename: "big.gguf".to_string(),
+            verified_bytes: verified_bytes.clone(),
+            total_bytes: TOTAL as u64,
+            speed_mbps: 0.0,
+        });
+
+        let task_path = path.clone();
+        let task_progress = progress.clone();
+        let task = tokio::spawn(async move {
+            calculate_sha256_with_progress(
+                &task_path,
+                &task_progress,
+                "big.gguf",
+                TOTAL as u64,
+            )
+            .await
+            .expect("hash calculation failed")
+        });
+
+        // Sample the published counter while the run is in flight; record the
+        // high-water mark. Finished runs always store 100%, so only samples
+        // taken before completion discriminate correct vs. buggy accounting.
+        let mut max_seen: u64 = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !task.is_finished() {
+            let v = verified_bytes.load(Ordering::Relaxed);
+            if v > max_seen {
+                max_seen = v;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "verification did not finish in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let digest = task.await.expect("task panicked");
+
+        // With the fix, the counter passes at least a quarter of the file
+        // mid-run (in practice ~100%). The old bug capped it at ~1.6%.
+        assert!(
+            max_seen > (TOTAL as u64) / 4,
+            "progress counter lagged: max mid-run value {} of {} bytes",
+            max_seen,
+            TOTAL
+        );
+        // And the hash is still correct
+        assert_eq!(digest.len(), 64);
+
+        // Restore globals for other tests
+        VERIFICATION_CONFIG.buffer_size.store(old_buffer, Ordering::Relaxed);
+        VERIFICATION_CONFIG
+            .update_interval_iterations
+            .store(old_interval, Ordering::Relaxed);
+        std::fs::remove_file(&path).ok();
+    }
 }

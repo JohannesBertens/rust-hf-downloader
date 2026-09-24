@@ -1,5 +1,6 @@
 ---
 source: src/ui/render.rs
+assertion_line: 2416
 expression: terminal.backend()
 ---
 "                                                                                                    "

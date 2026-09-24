@@ -23,7 +23,7 @@ expression: terminal.backend()
 "                  │  ─── Verification ─────────────────────────────────────────  │                  "
 "                  │  Enable Verification: Enabled                                │                  "
 "                  │  Concurrent Verifications: 2                                 │                  "
-"                  │  Verification Buffer Size: 128.00 KB                         │                  "
+"                  │  Verification Buffer Size: 1.00 MB                           │                  "
 "                  │  Verification Update Interval: 100                           │                  "
 "                  │                                                              │                  "
 "                  │  j/k or ↑/↓: Navigate | Enter: Edit directory                │                  "

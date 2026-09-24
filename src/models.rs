@@ -366,7 +366,7 @@ impl Default for AppOptions {
             download_rate_limit_mbps: 50.0,
             verification_on_completion: true,
             concurrent_verifications: 2,
-            verification_buffer_size: 128 * 1024,
+            verification_buffer_size: 1024 * 1024,
             verification_update_interval: 100,
             selected_field: 0,
             editing_directory: false,
