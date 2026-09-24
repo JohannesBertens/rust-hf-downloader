@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.2.0
+# Rust HF Downloader v2.3.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -426,7 +426,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
-| [Unreleased] | — | CLI: one-shot `download` subcommand (JSON Lines, exit codes, HF_ENDPOINT); shared download engine extracted |
+| [2.3.0] | 2026-09-24 | CLI: one-shot `download` + query-only `search` subcommands (JSON output, exit codes, HF_ENDPOINT); shared download engine extracted |
 | [2.2.0] | 2026-09-24 | Activity HUD: compact matrix queue view (chunks, parallel verification, queue) |
 | [2.1.0] | 2026-09-24 | Verification: truthful progress/ETA, blocking-thread hashing, 4-way concurrency |
 | [2.0.0] | 2026-09-23 | Breaking: removed headless/CLI mode; TUI-only binary; snapshot test suite |
