@@ -34,12 +34,14 @@ pub static VERIFICATION_CONFIG: VerificationConfig = VerificationConfig::new();
 
 /// Main verification worker that processes the verification queue
 /// Runs continuously in the background, processing items as they arrive
+#[allow(clippy::too_many_arguments)]
 pub async fn verification_worker(
     verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     verification_queue_size: Arc<AtomicUsize>,
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
+    result_counters: VerificationResultCounters,
 ) {
     let max_concurrent = VERIFICATION_CONFIG
         .concurrent_verifications
@@ -65,9 +67,17 @@ pub async fn verification_worker(
             let verification_progress = verification_progress.clone();
             let status_tx = status_tx.clone();
             let download_registry = download_registry.clone();
+            let result_counters = result_counters.clone();
 
             tokio::spawn(async move {
-                verify_file(item, verification_progress, status_tx, download_registry).await;
+                verify_file(
+                    item,
+                    verification_progress,
+                    status_tx,
+                    download_registry,
+                    result_counters,
+                )
+                .await;
                 drop(permit);
             });
         } else {
@@ -77,12 +87,21 @@ pub async fn verification_worker(
     }
 }
 
+/// Session-lifetime hash verification result counters (for HUD display).
+#[derive(Debug, Default, Clone)]
+pub struct VerificationResultCounters {
+    pub ok: Arc<AtomicUsize>,
+    pub failed: Arc<AtomicUsize>,
+}
+
 /// Verify a single file's SHA256 hash
+#[allow(clippy::too_many_arguments)]
 async fn verify_file(
     item: VerificationQueueItem,
     verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     status_tx: mpsc::UnboundedSender<String>,
     download_registry: Arc<Mutex<DownloadRegistry>>,
+    result_counters: VerificationResultCounters,
 ) {
     let local_path = PathBuf::from(&item.local_path);
 
@@ -120,8 +139,10 @@ async fn verify_file(
     {
         Ok(calculated_hash) => {
             if calculated_hash == item.expected_sha256 {
+                result_counters.ok.fetch_add(1, Ordering::Relaxed);
                 let _ = status_tx.send(format!("✓ Hash verified for {}", item.filename));
             } else {
+                result_counters.failed.fetch_add(1, Ordering::Relaxed);
                 let _ = status_tx.send(format!(
                     "✗ Hash mismatch for {}: expected {}..., got {}...",
                     item.filename,
@@ -307,14 +328,10 @@ mod tests {
             speed_mbps: 0.0,
         });
 
-        let digest = calculate_sha256_with_progress(
-            &path,
-            &progress,
-            "test.bin",
-            3 * 1024 * 1024 + 7,
-        )
-        .await
-        .expect("hash calculation failed");
+        let digest =
+            calculate_sha256_with_progress(&path, &progress, "test.bin", 3 * 1024 * 1024 + 7)
+                .await
+                .expect("hash calculation failed");
 
         let expected = {
             let mut h = Sha256::new();
@@ -322,10 +339,7 @@ mod tests {
             hex::encode(h.finalize())
         };
         assert_eq!(digest, expected);
-        assert_eq!(
-            verified_bytes.load(Ordering::Relaxed),
-            3 * 1024 * 1024 + 7
-        );
+        assert_eq!(verified_bytes.load(Ordering::Relaxed), 3 * 1024 * 1024 + 7);
         std::fs::remove_file(&path).ok();
     }
 
@@ -346,7 +360,9 @@ mod tests {
         let old_interval = VERIFICATION_CONFIG
             .update_interval_iterations
             .load(Ordering::Relaxed);
-        VERIFICATION_CONFIG.buffer_size.store(8 * 1024, Ordering::Relaxed);
+        VERIFICATION_CONFIG
+            .buffer_size
+            .store(8 * 1024, Ordering::Relaxed);
         VERIFICATION_CONFIG
             .update_interval_iterations
             .store(64, Ordering::Relaxed);
@@ -363,14 +379,9 @@ mod tests {
         let task_path = path.clone();
         let task_progress = progress.clone();
         let task = tokio::spawn(async move {
-            calculate_sha256_with_progress(
-                &task_path,
-                &task_progress,
-                "big.gguf",
-                TOTAL as u64,
-            )
-            .await
-            .expect("hash calculation failed")
+            calculate_sha256_with_progress(&task_path, &task_progress, "big.gguf", TOTAL as u64)
+                .await
+                .expect("hash calculation failed")
         });
 
         // Sample the published counter while the run is in flight; record the
@@ -403,7 +414,9 @@ mod tests {
         assert_eq!(digest.len(), 64);
 
         // Restore globals for other tests
-        VERIFICATION_CONFIG.buffer_size.store(old_buffer, Ordering::Relaxed);
+        VERIFICATION_CONFIG
+            .buffer_size
+            .store(old_buffer, Ordering::Relaxed);
         VERIFICATION_CONFIG
             .update_interval_iterations
             .store(old_interval, Ordering::Relaxed);

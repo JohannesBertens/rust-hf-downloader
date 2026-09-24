@@ -110,7 +110,9 @@ pub struct ChunkProgress {
     pub start: u64,
     #[allow(dead_code)]
     pub end: u64,
+    #[allow(dead_code)] // populated for future detail view; HUD uses the bitmap
     pub downloaded: u64,
+    #[allow(dead_code)] // populated for future detail view; HUD uses the bitmap
     pub total: u64,
     pub speed_mbps: f64,
     pub is_active: bool,
@@ -126,6 +128,13 @@ pub struct DownloadProgress {
     pub speed_mbps: f64,
     pub chunks: Vec<ChunkProgress>,
     pub verifying: bool,
+    /// Total number of chunks the file was split into.
+    /// `chunks` only ever contains *active* chunks (completed ones are
+    /// removed); this field plus `chunk_completed` preserves the whole
+    /// picture for monotonic progress display.
+    pub num_chunks: usize,
+    /// Per-chunk completion bitmap, indexed by chunk_id. Length == num_chunks.
+    pub chunk_completed: Vec<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +231,15 @@ pub struct QueueState {
     pub bytes: u64,
 }
 
+/// Summary of a file waiting in the download queue (for HUD display).
+/// The transport itself is the `download_tx` channel; this mirrors the
+/// queued items so the renderer can show names and sizes.
+#[derive(Debug, Clone)]
+pub struct QueueItemSummary {
+    pub filename: String,
+    pub total_size: u64,
+}
+
 impl QueueState {
     pub fn new(size: usize, bytes: u64) -> Self {
         Self { size, bytes }
@@ -271,7 +289,7 @@ pub struct ApiCache {
 }
 
 /// Progress tracking for an active verification operation
-/// 
+///
 /// NOTE: `verified_bytes` is atomically updated by verification tasks.
 /// Use `load(Ordering::Relaxed)` to read the current value.
 /// This avoids lock contention while multiple files are verified concurrently.

@@ -47,9 +47,8 @@ impl App {
             FocusedPane::Models => {
                 // Download entire model repository (non-GGUF models in Standard mode)
                 if *self.display_mode.read() == crate::models::ModelDisplayMode::Standard {
-                    let metadata = futures::executor::block_on(async {
-                        self.model_metadata.read().clone()
-                    });
+                    let metadata =
+                        futures::executor::block_on(async { self.model_metadata.read().clone() });
 
                     if let Some(meta) = metadata {
                         let file_count = meta.siblings.len();
@@ -63,9 +62,8 @@ impl App {
             }
             FocusedPane::QuantizationGroups => {
                 // Download entire quantization group
-                let quantizations = futures::executor::block_on(async {
-                    self.quantizations.read().clone()
-                });
+                let quantizations =
+                    futures::executor::block_on(async { self.quantizations.read().clone() });
 
                 if let Some(selected) = self.quant_list_state.selected() {
                     if selected < quantizations.len() {
@@ -137,8 +135,7 @@ impl App {
                 };
 
                 if files_to_download.is_empty() {
-                    *self.error.write() =
-                        Some("No files selected for download".to_string());
+                    *self.error.write() = Some("No files selected for download".to_string());
                     return;
                 }
 
@@ -149,8 +146,7 @@ impl App {
                 // Validate the path to prevent path traversal
                 if let Err(e) = validate_and_sanitize_path(&base_path, &model.id, &quant.filename) {
                     *self.error.write() = Some(format!("Invalid path: {}", e));
-                    *self.status.write() =
-                        "Download cancelled due to invalid path".to_string();
+                    *self.status.write() = "Download cancelled due to invalid path".to_string();
                     return;
                 }
 
@@ -285,6 +281,12 @@ impl App {
                         .is_ok()
                     {
                         success_count += 1;
+                        // Mirror the queued file for HUD display
+                        let mut items = self.download_queue_items.lock().await;
+                        items.push(crate::models::QueueItemSummary {
+                            filename: filename.clone(),
+                            total_size: file_size,
+                        });
                     }
                 }
 
@@ -357,6 +359,14 @@ impl App {
                 hf_token.clone(),
                 metadata.total_size,
             ));
+            // Mirror the queued file for HUD display
+            {
+                let mut items = self.download_queue_items.lock().await;
+                items.push(crate::models::QueueItemSummary {
+                    filename: metadata.filename.clone(),
+                    total_size: metadata.total_size,
+                });
+            }
         }
 
         // Update queue size and bytes
@@ -538,6 +548,12 @@ impl App {
                         .is_ok()
                     {
                         success_count += 1;
+                        // Mirror the queued file for HUD display
+                        let mut items = self.download_queue_items.lock().await;
+                        items.push(crate::models::QueueItemSummary {
+                            filename: file.rfilename.clone(),
+                            total_size: file_size,
+                        });
                     }
                 }
 

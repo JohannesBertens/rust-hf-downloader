@@ -37,6 +37,7 @@ impl App {
         let verification_queue_size = self.verification_queue_size.clone();
         let status_tx_verify = self.status_tx.clone();
         let download_registry = self.download_registry.clone();
+        let verification_results = self.verification_results.clone();
 
         tokio::spawn(async move {
             crate::verification::verification_worker(
@@ -45,6 +46,7 @@ impl App {
                 verification_queue_size,
                 status_tx_verify,
                 download_registry,
+                verification_results,
             )
             .await;
         });
@@ -53,6 +55,7 @@ impl App {
         let download_rx = self.download_rx.clone();
         let download_progress = self.download_progress.clone();
         let download_queue = self.download_queue.clone();
+        let download_queue_items = self.download_queue_items.clone();
         let status_tx = self.status_tx.clone();
         let complete_downloads = self.complete_downloads.clone();
         let verification_queue = self.verification_queue.clone();
@@ -74,6 +77,13 @@ impl App {
                 {
                     let mut queue = download_queue.lock().await;
                     queue.remove(1, total_size);
+                }
+                // Remove the mirrored queue item (first match by filename)
+                {
+                    let mut items = download_queue_items.lock().await;
+                    if let Some(pos) = items.iter().position(|it| it.filename == filename) {
+                        items.remove(pos);
+                    }
                 }
                 start_download(crate::download::DownloadParams {
                     model_id,
@@ -133,6 +143,82 @@ impl App {
             })
             .unwrap_or_else(|_| self.cached_complete_downloads.clone());
 
+        // Activity HUD data is fetched BEFORE render_ui so the reserved
+        // strip height is known when the main layout is split.
+        let download_progress = self
+            .download_progress
+            .try_lock()
+            .map(|guard| {
+                self.cached_download_progress = guard.clone();
+                guard.clone()
+            })
+            .unwrap_or_else(|_| self.cached_download_progress.clone());
+
+        let download_queue = self
+            .download_queue
+            .try_lock()
+            .map(|guard| {
+                self.cached_download_queue = guard.clone();
+                (guard.size, guard.bytes)
+            })
+            .unwrap_or_else(|_| {
+                (
+                    self.cached_download_queue.size,
+                    self.cached_download_queue.bytes,
+                )
+            });
+
+        let download_queue_items = self
+            .download_queue_items
+            .try_lock()
+            .map(|guard| {
+                self.cached_download_queue_items = guard.clone();
+                guard.clone()
+            })
+            .unwrap_or_else(|_| self.cached_download_queue_items.clone());
+
+        let verification_progress = self
+            .verification_progress
+            .try_lock()
+            .map(|guard| {
+                self.cached_verification_progress = guard.clone();
+                guard.clone()
+            })
+            .unwrap_or_else(|_| self.cached_verification_progress.clone());
+
+        let verification_queue_size = self.verification_queue_size.load(Ordering::Relaxed);
+
+        let verification_queue_bytes = self
+            .verification_queue
+            .try_lock()
+            .map(|guard| {
+                let bytes = guard.iter().map(|i| i.total_size).sum();
+                self.cached_verification_queue_bytes = bytes;
+                bytes
+            })
+            .unwrap_or(self.cached_verification_queue_bytes);
+
+        let verified_ok = self.verification_results.ok.load(Ordering::Relaxed);
+        let verified_fail = self.verification_results.failed.load(Ordering::Relaxed);
+
+        let hud_params = crate::ui::render::ActivityHudData {
+            download_progress: &download_progress,
+            queue_size: download_queue.0,
+            queue_bytes: download_queue.1,
+            queue_items: &download_queue_items,
+            verification_progress: &verification_progress,
+            verification_queue_size,
+            verification_queue_bytes,
+            verified_ok,
+            verified_fail,
+        };
+
+        // Reserve a strip above the status bar; never steal rows the base
+        // layout needs (3 toolbar + 10 main + 12 bottom + 4 status = 29)
+        let base_layout_rows = 29u16;
+        let max_hud = frame.area().height.saturating_sub(base_layout_rows);
+        let hud_height = crate::ui::render::activity_hud_height(&hud_params).min(max_hud);
+
         // Render main UI
         crate::ui::render::render_ui(
             frame,
@@ -163,52 +249,21 @@ impl App {
                 panel_areas: &mut self.panel_areas,
                 hovered_panel: &self.hovered_panel,
                 filter_areas: &mut self.filter_areas,
+                hud_height,
             },
         );
 
-        // For progress bars, use try_lock() with fallback to cached values
-        let download_progress = self
-            .download_progress
-            .try_lock()
-            .map(|guard| {
-                self.cached_download_progress = guard.clone();
-                guard.clone()
-            })
-            .unwrap_or_else(|_| self.cached_download_progress.clone());
-
-        let download_queue = self
-            .download_queue
-            .try_lock()
-            .map(|guard| {
-                self.cached_download_queue = guard.clone();
-                (guard.size, guard.bytes)
-            })
-            .unwrap_or_else(|_| {
-                (
-                    self.cached_download_queue.size,
-                    self.cached_download_queue.bytes,
-                )
-            });
-
-        let verification_progress = self
-            .verification_progress
-            .try_lock()
-            .map(|guard| {
-                self.cached_verification_progress = guard.clone();
-                guard.clone()
-            })
-            .unwrap_or_else(|_| self.cached_verification_progress.clone());
-
-        let verification_queue_size = self.verification_queue_size.load(Ordering::Relaxed);
-
-        crate::ui::render::render_progress_bars(
-            frame,
-            &download_progress,
-            download_queue.0,
-            download_queue.1,
-            &verification_progress,
-            verification_queue_size,
-        );
+        // Render the activity HUD into the strip reserved above the status
+        // bar (render_ui shrank the main content accordingly)
+        if hud_height > 0 {
+            let hud_area = ratatui::layout::Rect {
+                x: 0,
+                y: frame.area().height.saturating_sub(4 + hud_height),
+                width: frame.area().width,
+                height: hud_height,
+            };
+            crate::ui::render::render_activity_hud(frame, hud_area, &hud_params);
+        }
 
         // Render popups (must be last to appear on top)
         match self.popup_mode {
@@ -489,8 +544,7 @@ impl App {
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
-                    *self.status.write() =
-                        format!("Authentication required for {}", model_id);
+                    *self.status.write() = format!("Authentication required for {}", model_id);
                 } else {
                     *self.status.write() = msg;
                 }

@@ -600,6 +600,8 @@ async fn download_chunked(
             speed_mbps: 0.0,
             chunks: Vec::new(), // Chunks will be added dynamically as they start
             verifying: false,
+            num_chunks,
+            chunk_completed: vec![false; num_chunks],
         });
     }
 
@@ -681,14 +683,21 @@ async fn download_chunked(
             .await;
 
             let chunk_size = stop - start + 1;
+            let chunk_ok = result.is_ok();
 
-            // Remove this chunk from active list (mark as inactive)
+            // Remove this chunk from active list (mark as inactive) and
+            // record completion in the bitmap for monotonic progress display
             {
                 let mut prog = progress.lock().await;
                 if let Some(p) = prog.as_mut() {
                     if let Some(chunk) = p.chunks.iter_mut().find(|c| c.chunk_id == chunk_id) {
                         chunk.is_active = false;
                         chunk.downloaded = chunk_total;
+                    }
+                    if chunk_ok {
+                        if let Some(done) = p.chunk_completed.get_mut(chunk_id) {
+                            *done = true;
+                        }
                     }
                 }
             }
@@ -718,6 +727,8 @@ async fn download_chunked(
         let mut prog = progress.lock().await;
         if let Some(p) = prog.as_mut() {
             p.downloaded = total_size;
+            // All chunks are complete once every handle has joined
+            p.chunk_completed.iter_mut().for_each(|c| *c = true);
         }
     }
 
