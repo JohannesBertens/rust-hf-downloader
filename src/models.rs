@@ -32,9 +32,6 @@ pub struct ModelMetadata {
     pub siblings: Vec<RepoFile>, // All files in the repo
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Gated status: "auto", "manual", false, or true
-    #[serde(default)]
-    pub gated: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -368,8 +365,8 @@ impl Default for AppOptions {
             download_rate_limit_enabled: false,
             download_rate_limit_mbps: 50.0,
             verification_on_completion: true,
-            concurrent_verifications: 2,
-            verification_buffer_size: 128 * 1024,
+            concurrent_verifications: 4,
+            verification_buffer_size: 1024 * 1024,
             verification_update_interval: 100,
             selected_field: 0,
             editing_directory: false,
@@ -380,5 +377,61 @@ impl Default for AppOptions {
             default_min_downloads: 0,
             default_min_likes: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_state_new_initializes_counts() {
+        let state = QueueState::new(3, 1000);
+        assert_eq!(state.size, 3);
+        assert_eq!(state.bytes, 1000);
+        assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn queue_state_add_accumulates() {
+        let mut state = QueueState::new(3, 1000);
+        state.add(2, 500);
+        assert_eq!(state.size, 5);
+        assert_eq!(state.bytes, 1500);
+    }
+
+    #[test]
+    fn queue_state_remove_subtracts() {
+        let mut state = QueueState::new(3, 1000);
+        state.remove(1, 400);
+        assert_eq!(state.size, 2);
+        assert_eq!(state.bytes, 600);
+    }
+
+    #[test]
+    fn queue_state_remove_saturates_at_zero() {
+        // Documents actual behavior: removing more than was added saturates
+        // both size and bytes at zero (no underflow panic).
+        let mut state = QueueState::new(1, 100);
+        state.remove(5, 999);
+        assert_eq!(state.size, 0);
+        assert_eq!(state.bytes, 0);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn queue_state_default_is_empty() {
+        let state = QueueState::default();
+        assert_eq!(state.size, 0);
+        assert_eq!(state.bytes, 0);
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn queue_state_is_empty_tracks_size_only() {
+        // Documents actual behavior: emptiness is defined by `size` only,
+        // even when `bytes` is non-zero.
+        let state = QueueState::new(0, 100);
+        assert!(state.is_empty());
     }
 }

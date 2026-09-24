@@ -670,3 +670,295 @@ pub fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    // Unit tests for pure helper functions. No network access: fixtures are
+    // constructed directly and no fetch_* function is called.
+    use super::*;
+
+    fn repo_file(path: &str, size: u64) -> RepoFile {
+        RepoFile {
+            rfilename: path.to_string(),
+            size: Some(size),
+            lfs: None,
+        }
+    }
+
+    fn make_metadata(siblings: &[&str]) -> ModelMetadata {
+        ModelMetadata {
+            model_id: "test/model".to_string(),
+            library_name: None,
+            pipeline_tag: None,
+            card_data: None,
+            siblings: siblings.iter().map(|s| repo_file(s, 1)).collect(),
+            tags: Vec::new(),
+        }
+    }
+
+    // ---- extract_quantization_type ----
+
+    #[test]
+    fn quant_type_from_dotted_filename() {
+        assert_eq!(
+            extract_quantization_type("model.Q4_K_M.gguf"),
+            Some("Q4_K_M".to_string())
+        );
+        assert_eq!(
+            extract_quantization_type("llama-2-7b.Q5_0.gguf"),
+            Some("Q5_0".to_string())
+        );
+    }
+
+    #[test]
+    fn quant_type_from_dashed_filename() {
+        assert_eq!(
+            extract_quantization_type("Qwen3-VL-30B-Q8_K_XL.gguf"),
+            Some("Q8_K_XL".to_string())
+        );
+        assert_eq!(
+            extract_quantization_type("Qwen3-VL-4B-Thinking-1M-IQ4_XS.gguf"),
+            Some("IQ4_XS".to_string())
+        );
+    }
+
+    #[test]
+    fn quant_type_normalizes_lowercase_to_uppercase() {
+        // Documents actual behavior: the quant token is matched
+        // case-insensitively and normalized to uppercase in the result.
+        assert_eq!(
+            extract_quantization_type("model.q4_k_m.gguf"),
+            Some("Q4_K_M".to_string())
+        );
+        assert_eq!(
+            extract_quantization_type("Model.Bf16.gguf"),
+            Some("BF16".to_string())
+        );
+    }
+
+    #[test]
+    fn quant_type_none_for_non_gguf_or_plain_names() {
+        // No quant token anywhere -> None.
+        assert_eq!(extract_quantization_type("model.gguf"), None);
+        assert_eq!(extract_quantization_type("model.txt"), None);
+        assert_eq!(extract_quantization_type("readme.bin"), None);
+    }
+
+    #[test]
+    fn quant_type_from_multipart_names() {
+        // 5-digit multi-part suffix is stripped before extraction.
+        assert_eq!(
+            extract_quantization_type("model.Q4_K_M-00002-of-00005.gguf"),
+            Some("Q4_K_M".to_string())
+        );
+        // partNofM suffix is stripped before extraction.
+        assert_eq!(
+            extract_quantization_type("model.Q4_K_M.gguf.part1of2"),
+            Some("Q4_K_M".to_string())
+        );
+        // Multi-part name without a recognizable quant token yields None.
+        assert_eq!(extract_quantization_type("model-00002-of-00005.gguf"), None);
+    }
+
+    #[test]
+    fn quant_type_uppercase_gguf_extension_is_not_recognized() {
+        // Documents actual behavior: only a lowercase ".gguf" suffix is
+        // trimmed, so an uppercase ".GGUF" extension prevents extraction.
+        assert_eq!(extract_quantization_type("model.Q4_K_M.GGUF"), None);
+    }
+
+    // ---- parse_multipart_filename ----
+
+    #[test]
+    fn parse_multipart_five_digit_format() {
+        assert_eq!(
+            parse_multipart_filename("name-00002-of-00005.gguf"),
+            Some((2, 5))
+        );
+        assert_eq!(parse_multipart_filename("a-00003-of-00004"), Some((3, 4)));
+    }
+
+    #[test]
+    fn parse_multipart_partnofm_format() {
+        assert_eq!(
+            parse_multipart_filename("model.Q4_K_M.gguf.part1of2"),
+            Some((1, 2))
+        );
+    }
+
+    #[test]
+    fn parse_multipart_rejects_invalid_names() {
+        assert_eq!(parse_multipart_filename("model.gguf"), None);
+        // Single part (total of 1) is not multi-part.
+        assert_eq!(parse_multipart_filename("model-00001-of-00001.gguf"), None);
+        // Current part greater than total is rejected.
+        assert_eq!(parse_multipart_filename("model-00006-of-00005.gguf"), None);
+    }
+
+    // ---- get_multipart_base_name ----
+
+    #[test]
+    fn base_name_strips_five_digit_suffix() {
+        assert_eq!(
+            get_multipart_base_name("model-Q6_K-00003-of-00009.gguf"),
+            "model-Q6_K.gguf"
+        );
+    }
+
+    #[test]
+    fn base_name_strips_partnofm_suffix() {
+        assert_eq!(
+            get_multipart_base_name("model.Q4_K_M.gguf.part1of2"),
+            "model.Q4_K_M.gguf"
+        );
+    }
+
+    #[test]
+    fn base_name_leaves_plain_filenames_alone() {
+        assert_eq!(get_multipart_base_name("model.gguf"), "model.gguf");
+    }
+
+    // ---- is_quantization_directory ----
+
+    #[test]
+    fn quant_dir_recognizes_common_types() {
+        assert!(is_quantization_directory("Q4_K_M"));
+        assert!(is_quantization_directory("Q8_0"));
+        assert!(is_quantization_directory("IQ4_XS"));
+        assert!(is_quantization_directory("TQ1_0"));
+        assert!(is_quantization_directory("BF16"));
+        assert!(is_quantization_directory("F16"));
+        assert!(is_quantization_directory("FP16"));
+        assert!(is_quantization_directory("FP32"));
+    }
+
+    #[test]
+    fn quant_dir_is_case_insensitive() {
+        assert!(is_quantization_directory("q4_k_m"));
+        assert!(is_quantization_directory("iq4_xs"));
+    }
+
+    #[test]
+    fn quant_dir_rejects_random_names() {
+        assert!(!is_quantization_directory("random"));
+        assert!(!is_quantization_directory("models"));
+        assert!(!is_quantization_directory(""));
+    }
+
+    #[test]
+    fn quant_dir_matches_suffix_of_model_dirnames() {
+        assert!(is_quantization_directory(
+            "cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0"
+        ));
+    }
+
+    #[test]
+    fn quant_dir_loose_q_prefix_matching() {
+        // Documents actual behavior: ANY name starting with 'Q' is treated as
+        // a quantization directory, even without a trailing digit.
+        assert!(is_quantization_directory("QuickCheck"));
+    }
+
+    // ---- extract_quantization_type_from_dirname ----
+
+    #[test]
+    fn dirname_type_plain() {
+        assert_eq!(extract_quantization_type_from_dirname("Q4_K_M"), "Q4_K_M");
+        assert_eq!(extract_quantization_type_from_dirname("q8_0"), "Q8_0");
+    }
+
+    #[test]
+    fn dirname_type_from_model_dirname() {
+        assert_eq!(
+            extract_quantization_type_from_dirname("cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0"),
+            "Q8_0"
+        );
+        assert_eq!(
+            extract_quantization_type_from_dirname("my_model-BF16"),
+            "BF16"
+        );
+    }
+
+    #[test]
+    fn dirname_type_fallback_uppercases_whole_name() {
+        // Documents actual behavior: unrecognized directory names are returned
+        // uppercased rather than rejected.
+        assert_eq!(extract_quantization_type_from_dirname("random"), "RANDOM");
+    }
+
+    // ---- build_file_tree ----
+
+    #[test]
+    fn build_file_tree_nests_and_sorts() {
+        let files = vec![
+            repo_file("a/b.gguf", 100),
+            repo_file("a/c.txt", 50),
+            repo_file("d.bin", 30),
+            repo_file("e/f/g.gguf", 7),
+        ];
+
+        let root = build_file_tree(files);
+
+        assert_eq!(root.name, "");
+        assert!(root.is_dir);
+        assert_eq!(root.depth, 0);
+        // Directories first ("a", "e"), then files ("d.bin").
+        let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "e", "d.bin"]);
+        assert_eq!(root.size, Some(187));
+
+        let dir_a = &root.children[0];
+        assert!(dir_a.is_dir);
+        assert_eq!(dir_a.path, "a");
+        assert_eq!(dir_a.size, Some(150));
+        let a_names: Vec<&str> = dir_a.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(a_names, vec!["b.gguf", "c.txt"]);
+
+        let b = &dir_a.children[0];
+        assert!(!b.is_dir);
+        assert_eq!(b.path, "a/b.gguf");
+        assert_eq!(b.size, Some(100));
+        assert_eq!(b.depth, 2);
+
+        // Deeply nested branch: e/f/g.gguf
+        let dir_e = &root.children[1];
+        assert_eq!(dir_e.size, Some(7));
+        let dir_f = &dir_e.children[0];
+        assert_eq!(dir_f.name, "f");
+        let g = &dir_f.children[0];
+        assert_eq!(g.name, "g.gguf");
+        assert_eq!(g.path, "e/f/g.gguf");
+        assert_eq!(g.depth, 3);
+
+        // Plain file at root level.
+        let d = &root.children[2];
+        assert!(!d.is_dir);
+        assert_eq!(d.path, "d.bin");
+        assert_eq!(d.size, Some(30));
+    }
+
+    // ---- has_gguf_files ----
+
+    #[test]
+    fn has_gguf_files_true_for_gguf_sibling() {
+        assert!(has_gguf_files(&make_metadata(&[
+            "config.json",
+            "model.Q4_K_M.gguf"
+        ])));
+    }
+
+    #[test]
+    fn has_gguf_files_true_for_multipart_gguf() {
+        // ".gguf.partNofM" files also count as GGUF.
+        assert!(has_gguf_files(&make_metadata(&["model.gguf.part1of2"])));
+    }
+
+    #[test]
+    fn has_gguf_files_false_without_gguf() {
+        assert!(!has_gguf_files(&make_metadata(&[
+            "config.json",
+            "weights.safetensors"
+        ])));
+        assert!(!has_gguf_files(&make_metadata(&[])));
+    }
+}

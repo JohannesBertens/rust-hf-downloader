@@ -68,8 +68,27 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent_config() {
-        // Should return defaults without panicking
+        // Isolate HOME so the developer's real config file cannot leak into
+        // this test (it asserts defaults, which only hold when no config exists).
+        let tmp = std::env::temp_dir().join(format!(
+            "rust-hf-downloader-test-config-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("failed to create temp HOME");
+
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+
         let options = load_config();
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // Should return defaults without panicking
         assert_eq!(options.concurrent_threads, 8);
     }
 }

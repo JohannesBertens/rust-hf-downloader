@@ -704,11 +704,22 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
             let size_str = format_size(file.size);
             let is_downloaded = complete_downloads.contains_key(&file.filename);
 
+            // Inner width minus borders (2), highlight-symbol gutter (3) and
+            // the right-aligned size column (12). Reserve room for the
+            // " [downloaded]" suffix when it will be shown, and truncate with
+            // an ellipsis so long shard names are visibly cut, never clipped
+            // at the panel border.
+            let mut name_budget = (chunks[1].width.saturating_sub(2 + 3 + 12)) as usize;
+            if is_downloaded {
+                name_budget = name_budget.saturating_sub(" [downloaded]".len());
+            }
+            let shown_name = truncate_filename(&file.filename, name_budget);
+
             let mut spans = vec![Span::raw(format!("{:>10}  ", size_str))];
 
             if is_downloaded {
                 spans.push(Span::styled(
-                    &file.filename,
+                    shown_name,
                     Style::default().fg(Color::Green),
                 ));
                 spans.push(Span::styled(
@@ -717,7 +728,7 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
                 ));
             } else {
                 spans.push(Span::styled(
-                    &file.filename,
+                    shown_name,
                     Style::default().fg(Color::White),
                 ));
             }
@@ -744,6 +755,28 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::QuantizationFiles, chunks[1]));
     frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
+}
+
+/// Truncate a filename to at most `max_chars` using a middle ellipsis, so
+/// the tail (shard index, extension) stays visible — the identifying part
+/// of multipart names like `model-00002-of-00003.gguf`. Names that already
+/// fit are returned unchanged.
+fn truncate_filename(name: &str, max_chars: usize) -> String {
+    let count = name.chars().count();
+    if max_chars == 0 {
+        return String::new();
+    }
+    if count <= max_chars {
+        return name.to_string();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+    let tail_len = (max_chars - 1) / 3;
+    let head_len = max_chars - 1 - tail_len;
+    let head: String = name.chars().take(head_len).collect();
+    let tail: String = name.chars().skip(count - tail_len).collect();
+    format!("{}…{}", head, tail)
 }
 
 /// Format bytes as GB, rounding up. Returns empty string for 0 bytes.
@@ -967,6 +1000,18 @@ fn render_download_progress(
 }
 
 /// Render verification progress bar in bottom-right corner
+/// Format a duration in seconds as a compact human-readable ETA string
+/// (e.g. "42s", "3m 12s", "1h 05m")
+fn format_eta(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 fn render_verification_progress(
     frame: &mut Frame,
     verifications: &[VerificationProgress],
@@ -1030,6 +1075,22 @@ fn render_verification_progress(
             0
         };
 
+        // Speed + ETA from the current throughput; ETA is only meaningful
+        // once speed has been measured (first ~200ms window)
+        let verified_now = ver.verified_bytes.load(Ordering::Relaxed);
+        let speed_str = if ver.speed_mbps > 0.0 {
+            format!(" {:.2} GB/s", ver.speed_mbps / 1024.0)
+        } else {
+            String::new()
+        };
+        let eta_str = if ver.speed_mbps > 0.0 && ver.total_bytes > verified_now {
+            let remaining =
+                (ver.total_bytes - verified_now) as f64 / (ver.speed_mbps * 1_048_576.0);
+            format!(" ETA {}", format_eta(remaining as u64))
+        } else {
+            String::new()
+        };
+
         // Truncate filename to fit (show end of filename)
         let display_name = if ver.filename.len() > 35 {
             format!("...{}", &ver.filename[ver.filename.len() - 32..])
@@ -1037,7 +1098,7 @@ fn render_verification_progress(
             ver.filename.clone()
         };
 
-        let label = format!("{}%", percentage);
+        let label = format!("{}%{}{}", percentage, speed_str, eta_str);
 
         let gauge = Gauge::default()
             .block(Block::default().borders(Borders::ALL).title(display_name))
@@ -1519,12 +1580,24 @@ pub fn render_options_popup(
         (12, "Verification"),
     ];
 
-    let mut y_offset = 1u16;
+    // Adaptive vertical layout: on short terminals the popup height clamps
+    // below the natural content height, and a fixed bottom-anchored help
+    // block would overwrite the last fields. Detect that case and drop the
+    // decorative spacing (top padding + category gaps) so everything fits.
+    let headers_n = category_offsets.len() as u16;
+    let fields_n = fields.len() as u16;
+    let spacing_n = headers_n.saturating_sub(1);
+    let help_n = 4u16; // every help variant renders 4 lines
+    let full_rows = 1 + headers_n + fields_n + spacing_n + help_n + 1;
+    let compact = inner.height < full_rows;
+    let top_pad: u16 = if compact { 0 } else { 1 };
+
+    let mut y_offset = top_pad;
     let mut field_idx = 0;
 
     for (cat_idx, (field_start, category_name)) in category_offsets.iter().enumerate() {
         // Render category header
-        if cat_idx > 0 {
+        if cat_idx > 0 && !compact {
             y_offset += 1; // Add spacing before category (except first)
         }
 
@@ -1584,8 +1657,15 @@ pub fn render_options_popup(
         }
     }
 
-    // Controls help (with empty line before)
-    let help_y = inner.y + inner.height - 5;
+    // Controls help (with empty line before). Bottom-anchor when everything
+    // fits; otherwise flow directly after the field list so the help block
+    // can never overlap the last fields on short terminals.
+    let content_rows = y_offset;
+    let help_y = if inner.height > content_rows + help_n {
+        inner.y + inner.height - help_n - 1
+    } else {
+        inner.y + content_rows
+    };
     let help = if options.editing_directory {
         vec![
             "",
@@ -1790,4 +1870,549 @@ pub fn render_filter_toolbar(
 
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
+}
+
+// =====================================================================
+// Snapshot tests (insta)
+//
+// This is a binary crate, so the test module must live inline here to
+// access the render functions. All snapshots use a fixed 100x30
+// TestBackend terminal and literal fixture constants so the output is
+// fully deterministic (no time, randomness, or environment reads).
+// =====================================================================
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::models::{
+        AppOptions, ChunkProgress, DownloadMetadata, DownloadStatus, SortDirection, SortField,
+    };
+    use ratatui::{backend::TestBackend, Terminal};
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    const TERMINAL_WIDTH: u16 = 100;
+    const TERMINAL_HEIGHT: u16 = 30;
+
+    fn test_terminal() -> Terminal<TestBackend> {
+        Terminal::new(TestBackend::new(TERMINAL_WIDTH, TERMINAL_HEIGHT))
+            .expect("failed to create test terminal")
+    }
+
+    fn model_fixture(id: &str, downloads: u64, likes: u64) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            author: None,
+            downloads,
+            likes,
+            tags: Vec::new(),
+            last_modified: None,
+        }
+    }
+
+    /// Three realistic model entries covering: derived author, explicit
+    /// author, tags, and last_modified rendering.
+    fn three_model_fixtures() -> Vec<ModelInfo> {
+        let mut first = model_fixture("meta-llama/Llama-3.1-8B", 1_234_567, 12_345);
+        first.tags = vec!["text-generation".to_string(), "llama".to_string()];
+        first.last_modified = Some("2024-07-03T09:15:00Z".to_string());
+        let mut second = model_fixture("mistralai/Mistral-7B-v0.3", 987_654, 8_900);
+        second.author = Some("mistralai".to_string());
+        second.tags = vec!["text-generation".to_string()];
+        let mut third = model_fixture("Qwen/Qwen2.5-Coder-32B-Instruct", 45_678, 678);
+        third.last_modified = Some("2024-11-01T00:00:00Z".to_string());
+        vec![first, second, third]
+    }
+
+    /// Two quantization groups: Q4_K_M with 2 files, Q8_0 with 1 file.
+    fn quantization_fixtures() -> Vec<QuantizationGroup> {
+        vec![
+            QuantizationGroup {
+                quant_type: "Q4_K_M".to_string(),
+                files: vec![
+                    QuantizationInfo {
+                        quant_type: "Q4_K_M".to_string(),
+                        filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+                        size: 4_921_860_096,
+                        sha256: None,
+                    },
+                    QuantizationInfo {
+                        quant_type: "Q4_K_M".to_string(),
+                        filename: "Llama-3.1-8B-Q4_K_M-00002-of-00002.gguf".to_string(),
+                        size: 1_000_000_000,
+                        sha256: None,
+                    },
+                ],
+                total_size: 5_921_860_096,
+            },
+            QuantizationGroup {
+                quant_type: "Q8_0".to_string(),
+                files: vec![QuantizationInfo {
+                    quant_type: "Q8_0".to_string(),
+                    filename: "Llama-3.1-8B-Q8_0.gguf".to_string(),
+                    size: 8_500_000_000,
+                    sha256: None,
+                }],
+                total_size: 8_500_000_000,
+            },
+        ]
+    }
+
+    /// Draw `render_ui` on the terminal with fixed defaults for every
+    /// RenderParams field not worth varying between tests (all filters at
+    /// defaults, no error, no hovered panel, Gguf display mode).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_render_ui(
+        terminal: &mut Terminal<TestBackend>,
+        input: &Input,
+        models: &[ModelInfo],
+        list_state: &mut ListState,
+        quantizations: &[QuantizationGroup],
+        quant_list_state: &mut ListState,
+        quant_file_list_state: &mut ListState,
+        focused_pane: FocusedPane,
+        status: &str,
+        selection_info: &str,
+    ) {
+        let error: Option<String> = None;
+        let model_metadata: Option<ModelMetadata> = None;
+        let file_tree: Option<FileTreeNode> = None;
+        let mut file_tree_state = ListState::default();
+        let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
+        let mut panel_areas = Vec::new();
+        let hovered_panel: Option<FocusedPane> = None;
+        let mut filter_areas = Vec::new();
+
+        terminal
+            .draw(|frame| {
+                render_ui(
+                    frame,
+                    RenderParams {
+                        input,
+                        input_mode: InputMode::Normal,
+                        models,
+                        list_state,
+                        loading: false,
+                        quantizations,
+                        quant_file_list_state,
+                        quant_list_state,
+                        loading_quants: false,
+                        focused_pane,
+                        error: &error,
+                        status,
+                        selection_info,
+                        complete_downloads: &complete_downloads,
+                        display_mode: ModelDisplayMode::Gguf,
+                        model_metadata: &model_metadata,
+                        file_tree: &file_tree,
+                        file_tree_state: &mut file_tree_state,
+                        sort_field: SortField::Downloads,
+                        sort_direction: SortDirection::Descending,
+                        filter_min_downloads: 0,
+                        filter_min_likes: 0,
+                        focused_filter_field: 5,
+                        panel_areas: &mut panel_areas,
+                        hovered_panel: &hovered_panel,
+                        filter_areas: &mut filter_areas,
+                    },
+                );
+            })
+            .expect("failed to draw UI");
+    }
+
+    #[test]
+    fn snapshot_render_ui_empty_state() {
+        let input = Input::default();
+        let models: Vec<ModelInfo> = Vec::new();
+        let mut list_state = ListState::default();
+        let quantizations: Vec<QuantizationGroup> = Vec::new();
+        let mut quant_list_state = ListState::default();
+        let mut quant_file_list_state = ListState::default();
+
+        let mut terminal = test_terminal();
+        draw_render_ui(
+            &mut terminal,
+            &input,
+            &models,
+            &mut list_state,
+            &quantizations,
+            &mut quant_list_state,
+            &mut quant_file_list_state,
+            FocusedPane::Models,
+            "Press / to search",
+            "",
+        );
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_render_ui_model_list_selection() {
+        let input = Input::new("llama".to_string());
+        let models = three_model_fixtures();
+        let mut list_state = ListState::default();
+        list_state.select(Some(1));
+        let quantizations: Vec<QuantizationGroup> = Vec::new();
+        let mut quant_list_state = ListState::default();
+        let mut quant_file_list_state = ListState::default();
+
+        let mut terminal = test_terminal();
+        draw_render_ui(
+            &mut terminal,
+            &input,
+            &models,
+            &mut list_state,
+            &quantizations,
+            &mut quant_list_state,
+            &mut quant_file_list_state,
+            FocusedPane::Models,
+            "Press / to search",
+            "Selection: 2 of 3",
+        );
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_render_ui_quantization_panels() {
+        let input = Input::default();
+        let models = three_model_fixtures();
+        let mut list_state = ListState::default();
+        let quantizations = quantization_fixtures();
+        let mut quant_list_state = ListState::default();
+        quant_list_state.select(Some(0));
+        let mut quant_file_list_state = ListState::default();
+        quant_file_list_state.select(Some(0));
+
+        let mut terminal = test_terminal();
+        draw_render_ui(
+            &mut terminal,
+            &input,
+            &models,
+            &mut list_state,
+            &quantizations,
+            &mut quant_list_state,
+            &mut quant_file_list_state,
+            FocusedPane::QuantizationGroups,
+            "2 quantization groups available",
+            "",
+        );
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_search_popup() {
+        let input = Input::new("llama".to_string());
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| render_search_popup(frame, &input))
+            .expect("failed to draw search popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_search_popup_over_populated_ui() {
+        // Mirrors the app run loop: main UI first, popup last, both in the
+        // SAME draw closure (sequential draws start from a reset buffer).
+        // Verifies the popup's Clear widget wipes the underlying UI inside
+        // the popup area instead of blending with it, and that the popup
+        // remains centered over real content.
+        let input = Input::new("llama".to_string());
+        let models = three_model_fixtures();
+        let mut list_state = ListState::default();
+        list_state.select(Some(1));
+        let quantizations: Vec<QuantizationGroup> = Vec::new();
+        let mut quant_list_state = ListState::default();
+        let mut quant_file_list_state = ListState::default();
+
+        let error: Option<String> = None;
+        let model_metadata: Option<ModelMetadata> = None;
+        let file_tree: Option<FileTreeNode> = None;
+        let mut file_tree_state = ListState::default();
+        let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
+        let mut panel_areas = Vec::new();
+        let hovered_panel: Option<FocusedPane> = None;
+        let mut filter_areas = Vec::new();
+
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_ui(
+                    frame,
+                    RenderParams {
+                        input: &input,
+                        input_mode: InputMode::Normal,
+                        models: &models,
+                        list_state: &mut list_state,
+                        loading: false,
+                        quantizations: &quantizations,
+                        quant_file_list_state: &mut quant_file_list_state,
+                        quant_list_state: &mut quant_list_state,
+                        loading_quants: false,
+                        focused_pane: FocusedPane::Models,
+                        error: &error,
+                        status: "Press / to search",
+                        selection_info: "Selection: 2 of 3",
+                        complete_downloads: &complete_downloads,
+                        display_mode: ModelDisplayMode::Gguf,
+                        model_metadata: &model_metadata,
+                        file_tree: &file_tree,
+                        file_tree_state: &mut file_tree_state,
+                        sort_field: SortField::Downloads,
+                        sort_direction: SortDirection::Descending,
+                        filter_min_downloads: 0,
+                        filter_min_likes: 0,
+                        focused_filter_field: 5,
+                        panel_areas: &mut panel_areas,
+                        hovered_panel: &hovered_panel,
+                        filter_areas: &mut filter_areas,
+                    },
+                );
+                render_search_popup(frame, &input);
+            })
+            .expect("failed to draw UI + popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_download_path_popup() {
+        let input = Input::new("/models/output".to_string());
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| render_download_path_popup(frame, &input))
+            .expect("failed to draw download path popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_auth_error_popup_no_token() {
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_auth_error_popup(
+                    frame,
+                    "https://huggingface.co/meta-llama/Llama-3.1-8B",
+                    false,
+                );
+            })
+            .expect("failed to draw auth error popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_auth_error_popup_with_token() {
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_auth_error_popup(
+                    frame,
+                    "https://huggingface.co/meta-llama/Llama-3.1-8B",
+                    true,
+                );
+            })
+            .expect("failed to draw auth error popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_resume_popup() {
+        let incomplete = vec![
+            DownloadMetadata {
+                model_id: "meta-llama/Llama-3.1-8B".to_string(),
+                filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+                url: "https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/Llama-3.1-8B-Q4_K_M.gguf"
+                    .to_string(),
+                local_path:
+                    "/home/user/models/meta-llama/Llama-3.1-8B/Llama-3.1-8B-Q4_K_M.gguf"
+                        .to_string(),
+                total_size: 4_921_860_096,
+                downloaded_size: 1_230_465_024,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: None,
+            },
+            DownloadMetadata {
+                model_id: "Qwen/Qwen2.5-7B".to_string(),
+                filename: "Qwen2.5-7B-Q8_0.gguf".to_string(),
+                url: "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/main/Qwen2.5-7B-Q8_0.gguf"
+                    .to_string(),
+                local_path:
+                    "/home/user/models/Qwen/Qwen2.5-7B/Qwen2.5-7B-Q8_0.gguf".to_string(),
+                total_size: 8_500_000_000,
+                downloaded_size: 4_250_000_000,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: None,
+            },
+        ];
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| render_resume_popup(frame, &incomplete))
+            .expect("failed to draw resume popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_options_popup() {
+        // AppOptions::default() reads HOME/HF_TOKEN from the environment;
+        // pin those two fields so the snapshot stays deterministic.
+        let options = AppOptions {
+            default_directory: "/home/testuser/models".to_string(),
+            hf_token: None,
+            ..AppOptions::default()
+        };
+        let directory_input = Input::default();
+        let token_input = Input::default();
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_options_popup(frame, &options, &directory_input, &token_input);
+            })
+            .expect("failed to draw options popup");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_filter_toolbar_unfocused() {
+        // focused_field 5 is out of range (valid: 0=sort, 1=downloads,
+        // 2=likes), so no field is highlighted. Default values also
+        // trigger the "[No Filters]" preset indicator.
+        let mut filter_areas = Vec::new();
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_filter_toolbar(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: TERMINAL_WIDTH,
+                        height: 3,
+                    },
+                    SortField::Downloads,
+                    SortDirection::Descending,
+                    0,
+                    0,
+                    5,
+                    &mut filter_areas,
+                );
+            })
+            .expect("failed to draw filter toolbar");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_filter_toolbar_sort_focused() {
+        let mut filter_areas = Vec::new();
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_filter_toolbar(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: TERMINAL_WIDTH,
+                        height: 3,
+                    },
+                    SortField::Likes,
+                    SortDirection::Ascending,
+                    2_500,
+                    300,
+                    0,
+                    &mut filter_areas,
+                );
+            })
+            .expect("failed to draw filter toolbar");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_filter_toolbar_downloads_focused() {
+        let mut filter_areas = Vec::new();
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_filter_toolbar(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: TERMINAL_WIDTH,
+                        height: 3,
+                    },
+                    SortField::Downloads,
+                    SortDirection::Descending,
+                    10_000,
+                    100,
+                    1,
+                    &mut filter_areas,
+                );
+            })
+            .expect("failed to draw filter toolbar");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_download_progress_with_chunks() {
+        // 512 MiB of 1 GiB downloaded at 85.5 MB/s, 2 queued downloads of
+        // 2 GiB total. Two active chunks plus one finished (inactive).
+        let progress = DownloadProgress {
+            model_id: "meta-llama/Llama-3.1-8B".to_string(),
+            filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+            downloaded: 536_870_912,
+            total: 1_073_741_824,
+            speed_mbps: 85.5,
+            chunks: vec![
+                ChunkProgress {
+                    chunk_id: 0,
+                    start: 0,
+                    end: 357_913_941,
+                    downloaded: 300_000_000,
+                    total: 357_913_941,
+                    speed_mbps: 30.0,
+                    is_active: true,
+                },
+                ChunkProgress {
+                    chunk_id: 1,
+                    start: 357_913_941,
+                    end: 715_827_882,
+                    downloaded: 150_000_000,
+                    total: 357_913_941,
+                    speed_mbps: 25.5,
+                    is_active: true,
+                },
+                ChunkProgress {
+                    chunk_id: 2,
+                    start: 715_827_882,
+                    end: 1_073_741_824,
+                    downloaded: 86_870_912,
+                    total: 357_913_942,
+                    speed_mbps: 0.0,
+                    is_active: false,
+                },
+            ],
+            verifying: false,
+        };
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_progress_bars(frame, &Some(progress), 2, 2_147_483_648, &[], 0);
+            })
+            .expect("failed to draw download progress");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_verification_progress_bar() {
+        let verification = VerificationProgress {
+            filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+            verified_bytes: Arc::new(AtomicU64::new(536_870_912)),
+            total_bytes: 1_073_741_824,
+            speed_mbps: 42.0,
+        };
+        let mut terminal = test_terminal();
+        terminal
+            .draw(|frame| {
+                render_progress_bars(frame, &None, 0, 0, &[verification], 2);
+            })
+            .expect("failed to draw verification progress");
+        insta::assert_snapshot!(terminal.backend());
+    }
 }
