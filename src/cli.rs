@@ -775,6 +775,12 @@ async fn run_download(args: DownloadArgs) -> i32 {
     }
 
     let (state, download_tx) = EngineState::new();
+    // Load the on-disk registry into the engine mirror (parity with the
+    // TUI's startup scan) so verification updates find their entries.
+    {
+        let mut mirror = state.download_registry.lock().await;
+        *mirror = crate::registry::load_registry();
+    }
     crate::engine::spawn_verification_worker(state.clone());
     let manager = crate::engine::spawn_manager(state.clone());
 
@@ -897,12 +903,16 @@ async fn monitor(
 
     let interrupted = loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break true,
+            _ = tokio::signal::ctrl_c() => break None,
             result = &mut join => {
-                if let Ok(outcomes) = result {
-                    count_outcomes(&outcomes, tally);
-                }
-                break false;
+                // Keep the authoritative outcome list; counting happens
+                // after the final channel drain below so streamed outcomes
+                // are never double-counted.
+                break match result {
+                    Ok(outcomes) => Some(Some(outcomes)),
+                    // Manager task failed (panicked): keep streamed tallies
+                    Err(_) => Some(None),
+                };
             }
             _ = ticker.tick() => {
                 poll_once(
@@ -919,14 +929,13 @@ async fn monitor(
         }
     };
 
-    if interrupted {
-        // Abort the manager: the in-flight file stops mid-download; any
-        // .incomplete file is deleted on the next run (existing
-        // restart-from-scratch semantics) and registry entries stay
-        // Incomplete for the TUI's resume view.
-        join.abort();
-        return true;
-    }
+    let outcomes = match interrupted {
+        Some(outcomes) => outcomes,
+        None => {
+            join.abort();
+            return true; // interrupted by SIGINT
+        }
+    };
 
     // All downloads drained; every queue_verification call has happened.
     // Wait for the verification worker to run dry (race-free idle signal).
@@ -964,6 +973,13 @@ async fn monitor(
         reporter,
     )
     .await;
+
+    // Authoritative recount of download counters from the manager's full
+    // outcome list (verification counters come from the drained channel —
+    // every send happens before the in-flight counter drops to zero).
+    if let Some(outcomes) = outcomes {
+        count_outcomes(&outcomes, tally);
+    }
 
     false
 }

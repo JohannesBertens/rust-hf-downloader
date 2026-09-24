@@ -37,3 +37,6 @@ indexmap = "=2.2.6"
 
 [dev-dependencies]
 insta = "1.48.0"
+# Same version reqwest 0.11 already locks; used only by the integration-test
+# mock server (Range-aware) — ships nothing in the binary.
+hyper = { version = "0.14", features = ["full"] }

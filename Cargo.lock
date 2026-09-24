@@ -1074,6 +1074,7 @@ dependencies = [
  "crossterm",
  "futures",
  "hex",
+ "hyper",
  "idna 0.5.0",
  "indexmap",
  "insta",

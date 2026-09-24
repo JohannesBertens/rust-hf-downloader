@@ -163,8 +163,11 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
                     actual_sha256: calculated_hash,
                 });
 
-                // Update registry to HashMismatch
-                let mut registry = state.download_registry.lock().await;
+                // Mark the mismatch in the on-disk registry (the source of
+                // truth — the in-memory engine mirror may be empty, e.g. for
+                // CLI runs that never loaded it) and keep the mirror in sync
+                // for TUI views.
+                let mut registry = crate::registry::load_registry();
                 if let Some(entry) = registry
                     .downloads
                     .iter_mut()
@@ -173,6 +176,15 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
                     entry.status = DownloadStatus::HashMismatch;
                 }
                 crate::registry::save_registry(&registry);
+
+                let mut mirror = state.download_registry.lock().await;
+                if let Some(entry) = mirror
+                    .downloads
+                    .iter_mut()
+                    .find(|d| d.local_path == item.local_path)
+                {
+                    entry.status = DownloadStatus::HashMismatch;
+                }
             }
         }
         Err(e) => {
