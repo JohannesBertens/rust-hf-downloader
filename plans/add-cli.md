@@ -561,3 +561,30 @@ All phases implemented; 106/106 tests green (93 unit + 13 integration), clippy/f
 4. JSON `progress` throttle is 500 ms fixed (per the draft's recommendation); the monitor tick
    is 400 ms.
 5. `dl` alias added for the subcommand; summary gained a `hash_mismatch` field (additive).
+
+---
+
+## 10. Follow-up: `search` subcommand (added on this branch)
+
+Originally listed under non-goals (§8), search was added after the download
+loop shipped, once the skill-flow gap was concrete: agents could *download*
+(self-describing via the `ambiguous` error) but had to drop to `curl` to
+*discover* model IDs. Design constraints (from the v1 post-mortem in §0):
+
+- **Query-only**: one bounded API call via the existing `fetch_models_filtered`;\
+  no engine state, no channels, no new bootstrap — immune to the v1 drift class.
+- **Drift-proof mapping**: CLI `--sort`/`--direction` parse into local value\
+  enums with unit-tested `From` impls into the shared `models::SortField`/\
+  `SortDirection` (v1's `--sort` was silently ignored; here that is a test failure).
+- **Output rule**: queries emit one JSON **array** (`--json`); NDJSON events\
+  remain pipeline-only (`download`). Failure prints a single error event line.
+- **Config parity**: unspecified flags fall back to `default_sort_*`/\
+  `default_min_*` — same defaults as the TUI toolbar.
+- **Exit contract**: successful query with zero hits exits 0 with `[]`.
+- `fetch_models_filtered` gained a `limit` parameter (clamped 1..=500) so\
+  `--limit` actually reaches the API instead of truncating afterwards.
+
+Coverage: flag→enum mapping/aliases/precedence unit tests, JSON array insta
+snapshot, and integration tests against the mock `/api/models` endpoint
+(filters, client-side name sort both directions, limit forwarded, empty
+results, usage errors exit 64, network error exit 1).

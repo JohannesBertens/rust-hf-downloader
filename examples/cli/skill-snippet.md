@@ -1,9 +1,27 @@
 # AI-skill usage: one-shot model download
 
 `rust-hf-downloader download` is designed to be driven by scripts and agent
-skills. The consumer contract:
+skills. Together with `search`, the whole flow stays inside the binary:
 
-1. **Start with a probe.** Invoke with no selector on purpose when the repo
+1. **Discover the model ID.**
+
+   ```bash
+   $ rust-hf-downloader search "qwen 2.5 gguf" --limit 5 --json
+   [
+     {
+       "id": "bartowski/Qwen2.5-7B-GGUF",
+       "downloads": 172000,
+       ...
+     },
+     ...
+   ]
+   ```
+
+   Queries emit a single JSON array (not NDJSON); filters/sort flags mirror
+   the TUI: `--sort downloads|likes|modified|name`, `--direction asc|desc`,
+   `--min-downloads N`, `--min-likes N`. Zero results is still exit `0`.
+
+2. **Start with a probe.** Invoke `download` with no selector on purpose when the repo
    contents are unknown — an ambiguous repo returns exit code `64` plus a
    structured file list you can choose from:
 
@@ -47,6 +65,7 @@ Minimal skill loop (bash):
 
 ```bash
 set -euo pipefail
+MODEL=$(rust-hf-downloader search "$QUERY" --limit 1 --json | jq -r '.[0].id')
 out=$(rust-hf-downloader download "$MODEL" --json) || code=$?
 code=${code:-0}
 if [ "$code" = 64 ]; then

@@ -62,6 +62,119 @@ pub enum Command {
     /// One-shot model download (non-interactive, script/AI-friendly)
     #[command(alias = "dl")]
     Download(DownloadArgs),
+
+    /// Search HuggingFace models (query-only; prints a table or a JSON array)
+    Search(SearchArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SearchArgs {
+    /// Search query, e.g. "qwen 2.5 gguf"
+    #[arg(value_name = "QUERY")]
+    pub query: String,
+
+    /// Sort field [default: config default_sort_field]
+    #[arg(long, value_enum)]
+    pub sort: Option<SortArg>,
+
+    /// Sort direction [default: config default_sort_direction]
+    #[arg(long, value_enum)]
+    pub direction: Option<DirectionArg>,
+
+    /// Minimum downloads filter (applied client-side)
+    #[arg(long, value_name = "N")]
+    pub min_downloads: Option<u64>,
+
+    /// Minimum likes filter (applied client-side)
+    #[arg(long, value_name = "N")]
+    pub min_likes: Option<u64>,
+
+    /// Maximum number of results (1-500)
+    #[arg(long, default_value_t = 100, value_parser = parse_limit)]
+    pub limit: usize,
+
+    /// HuggingFace token [default: $HF_TOKEN, then config]
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// One JSON array on stdout (queries emit a document, not NDJSON events)
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Validate `--limit` (1-500) with a plain parser fn — clap's ranged value
+/// parsers need features this build intentionally omits.
+fn parse_limit(s: &str) -> Result<usize, String> {
+    let n: usize = s.parse().map_err(|_| format!("invalid limit: {:?}", s))?;
+    if (1..=500).contains(&n) {
+        Ok(n)
+    } else {
+        Err("limit must be between 1 and 500".to_string())
+    }
+}
+
+/// CLI sort fields. Maps onto the shared `models::SortField` so the CLI and
+/// TUI cannot drift (the v1 CLI's --sort flag was silently ignored).
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortArg {
+    Downloads,
+    Likes,
+    Modified,
+    Name,
+}
+
+impl From<SortArg> for crate::models::SortField {
+    fn from(value: SortArg) -> Self {
+        match value {
+            SortArg::Downloads => crate::models::SortField::Downloads,
+            SortArg::Likes => crate::models::SortField::Likes,
+            SortArg::Modified => crate::models::SortField::Modified,
+            SortArg::Name => crate::models::SortField::Name,
+        }
+    }
+}
+
+/// CLI sort directions (`asc`/`desc` aliases for the long forms).
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectionArg {
+    #[value(alias = "asc")]
+    Ascending,
+    #[value(alias = "desc")]
+    Descending,
+}
+
+impl From<DirectionArg> for crate::models::SortDirection {
+    fn from(value: DirectionArg) -> Self {
+        match value {
+            DirectionArg::Ascending => crate::models::SortDirection::Ascending,
+            DirectionArg::Descending => crate::models::SortDirection::Descending,
+        }
+    }
+}
+
+/// Search result row (stable JSON contract; `ModelInfo` serialization is an
+/// implementation detail, this DTO is a decision).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ModelDto {
+    pub id: String,
+    pub author: Option<String>,
+    pub downloads: u64,
+    pub likes: u64,
+    pub last_modified: Option<String>,
+    pub tags: Vec<String>,
+}
+
+impl From<&crate::models::ModelInfo> for ModelDto {
+    fn from(m: &crate::models::ModelInfo) -> Self {
+        Self {
+            id: m.id.clone(),
+            author: m.author.clone(),
+            downloads: m.downloads,
+            likes: m.likes,
+            last_modified: m.last_modified.clone(),
+            tags: m.tags.clone(),
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -629,8 +742,10 @@ pub fn truncate_path(s: &str, max: usize) -> String {
 
 /// Run a parsed CLI command; returns the process exit code.
 pub async fn run(command: Command) -> i32 {
-    let Command::Download(args) = command;
-    run_download(args).await
+    match command {
+        Command::Download(args) => run_download(args).await,
+        Command::Search(args) => run_search(args).await,
+    }
 }
 
 /// Everything the monitor loop accumulates for the summary and exit code.
@@ -875,6 +990,139 @@ async fn run_download(args: DownloadArgs) -> i32 {
     }
 
     tally.exit_code()
+}
+
+// ---------------------------------------------------------------------------
+// Search (query-only: one bounded API call, no engine involvement)
+// ---------------------------------------------------------------------------
+
+/// Effective search parameters: explicit flag → config default (the same
+/// defaults the TUI's filter toolbar starts with).
+fn effective_search_params(
+    args: &SearchArgs,
+    options: &crate::models::AppOptions,
+) -> (
+    crate::models::SortField,
+    crate::models::SortDirection,
+    u64,
+    u64,
+) {
+    (
+        args.sort
+            .map(Into::into)
+            .unwrap_or(options.default_sort_field),
+        args.direction
+            .map(Into::into)
+            .unwrap_or(options.default_sort_direction),
+        args.min_downloads.unwrap_or(options.default_min_downloads),
+        args.min_likes.unwrap_or(options.default_min_likes),
+    )
+}
+
+/// Fixed-column human table on stdout; the result count goes to stderr so
+/// the table stays pipeable.
+fn render_search_table(models: &[ModelDto]) {
+    use std::io::Write;
+    let id_width = models
+        .iter()
+        .map(|m| m.id.chars().count())
+        .chain(std::iter::once("MODEL ID".len()))
+        .max()
+        .unwrap()
+        .min(48);
+
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(
+        stdout,
+        "{:<id_w$}  {:>10}  {:>7}  UPDATED",
+        "MODEL ID",
+        "DOWNLOADS",
+        "LIKES",
+        id_w = id_width
+    );
+    let _ = writeln!(stdout, "{}", "-".repeat(id_width + 31));
+    for m in models {
+        let updated = m
+            .last_modified
+            .as_deref()
+            .and_then(|s| s.split('T').next())
+            .unwrap_or("-");
+        let _ = writeln!(
+            stdout,
+            "{:<id_w$}  {:>10}  {:>7}  {}",
+            truncate_path(&m.id, id_width),
+            crate::utils::format_number(m.downloads),
+            crate::utils::format_number(m.likes),
+            updated,
+            id_w = id_width
+        );
+    }
+    let _ = stdout.flush();
+    eprintln!("{} model(s)", models.len());
+}
+
+async fn run_search(args: SearchArgs) -> i32 {
+    let mut reporter = Reporter::new(args.json, false);
+    let options = crate::config::load_config();
+    let token = merge_token(
+        args.token.clone(),
+        std::env::var("HF_TOKEN").ok(),
+        options.hf_token.clone(),
+    );
+
+    let (sort, direction, min_downloads, min_likes) = effective_search_params(&args, &options);
+
+    match crate::api::fetch_models_filtered(
+        &args.query,
+        sort,
+        direction,
+        min_downloads,
+        min_likes,
+        args.limit,
+        token.as_ref(),
+    )
+    .await
+    {
+        Ok(models) => {
+            let dtos: Vec<ModelDto> = models.iter().map(ModelDto::from).collect();
+            if args.json {
+                // Queries emit one JSON document (an array), not NDJSON
+                // events — events are for streaming pipelines. On failure the
+                // only stdout output is a single error event (see below).
+                let mut stdout = std::io::stdout().lock();
+                match serde_json::to_string_pretty(&dtos) {
+                    Ok(json) => {
+                        let _ = writeln!(stdout, "{}", json);
+                        let _ = stdout.flush();
+                    }
+                    Err(e) => {
+                        drop(stdout);
+                        reporter.emit(&Event::Error {
+                            code: "internal".to_string(),
+                            message: format!("failed to serialize results: {}", e),
+                            available: None,
+                        });
+                        return EXIT_FAILURE;
+                    }
+                }
+            } else if dtos.is_empty() {
+                // A successful query with zero hits is still success (exit 0);
+                // scripts distinguish via the empty array / table absence.
+                eprintln!("No models found.");
+            } else {
+                render_search_table(&dtos);
+            }
+            EXIT_OK
+        }
+        Err(e) => {
+            reporter.emit(&Event::Error {
+                code: "network".to_string(),
+                message: format!("search failed: {}", e),
+                available: None,
+            });
+            EXIT_FAILURE
+        }
+    }
 }
 
 /// Poll shared engine state, render, and wait for deterministic drain.
@@ -1426,6 +1674,149 @@ mod tests {
     fn no_subcommand_means_tui() {
         let cli = Cli::try_parse_from(["rust-hf-downloader"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    // --- search --------------------------------------------------------------
+
+    #[test]
+    fn search_sort_flags_map_to_shared_enums() {
+        // The v1 CLI died of drift: --sort was accepted and ignored. These
+        // mappings are the boundary — if the flag stops reaching the shared
+        // enum, this test fails.
+        for (flag, expected) in [
+            ("downloads", crate::models::SortField::Downloads),
+            ("likes", crate::models::SortField::Likes),
+            ("modified", crate::models::SortField::Modified),
+            ("name", crate::models::SortField::Name),
+        ] {
+            let cli = Cli::try_parse_from(["hfd", "search", "q", "--sort", flag]).unwrap();
+            match cli.command {
+                Some(Command::Search(args)) => {
+                    let mapped: crate::models::SortField = args.sort.unwrap().into();
+                    assert_eq!(mapped, expected, "--sort {}", flag);
+                }
+                other => panic!("expected search, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn search_direction_accepts_asc_desc_aliases() {
+        for (flag, expected) in [
+            ("asc", crate::models::SortDirection::Ascending),
+            ("ascending", crate::models::SortDirection::Ascending),
+            ("desc", crate::models::SortDirection::Descending),
+            ("descending", crate::models::SortDirection::Descending),
+        ] {
+            let cli = Cli::try_parse_from(["hfd", "search", "q", "--direction", flag]).unwrap();
+            match cli.command {
+                Some(Command::Search(args)) => {
+                    let mapped: crate::models::SortDirection = args.direction.unwrap().into();
+                    assert_eq!(mapped, expected, "--direction {}", flag);
+                }
+                other => panic!("expected search, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn search_rejects_invalid_enum_values_and_limit_range() {
+        assert!(Cli::try_parse_from(["hfd", "search", "q", "--sort", "bogus"]).is_err());
+        assert!(Cli::try_parse_from(["hfd", "search", "q", "--direction", "up"]).is_err());
+        assert!(Cli::try_parse_from(["hfd", "search", "q", "--limit", "0"]).is_err());
+        assert!(Cli::try_parse_from(["hfd", "search", "q", "--limit", "501"]).is_err());
+        // boundaries pass
+        assert!(Cli::try_parse_from(["hfd", "search", "q", "--limit", "1"]).is_ok());
+        assert!(Cli::try_parse_from(["hfd", "search", "q", "--limit", "500"]).is_ok());
+    }
+
+    #[test]
+    fn search_params_flag_beats_config_default() {
+        let options = crate::models::AppOptions {
+            default_sort_field: crate::models::SortField::Name,
+            default_sort_direction: crate::models::SortDirection::Ascending,
+            default_min_downloads: 100,
+            default_min_likes: 10,
+            ..crate::models::AppOptions::default()
+        };
+
+        // no flags → config defaults
+        let args = Cli::try_parse_from(["hfd", "search", "q"]).unwrap();
+        let Command::Search(args) = args.command.unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            effective_search_params(&args, &options),
+            (
+                crate::models::SortField::Name,
+                crate::models::SortDirection::Ascending,
+                100,
+                10
+            )
+        );
+
+        // explicit flags override
+        let args = Cli::try_parse_from([
+            "hfd",
+            "search",
+            "q",
+            "--sort",
+            "likes",
+            "--direction",
+            "desc",
+            "--min-downloads",
+            "5",
+            "--min-likes",
+            "0",
+        ])
+        .unwrap();
+        let Command::Search(args) = args.command.unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            effective_search_params(&args, &options),
+            (
+                crate::models::SortField::Likes,
+                crate::models::SortDirection::Descending,
+                5,
+                0
+            )
+        );
+    }
+
+    #[test]
+    fn search_dto_preserves_fields() {
+        let info = crate::models::ModelInfo {
+            id: "a/b".to_string(),
+            author: Some("a".to_string()),
+            downloads: 1500,
+            likes: 10,
+            tags: vec!["gguf".to_string()],
+            last_modified: Some("2026-08-01T12:00:00Z".to_string()),
+        };
+        let dto = ModelDto::from(&info);
+        assert_eq!(dto.id, "a/b");
+        assert_eq!(dto.author.as_deref(), Some("a"));
+        assert_eq!(dto.downloads, 1500);
+        assert_eq!(dto.likes, 10);
+        assert_eq!(dto.tags, vec!["gguf".to_string()]);
+        assert_eq!(dto.last_modified.as_deref(), Some("2026-08-01T12:00:00Z"));
+    }
+
+    #[test]
+    fn snapshot_search_json_array() {
+        let dtos = vec![ModelDto {
+            id: "bartowski/Qwen2.5-7B-GGUF".to_string(),
+            author: Some("bartowski".to_string()),
+            downloads: 123_456,
+            likes: 1_200,
+            last_modified: Some("2026-08-14T10:00:00Z".to_string()),
+            tags: vec!["gguf".to_string(), "text-generation".to_string()],
+        }];
+        insta::assert_snapshot!(
+            "search-result-array",
+            serde_json::to_string_pretty(&dtos).unwrap()
+        );
     }
 
     // --- rendering helpers --------------------------------------------------

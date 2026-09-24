@@ -26,13 +26,18 @@ pub fn resolve_url(model_id: &str, filename: &str) -> String {
     format!("{}/{}/resolve/main/{}", api_base(), model_id, filename)
 }
 
-/// Fetch models with sorting and filtering parameters
+/// Fetch models with sorting and filtering parameters.
+///
+/// `limit` is clamped to 1..=500 (the API accepts more, but this is a
+/// safety bound); `--min-downloads`/`--min-likes` filtering happens client-side
+/// because the API does not support those filters.
 pub async fn fetch_models_filtered(
     query: &str,
     sort_field: crate::models::SortField,
     sort_direction: crate::models::SortDirection,
     min_downloads: u64,
     min_likes: u64,
+    limit: usize,
     token: Option<&String>,
 ) -> Result<Vec<ModelInfo>, reqwest::Error> {
     use crate::models::{SortDirection, SortField};
@@ -53,12 +58,13 @@ pub async fn fetch_models_filtered(
     // Always use descending for API call
     let direction = "-1";
 
-    // Request more results (100) since we'll filter client-side
+    // Request more results since we'll filter client-side
     // Use full=true to get complete metadata including lastModified
     let url = format!(
-        "{}/api/models?search={}&limit=100&sort={}&direction={}&full=true",
+        "{}/api/models?search={}&limit={}&sort={}&direction={}&full=true",
         api_base(),
         urlencoding::encode(query),
+        limit.clamp(1, 500),
         sort,
         direction
     );

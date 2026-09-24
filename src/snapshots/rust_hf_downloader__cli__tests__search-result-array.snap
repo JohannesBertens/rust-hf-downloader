@@ -1,0 +1,18 @@
+---
+source: src/cli.rs
+assertion_line: 1804
+expression: "serde_json::to_string_pretty(&dtos).unwrap()"
+---
+[
+  {
+    "id": "bartowski/Qwen2.5-7B-GGUF",
+    "author": "bartowski",
+    "downloads": 123456,
+    "likes": 1200,
+    "last_modified": "2026-08-14T10:00:00Z",
+    "tags": [
+      "gguf",
+      "text-generation"
+    ]
+  }
+]

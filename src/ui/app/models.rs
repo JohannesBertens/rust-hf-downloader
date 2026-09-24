@@ -83,6 +83,7 @@ impl App {
             sort_direction,
             min_downloads,
             min_likes,
+            100,
             token,
         )
         .await;

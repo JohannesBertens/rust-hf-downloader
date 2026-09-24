@@ -42,6 +42,10 @@ struct MockRepo {
     /// Delay before every request (stretches fast local downloads so the
     /// CLI monitor loop visibly samples progress).
     per_request_delay: Duration,
+    /// Fixture served for `/api/models` (search endpoint). The search term
+    /// is ignored (full-text matching is the real API's job) but `limit=`
+    /// from the query string is honored, mirroring the upstream contract.
+    search_results: Vec<Value>,
 }
 
 impl MockRepo {
@@ -82,6 +86,23 @@ fn parse_range(value: &str) -> Option<(u64, u64)> {
 
 async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
     let path = req.uri().path().to_string();
+
+    // Search endpoint (exact match; /api/models/{id} is the metadata route)
+    if path == "/api/models" {
+        let limit = req
+            .uri()
+            .query()
+            .and_then(|q| q.split('&').find(|p| p.starts_with("limit=")))
+            .and_then(|p| p.split('=').nth(1))
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100);
+        let results: Vec<Value> = repo.search_results.iter().take(limit).cloned().collect();
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&results).unwrap()))
+            .unwrap();
+    }
 
     let api_prefix = format!("/api/models/{}", repo.model_id);
     if path == api_prefix {
@@ -330,6 +351,18 @@ fn fixture_bytes(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 31 + 7) as u8).collect()
 }
 
+/// A ModelInfo-shaped fixture for the search endpoint.
+fn model(id: &str, downloads: u64, likes: u64) -> Value {
+    json!({
+        "id": id,
+        "author": id.split('/').next(),
+        "downloads": downloads,
+        "likes": likes,
+        "tags": [],
+        "lastModified": "2026-08-14T10:00:00Z",
+    })
+}
+
 /// Parse stdout into NDJSON events; panics on any non-JSON line.
 fn json_lines(stdout: &str) -> Vec<Value> {
     stdout
@@ -372,6 +405,7 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::from_millis(10),
+        search_results: Vec::new(),
     })
     .await;
 
@@ -426,6 +460,7 @@ async fn human_mode_summary_on_stdout() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -456,6 +491,7 @@ async fn already_exists_skips_download_and_verifies() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -500,6 +536,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -541,6 +578,7 @@ async fn gated_repo_exits_two() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -576,6 +614,7 @@ async fn ambiguous_selector_exits_64_with_available_list() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -615,6 +654,7 @@ async fn quant_selector_downloads_only_that_quantization() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -656,6 +696,7 @@ async fn all_selector_downloads_every_file() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -689,6 +730,7 @@ async fn transient_timeout_is_retried() {
         // First resolve request stalls 3s; client timeout is 1s (below)
         sleep_once: Some(Duration::from_secs(3)),
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -718,6 +760,7 @@ async fn no_verify_skips_verification_events() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -763,6 +806,7 @@ async fn raw_endpoint_fallback_after_resolve_404() {
         resolve_404: true,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
 
@@ -789,6 +833,7 @@ async fn usage_errors_exit_64() {
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
     })
     .await;
     let env = TestEnv::new(&endpoint);
@@ -821,4 +866,157 @@ fn range_parser_shapes() {
     assert_eq!(parse_range("bytes=5-1023"), Some((5, 1023)));
     assert_eq!(parse_range("bytes=0-"), None);
     assert_eq!(parse_range("items=1-2"), None);
+}
+
+// ---------------------------------------------------------------------------
+// Search subcommand
+// ---------------------------------------------------------------------------
+
+fn search_repo() -> MockRepo {
+    MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![FileEntry {
+            path: "model.gguf".to_string(),
+            advertised_sha256: None,
+            content: fixture_bytes(10),
+        }],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: vec![
+            model("zeta/large-model", 200_000, 5_000),
+            model("alpha/small-model", 1_500, 10),
+            model("mid/obscure-model", 50, 0),
+        ],
+    }
+}
+
+#[tokio::test]
+async fn search_json_returns_array_and_applies_filters() {
+    let endpoint = spawn_mock(search_repo()).await;
+    let env = TestEnv::new(&endpoint);
+
+    let (code, stdout, stderr) = env
+        .run(&["search", "model", "--min-downloads", "1000", "--json"])
+        .await;
+    assert_eq!(code, 0, "stderr: {}", stderr);
+
+    let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    // The 50-download model was filtered out client-side
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["id"], json!("zeta/large-model"));
+    assert!(results[0]["downloads"].as_u64().unwrap() >= 1000);
+}
+
+#[tokio::test]
+async fn search_sort_name_orders_client_side() {
+    let endpoint = spawn_mock(search_repo()).await;
+    let env = TestEnv::new(&endpoint);
+
+    // explicit ascending: fixture order (by downloads) is re-sorted a..z
+    let (code, stdout, _stderr) = env
+        .run(&[
+            "search",
+            "model",
+            "--sort",
+            "name",
+            "--direction",
+            "asc",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let ids: Vec<&str> = results.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["alpha/small-model", "mid/obscure-model", "zeta/large-model"]
+    );
+
+    // default direction (config default_sort_direction = Descending) → z..a
+    let (code, stdout, _stderr) = env
+        .run(&["search", "model", "--sort", "name", "--json"])
+        .await;
+    assert_eq!(code, 0);
+    let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    let ids: Vec<&str> = results.iter().filter_map(|r| r["id"].as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["zeta/large-model", "mid/obscure-model", "alpha/small-model"]
+    );
+}
+
+#[tokio::test]
+async fn search_limit_is_forwarded_to_the_api() {
+    let endpoint = spawn_mock(search_repo()).await;
+    let env = TestEnv::new(&endpoint);
+
+    let (code, stdout, _stderr) = env
+        .run(&["search", "model", "--limit", "2", "--json"])
+        .await;
+    assert_eq!(code, 0);
+
+    // The mock honors limit= from the query string; 3 fixtures -> 2 results
+    let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn search_human_table_and_empty_results() {
+    let endpoint = spawn_mock(search_repo()).await;
+    let env = TestEnv::new(&endpoint);
+
+    let (code, stdout, stderr) = env
+        .run(&["search", "model", "--min-downloads", "1000"])
+        .await;
+    assert_eq!(code, 0);
+    assert!(stdout.contains("MODEL ID"), "stdout: {:?}", stdout);
+    assert!(stdout.contains("zeta/large-model"));
+    // utils::format_number rendering in the table
+    assert!(stdout.contains("200.0K"), "stdout: {:?}", stdout);
+    assert!(stderr.contains("2 model(s)"), "stderr: {:?}", stderr);
+
+    // Successful query with zero hits is still exit 0
+    let (code, stdout, _stderr) = env
+        .run(&["search", "model", "--min-downloads", "999999999", "--json"])
+        .await;
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "[]");
+
+    let (code, stdout, stderr) = env
+        .run(&["search", "model", "--min-downloads", "999999999"])
+        .await;
+    assert_eq!(code, 0);
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("No models found"), "stderr: {:?}", stderr);
+}
+
+#[tokio::test]
+async fn search_usage_errors_exit_64() {
+    let endpoint = spawn_mock(search_repo()).await;
+    let env = TestEnv::new(&endpoint);
+
+    let (code, _, _) = env.run(&["search", "model", "--sort", "bogus"]).await;
+    assert_eq!(code, 64);
+    let (code, _, _) = env.run(&["search", "model", "--limit", "0"]).await;
+    assert_eq!(code, 64);
+}
+
+#[tokio::test]
+async fn search_network_error_emits_error_event_and_exits_one() {
+    // Bind then drop a listener to get a guaranteed-closed port
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let env = TestEnv::new(&format!("http://127.0.0.1:{}", port));
+
+    let (code, stdout, _stderr) = env.run(&["search", "model", "--json"]).await;
+    assert_eq!(code, 1);
+    let events = json_lines(&stdout);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["type"], json!("error"));
+    assert_eq!(events[0]["code"], json!("network"));
 }

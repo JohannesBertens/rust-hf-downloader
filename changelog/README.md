@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required, 64 usage/ambiguity, 130 interrupted.
 - **Added**: `HF_ENDPOINT` environment variable overrides the HuggingFace base
   URL (mirror support, e.g. hf-mirror.com; also enables hermetic tests).
+- **Added**: `search` subcommand — query-only model search over the same
+  endpoint/filters the TUI uses (`--sort downloads|likes|modified|name`,
+  `--direction asc|desc`, `--min-downloads`, `--min-likes`, `--limit 1-500`,
+  `--json` prints one JSON array; NDJSON stays pipeline-only). Flags fall back
+  to config defaults; zero results still exits 0.
+- **Changed**: `fetch_models_filtered` takes an explicit `limit` (clamped
+  1..=500; previously hardcoded 100 in the URL).
 - **Changed**: The download-manager and verification-worker bootstrap moved
   from `App::run` into the shared `engine` module (`EngineState`, `spawn_manager`,
   `spawn_verification_worker`, deterministic drain when the queue channel

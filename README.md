@@ -246,6 +246,10 @@ non-interactive subcommand is available for scripts, cron jobs, and AI-agent
 skills:
 
 ```bash
+# Search HuggingFace (query-only; table or JSON array)
+rust-hf-downloader search "qwen 2.5 gguf" --sort downloads --limit 20
+rust-hf-downloader search "mistral gguf" --min-downloads 1000 --json | jq '.[0].id'
+
 # Download a specific quantization
 rust-hf-downloader download bartowski/Qwen2.5-7B-GGUF --quant Q4_K_M
 
@@ -256,6 +260,26 @@ rust-hf-downloader download org/model --all -o /data/models
 # Machine-readable output for scripts and agents
 rust-hf-downloader download org/model --quant Q4_K_M --json | jq -c 'select(.type=="progress")'
 ```
+
+### Search
+
+`search` is a query-only command — one bounded API call, no engine state:
+
+```bash
+rust-hf-downloader search "qwen 2.5 gguf" [--sort downloads|likes|modified|name]
+                                        [--direction asc|desc]
+                                        [--min-downloads N] [--min-likes N]
+                                        [--limit N] [--json]
+```
+
+Unspecified flags fall back to the config defaults the TUI's filter toolbar
+uses. Output rule: **queries emit one JSON document** (an array, `--json`),
+**pipelines emit NDJSON events** (`download --json`) — on failure a single
+`{"type":"error",…}` line is the only stdout output. A successful search
+with zero results exits `0` with `[]` (scripts distinguish by array length).
+The full-text `search` term itself is matched server-side by HuggingFace;
+`--min-downloads`/`--min-likes` filter client-side, `--sort name` and
+ascending sorts apply client-side too (the API only sorts descending).
 
 ### Selectors
 
