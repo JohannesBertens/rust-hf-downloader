@@ -15,15 +15,17 @@ The application follows a modular architecture with clear separation of concerns
 
 ```
 src/
-├── main.rs           # Entry point (~20 lines)
-├── models.rs         # Data structures and types
-├── config.rs         # Configuration persistence (v0.9.0)
-├── api.rs            # HuggingFace API client with authentication (v0.9.5)
+├── main.rs           # Entry point (~50 lines): `download` subcommand → cli::run; no args → TUI
+├── cli.rs            # One-shot download CLI: args (clap), file resolution, human/JSON reporters
+├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, drain signals
+├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
+├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
+├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
 ├── registry.rs       # Download metadata management
-├── download.rs       # Download orchestration with auth (v0.9.5)
+├── download.rs       # Download orchestration with auth; returns FileOutcome (v0.9.5)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
-├── verification.rs   # SHA256 verification (v0.8.0)
+├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
 ├── utils.rs          # Helper functions
 └── ui/
     ├── mod.rs        # UI module exports
@@ -36,6 +38,18 @@ src/
     │   └── verification.rs # Verification UI (~77 lines)
     └── render.rs     # UI rendering functions
 ```
+
+### Frontends share one engine (v-unreleased)
+
+The TUI (`ui::App::run`) and the CLI (`cli::run_download`) both bootstrap the
+queue/download pipeline through `engine::spawn_manager` /
+`engine::spawn_verification_worker` over an `engine::EngineState` bundle —
+there is exactly ONE manager bootstrap (the v1 headless CLI was removed in
+v2.0.0 because its duplicated copy drifted). The CLI signals completion by
+dropping `download_tx` (manager join resolves) and then waiting for
+`EngineState::verification_idle()`; per-file results stream over the
+`outcome_tx`/`verify_tx` channels. `HF_ENDPOINT` overrides all HuggingFace
+base URLs — required knowledge for integration tests and mirror users.
 Check `README.md` for more information.
 
 ### Filter & Sort System (v1.0.0)

@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Unreleased (feature branch `feature/cli-download`)
+- **Added**: `download` subcommand — one-shot non-interactive model download for
+  scripts and AI-agent skills. TUI remains the default with no arguments.
+  Selectors `--quant` / `--file` / `--all` (mutually exclusive; ambiguity fails
+  with the structured file list), `-o/--output`, `--token`, `--no-verify`,
+  `--json` (NDJSON events, error event always last), `-q/--quiet`.
+- **Added**: Stable CLI exit codes: 0 ok, 1 failure/hash-mismatch, 2 auth
+  required, 64 usage/ambiguity, 130 interrupted.
+- **Added**: `HF_ENDPOINT` environment variable overrides the HuggingFace base
+  URL (mirror support, e.g. hf-mirror.com; also enables hermetic tests).
+- **Changed**: The download-manager and verification-worker bootstrap moved
+  from `App::run` into the shared `engine` module (`EngineState`, `spawn_manager`,
+  `spawn_verification_worker`, deterministic drain when the queue channel
+  closes). The v2.0.0 CLI removal was driven by exactly this bootstrap
+  drifting between frontends; there is now one implementation.
+- **Changed**: `start_download` returns a typed `FileOutcome`; verification
+  reports typed `VerifyOutcome`s and a race-free idle signal (in-flight counter
+  incremented under the queue lock).
+- **Fixed**: `validate_and_sanitize_path` falsely rejected a not-yet-existing
+  base directory as path traversal (first-ever download into a fresh
+  directory failed).
+- **Fixed**: hash-mismatch handling saved a stale in-memory registry mirror
+  over the on-disk registry when the mirror was empty (headless runs).
+- **Testing**: end-to-end integration suite running the real binary against a
+  Range-aware mock HuggingFace server with full HOME isolation; insta
+  snapshots pin the JSON event schema.
+
 ## [2.1.0] - 2026-09-24
 
 ### Version 2.1.0 (2026-09-24)

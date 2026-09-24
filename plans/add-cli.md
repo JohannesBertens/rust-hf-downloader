@@ -1,6 +1,6 @@
 # Plan: Add a CLI one-shot download mode (`download` subcommand)
 
-**Status:** draft, not yet implemented
+**Status:** implemented on `feature/cli-download` (all phases; see §9 for deviations)
 **Goal:** `rust-hf-downloader download <model_id> [selectors] [flags]` downloads a model
 non-interactively with CLI feedback (human progress or JSON Lines), designed for scripts and
 AI-agent skill usage. The TUI remains the default when the binary is started with no arguments.
@@ -531,3 +531,33 @@ Cases:
 - No concurrent-file downloads (queue is serial by design; parallelism is intra-file).
 - Later candidates: `--include/--exclude` globs, `verify` subcommand for on-disk models,
   registry file locking, JSON schema published in `docs/`.
+
+---
+
+## 9. Implementation record (2026, branch `feature/cli-download`)
+
+All phases implemented; 106/106 tests green (93 unit + 13 integration), clippy/fmt clean.
+
+| Phase | Commit | Notes |
+|---|---|---|
+| 1+2 engine + HF_ENDPOINT | `refactor: extract shared download engine` | verbatim manager extraction; FileOutcome; in-flight counter; apply_options; api_base/resolve_url |
+| 3–5 CLI core + JSON + signals | `feat(cli): one-shot download subcommand` | clap lean features; streaming outcome/verify channels added to the engine so file_complete events don't wait for full drain; SIGINT aborts manager, exit 130 |
+| 6 integration harness | `test(cli): end-to-end integration tests` | hyper mock (Range-aware); flushed out 3 real bugs, see below |
+| 7 docs | `docs:` | README CLI section, changelog Unreleased, AGENTS.md architecture |
+
+**Deviations from the draft:**
+
+1. `FileOutcome::AlreadyExists` carries `bytes` instead of a `verified: bool` — verification
+   results arrive as typed `VerifyOutcome`s on the new verify channel instead.
+2. Added `outcome_tx`/`outcome_rx` to `EngineState` (not in the draft): per-file outcomes stream
+   as each file finishes so JSON `file_complete` events do not wait for the manager to drain.
+3. Integration tests surfaced and fixed three latent bugs (each regression-tested):
+   - `validate_and_sanitize_path` falsely rejected a not-yet-existing base directory
+     (first-run bug that also affected the TUI path when `~/models` was missing);
+   - hash-mismatch writes now go to the **disk** registry (the in-memory mirror could be empty
+     in CLI runs and was saved over the file);
+   - CLI tallies double-counted fast downloads (streamed outcomes re-added after the join
+     recount); the authoritative recount now runs after the final channel drain.
+4. JSON `progress` throttle is 500 ms fixed (per the draft's recommendation); the monitor tick
+   is 400 ms.
+5. `dl` alias added for the subcommand; summary gained a `hash_mismatch` field (additive).
