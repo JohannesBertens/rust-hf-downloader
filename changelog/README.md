@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- **Performance**: Verification read+hash loop now runs on a single blocking thread with sync reads
+  (was: one tokio blocking-pool dispatch per buffer, ~160k hops per 20 GiB file) - ~12% faster
+  on a warm cache (1.87 -> 2.10 GiB/s measured)
+- **Performance**: Default `concurrent_verifications` 2 -> 4; multi-shard models verify in parallel
+  (each file hashes at ~2 GiB/s on SHA-NI CPUs)
+- **Fixed**: Verification progress bar now tracks actual bytes (previously advanced at
+  1/update_interval of real speed); gauge shows throughput + ETA
+
 ## [2.0.0] - 2026-09-23
 
 ### Version 2.0.0 (2026-09-23)

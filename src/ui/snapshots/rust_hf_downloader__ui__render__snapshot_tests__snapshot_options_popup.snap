@@ -22,7 +22,7 @@ expression: terminal.backend()
 "                  │  Max Download Speed (MB/s): 50.0                             │                  "
 "                  │  ─── Verification ─────────────────────────────────────────  │                  "
 "                  │  Enable Verification: Enabled                                │                  "
-"                  │  Concurrent Verifications: 2                                 │                  "
+"                  │  Concurrent Verifications: 4                                 │                  "
 "                  │  Verification Buffer Size: 1.00 MB                           │                  "
 "                  │  Verification Update Interval: 100                           │                  "
 "                  │                                                              │                  "
