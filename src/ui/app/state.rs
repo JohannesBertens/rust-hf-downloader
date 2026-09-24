@@ -1,12 +1,12 @@
 use crate::models::*;
 use crossterm::event::EventStream;
+use parking_lot::RwLock;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::Input;
 
@@ -42,6 +42,9 @@ pub struct App {
     pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
     pub download_rx: DownloadReceiver,
     pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
+    /// Mirror of files waiting in the download channel, for HUD display
+    /// (names + sizes). Same lock level as `download_queue`.
+    pub download_queue_items: Arc<Mutex<Vec<crate::models::QueueItemSummary>>>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
     pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
     pub status_tx: mpsc::UnboundedSender<String>,
@@ -79,7 +82,11 @@ pub struct App {
     pub cached_complete_downloads: CompleteDownloads,
     pub cached_download_progress: Option<DownloadProgress>,
     pub cached_download_queue: crate::models::QueueState, // Combined cache
+    pub cached_download_queue_items: Vec<crate::models::QueueItemSummary>,
+    pub cached_verification_queue_bytes: u64,
     pub cached_verification_progress: Vec<VerificationProgress>,
+    /// Session-lifetime hash verification result counters (HUD footer)
+    pub verification_results: crate::verification::VerificationResultCounters,
 }
 
 impl Default for App {
@@ -140,6 +147,7 @@ impl App {
             download_tx,
             download_rx: Arc::new(Mutex::new(download_rx)),
             download_queue: Arc::new(Mutex::new(crate::models::QueueState::new(0, 0))),
+            download_queue_items: Arc::new(Mutex::new(Vec::new())),
             incomplete_downloads: Vec::new(),
             status_rx: Arc::new(Mutex::new(status_rx)),
             status_tx,
@@ -174,7 +182,10 @@ impl App {
             cached_complete_downloads: HashMap::new(),
             cached_download_progress: None,
             cached_download_queue: crate::models::QueueState::new(0, 0),
+            cached_download_queue_items: Vec::new(),
+            cached_verification_queue_bytes: 0,
             cached_verification_progress: Vec::new(),
+            verification_results: crate::verification::VerificationResultCounters::default(),
         }
     }
 

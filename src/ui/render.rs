@@ -1,13 +1,13 @@
 use crate::models::{
     DownloadProgress, FileTreeNode, FocusedPane, InputMode, ModelDisplayMode, ModelInfo,
-    ModelMetadata, QuantizationGroup, QuantizationInfo, VerificationProgress,
+    ModelMetadata, QuantizationGroup, QuantizationInfo, QueueItemSummary, VerificationProgress,
 };
 use crate::utils::{format_number, format_size};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use std::collections::HashMap;
@@ -46,6 +46,8 @@ pub struct RenderParams<'a> {
     pub hovered_panel: &'a Option<FocusedPane>,
     // Filter toolbar click areas
     pub filter_areas: &'a mut Vec<(usize, Rect)>,
+    // Activity HUD strip height reserved above the status bar (0 = hidden)
+    pub hud_height: u16,
 }
 
 pub fn render_ui(frame: &mut Frame, params: RenderParams) {
@@ -76,6 +78,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         panel_areas,
         hovered_panel,
         filter_areas,
+        hud_height,
     } = params;
 
     // Clear previous panel and filter areas
@@ -85,10 +88,11 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Filter toolbar
-            Constraint::Min(10),    // Main content (models list)
-            Constraint::Length(12), // Bottom panels
-            Constraint::Length(4),  // Status bar
+            Constraint::Length(3),          // Filter toolbar
+            Constraint::Min(10),            // Main content (models list)
+            Constraint::Length(12),         // Bottom panels
+            Constraint::Length(hud_height), // Activity HUD (Option 3 matrix)
+            Constraint::Length(4),          // Status bar
         ])
         .split(frame.area());
 
@@ -303,7 +307,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         })
         .wrap(Wrap { trim: true });
 
-    frame.render_widget(status_widget, chunks[3]);
+    frame.render_widget(status_widget, chunks[4]);
 }
 
 struct StandardPanelContext<'a> {
@@ -718,19 +722,13 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
             let mut spans = vec![Span::raw(format!("{:>10}  ", size_str))];
 
             if is_downloaded {
-                spans.push(Span::styled(
-                    shown_name,
-                    Style::default().fg(Color::Green),
-                ));
+                spans.push(Span::styled(shown_name, Style::default().fg(Color::Green)));
                 spans.push(Span::styled(
                     " [downloaded]",
                     Style::default().fg(Color::Green),
                 ));
             } else {
-                spans.push(Span::styled(
-                    shown_name,
-                    Style::default().fg(Color::White),
-                ));
+                spans.push(Span::styled(shown_name, Style::default().fg(Color::White)));
             }
 
             let content = Line::from(spans);
@@ -792,321 +790,490 @@ fn format_remaining_gb(bytes: u64) -> String {
     }
 }
 
-/// Calculate ETA in minutes based on remaining bytes and current speed.
-/// Returns None if speed is zero or negative (download stalled/starting).
-/// Shows "<1 minute" for very fast downloads.
-fn calculate_eta_minutes(remaining_bytes: u64, speed_mbps: f64) -> Option<String> {
-    if speed_mbps <= 0.0 {
-        return None;
-    }
+// ============================================================================
+// Activity HUD (design Option 3: compact matrix — PLANS/design-options.md)
+//
+// One fixed-column line per pipeline item, rendered as a strip above the
+// status bar. State glyphs (DL/VF/Q) sort rows into pipeline stages without
+// boxes; numeric columns are right-aligned for vertical scan paths; row
+// count and row height are fixed while active (zero reflow).
+// ============================================================================
 
-    // Convert speed from MB/s to bytes/s
-    let speed_bytes_per_sec = speed_mbps * 1_048_576.0;
+/// Data bundle for the activity HUD.
+pub struct ActivityHudData<'a> {
+    pub download_progress: &'a Option<DownloadProgress>,
+    pub queue_size: usize,
+    pub queue_bytes: u64,
+    pub queue_items: &'a [QueueItemSummary],
+    pub verification_progress: &'a [VerificationProgress],
+    pub verification_queue_size: usize,
+    pub verification_queue_bytes: u64,
+    pub verified_ok: usize,
+    pub verified_fail: usize,
+}
 
-    // Calculate seconds remaining
-    let seconds_remaining = remaining_bytes as f64 / speed_bytes_per_sec;
+/// Maximum item rows before truncation (footer always renders as row +1).
+const HUD_MAX_ITEM_ROWS: usize = 8;
+/// Queue rows shown individually before collapsing into "+N more".
+const HUD_MAX_QUEUE_ROWS: usize = 3;
 
-    // Convert to minutes, rounding UP
-    let minutes = (seconds_remaining / 60.0).ceil() as u64;
-
-    if minutes == 0 {
-        Some("<1 minute".to_string())
-    } else if minutes == 1 {
-        Some("1 minute".to_string())
+/// Height of the reserved HUD strip (item rows + 1 footer row + 2 border
+/// rows), 0 when idle.
+pub fn activity_hud_height(data: &ActivityHudData) -> u16 {
+    let rows = hud_item_row_count(data);
+    if rows == 0 {
+        0
     } else {
-        Some(format!("{} minutes", minutes))
+        rows.min(HUD_MAX_ITEM_ROWS) as u16 + 1 + 2
     }
 }
 
-/// Render both download and verification progress bars
-pub fn render_progress_bars(
-    frame: &mut Frame,
-    download_progress: &Option<DownloadProgress>,
-    download_queue_size: usize,
-    download_queue_bytes: u64,
-    verification_progress: &[VerificationProgress],
-    verification_queue_size: usize,
-) {
-    // Render download progress (top-right) if active
-    if let Some(progress) = download_progress {
-        render_download_progress(frame, progress, download_queue_size, download_queue_bytes);
+fn hud_item_row_count(data: &ActivityHudData) -> usize {
+    let mut rows = 0usize;
+    if data.download_progress.is_some() {
+        rows += 1;
+    }
+    rows += data.verification_progress.len();
+    let queue_len = data.queue_items.len();
+    rows += queue_len.min(HUD_MAX_QUEUE_ROWS);
+    if queue_len > HUD_MAX_QUEUE_ROWS {
+        rows += 1; // "+N more" row
+    }
+    rows
+}
+
+/// Render the HUD into `area` (the strip reserved above the status bar).
+pub fn render_activity_hud(frame: &mut Frame, area: Rect, data: &ActivityHudData) {
+    if area.height == 0 || area.width == 0 {
+        return;
     }
 
-    // Render verification progress (bottom-right) if active
-    if !verification_progress.is_empty() || verification_queue_size > 0 {
-        render_verification_progress(frame, verification_progress, verification_queue_size);
+    // Row builders lay out against the block's INNER width (borders excluded)
+    // so every fixed-width column lands on the same x across all rows.
+    let w = area.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+
+    // --- Download row ---
+    if let Some(p) = data.download_progress {
+        lines.push(download_hud_line(p, w));
+    }
+
+    // --- Verification rows ---
+    for ver in data.verification_progress {
+        lines.push(verification_hud_line(ver, w));
+    }
+
+    // --- Queue rows ---
+    let queue_len = data.queue_items.len();
+    for item in data.queue_items.iter().take(HUD_MAX_QUEUE_ROWS) {
+        lines.push(queue_hud_line(
+            &item.filename,
+            Some(item.total_size),
+            w,
+            false,
+        ));
+    }
+    if queue_len > HUD_MAX_QUEUE_ROWS {
+        let more = queue_len - HUD_MAX_QUEUE_ROWS;
+        let more_bytes: u64 = data
+            .queue_items
+            .iter()
+            .skip(HUD_MAX_QUEUE_ROWS)
+            .map(|i| i.total_size)
+            .sum();
+        lines.push(queue_hud_line(
+            &format!("+{more} more"),
+            Some(more_bytes),
+            w,
+            true,
+        ));
+    }
+
+    // Truncate to budget (footer aggregates what was cut)
+    lines.truncate(HUD_MAX_ITEM_ROWS);
+
+    // --- Footer aggregate ---
+    lines.push(hud_footer_line(data, w));
+
+    let widget =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("Activity"));
+    frame.render_widget(widget, area);
+}
+
+/// Column layout shared by all HUD rows, degraded on narrow terminals.
+struct HudColumns {
+    name_w: usize,
+    pct_w: usize,
+    speed_w: usize,
+    eta_w: usize,
+}
+
+impl HudColumns {
+    fn for_width(w: usize) -> Self {
+        let (name_w, speed_w, eta_w) = if w >= 100 {
+            (24, 9, 7)
+        } else if w >= 84 {
+            (16, 9, 0)
+        } else if w >= 70 {
+            (10, 9, 0)
+        } else {
+            (6, 0, 0)
+        };
+        HudColumns {
+            name_w,
+            pct_w: 4,
+            speed_w,
+            eta_w,
+        }
+    }
+
+    /// Visible width of the right-aligned block (pct + speed + eta + gaps).
+    fn right_w(&self) -> usize {
+        let mut w = self.pct_w;
+        if self.speed_w > 0 {
+            w += 1 + self.speed_w;
+        }
+        if self.eta_w > 0 {
+            w += 1 + self.eta_w;
+        }
+        w
+    }
+
+    /// Middle space available for bar (+ chunk map on the DL row).
+    /// `total_w` is the block's inner width; the middle must be filled
+    /// exactly (bar or padding) so the right block aligns on every row.
+    fn middle_w(&self, total_w: usize) -> usize {
+        total_w.saturating_sub(4 + self.name_w + 1 + 1 + self.right_w())
     }
 }
 
-/// Render download progress bar in top-right corner
-fn render_download_progress(
-    frame: &mut Frame,
-    progress: &DownloadProgress,
-    queue_size: usize,
-    queue_bytes: u64,
-) {
-    // Filter active chunks
-    let active_chunks: Vec<_> = progress.chunks.iter().filter(|c| c.is_active).collect();
+/// Pad a (possibly truncated) name to exactly `width` chars so every row's
+/// middle section starts on the same column (fixed-width column layout).
+fn pad_name(name: &str, width: usize) -> String {
+    format!(
+        "{:<width$}",
+        truncate_name_middle(name, width),
+        width = width
+    )
+}
 
-    // Calculate height
-    let num_active = active_chunks.len();
-    let total_height = if num_active > 0 {
-        3 + num_active as u16 + 2
-    } else {
-        3
-    };
-
-    // Position: top-right
-    let progress_area = Rect {
-        x: frame.area().width.saturating_sub(52),
-        y: 0,
-        width: 52.min(frame.area().width),
-        height: total_height.min(frame.area().height),
-    };
-
-    frame.render_widget(Clear, progress_area);
-
-    let percentage = if progress.total > 0 {
-        (progress.downloaded as f64 / progress.total as f64 * 100.0) as u16
+fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
+    let cols = HudColumns::for_width(w);
+    let pct = if p.total > 0 {
+        (p.downloaded as f64 / p.total as f64 * 100.0) as u16
     } else {
         0
     };
 
-    // Calculate total remaining bytes
-    let current_remaining = progress.total.saturating_sub(progress.downloaded);
-    let total_remaining = current_remaining + queue_bytes;
-    let remaining_str = format_remaining_gb(total_remaining);
-
-    // Calculate ETA based on current speed and total remaining
-    let eta_str = calculate_eta_minutes(total_remaining, progress.speed_mbps);
-
-    // Title with queue info, remaining size, and ETA
-    let title = match (queue_size > 0, !remaining_str.is_empty(), eta_str) {
-        // Queue + Size + ETA
-        (true, true, Some(eta)) => {
-            format!(
-                "Downloading ({} queued) {} remaining, ~{}",
-                queue_size, remaining_str, eta
-            )
-        }
-        // Queue + Size, no ETA (speed = 0)
-        (true, true, None) => {
-            format!(
-                "Downloading ({} queued) {} remaining",
-                queue_size, remaining_str
-            )
-        }
-        // Queue only
-        (true, false, _) => {
-            format!("Downloading ({} queued)", queue_size)
-        }
-        // Size + ETA, no queue
-        (false, true, Some(eta)) => {
-            format!("Downloading {} remaining, ~{}", remaining_str, eta)
-        }
-        // Size only, no ETA
-        (false, true, None) => {
-            format!("Downloading {} remaining", remaining_str)
-        }
-        // Base case
-        _ => "Downloading".to_string(),
-    };
-
-    // Label with speed and rate limit indicator
-    let label = if progress.speed_mbps > 0.0 {
-        use std::sync::atomic::Ordering;
-        let rate_limited = crate::download::DOWNLOAD_CONFIG
-            .rate_limit_enabled
-            .load(Ordering::Relaxed);
-        if rate_limited {
-            let limit_bytes = crate::download::DOWNLOAD_CONFIG
-                .rate_limit_bytes_per_sec
-                .load(Ordering::Relaxed);
-            let limit_mbps = limit_bytes as f64 / 1_048_576.0;
-            format!(
-                "{}% - {:.1}/{:.1} MB/s",
-                percentage, progress.speed_mbps, limit_mbps
-            )
-        } else {
-            format!("{}% - {:.2} MB/s", percentage, progress.speed_mbps)
-        }
+    // Speed + ETA for the CURRENT FILE only; whole-queue totals live in the
+    // footer line (see hud_footer_line)
+    let current_remaining = p.total.saturating_sub(p.downloaded);
+    let speed_str = if p.speed_mbps > 0.0 {
+        format_speed_hud(p.speed_mbps)
     } else {
-        format!("{}%", percentage)
+        "--".to_string()
+    };
+    let eta_str = if p.speed_mbps > 0.0 {
+        let secs = current_remaining as f64 / (p.speed_mbps * 1_048_576.0);
+        format_eta_hud(secs as u64)
+    } else {
+        "--".to_string()
     };
 
-    // Overall progress gauge
-    let overall_area = Rect {
-        x: progress_area.x,
-        y: progress_area.y,
-        width: progress_area.width,
-        height: 3,
-    };
+    let mut spans = vec!["DL ".into_cyan(), Span::raw("  ")];
+    spans.push(Span::raw(pad_name(&p.filename, cols.name_w)));
+    spans.push(Span::raw(" "));
 
-    let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
-        .percent(percentage)
-        .label(label);
-
-    frame.render_widget(gauge, overall_area);
-
-    // Render active chunk progress
-    if !active_chunks.is_empty() {
-        let chunks_area = Rect {
-            x: progress_area.x,
-            y: progress_area.y + 3,
-            width: progress_area.width,
-            height: num_active as u16 + 2,
-        };
-
-        let chunks_block = Block::default()
-            .borders(Borders::ALL)
-            .title("Active Chunks");
-
-        let inner_area = chunks_block.inner(chunks_area);
-        frame.render_widget(chunks_block, chunks_area);
-
-        for (y_offset, chunk) in active_chunks.into_iter().enumerate() {
-            let chunk_area = Rect {
-                x: inner_area.x,
-                y: inner_area.y + y_offset as u16,
-                width: inner_area.width,
-                height: 1,
-            };
-
-            let chunk_pct = if chunk.total > 0 {
-                (chunk.downloaded as f64 / chunk.total as f64 * 100.0) as u16
-            } else {
-                0
-            };
-
-            let bar_width = chunk_area.width.saturating_sub(20) as usize;
-            let filled = (bar_width as f64 * chunk_pct as f64 / 100.0) as usize;
-            let empty = bar_width.saturating_sub(filled);
-
-            let bar = format!(
-                "#{:<2}[{}{}] {:>6.2} MB/s",
-                chunk.chunk_id + 1,
-                "=".repeat(filled),
-                " ".repeat(empty),
-                chunk.speed_mbps
-            );
-
-            let chunk_widget = Paragraph::new(bar).style(Style::default().fg(Color::Yellow));
-
-            frame.render_widget(chunk_widget, chunk_area);
+    // Bar + (if room) "ch n/total" chunk map filling the remaining space
+    let middle = cols.middle_w(w);
+    let label = format!(
+        "ch {}/{}",
+        p.chunk_completed.iter().filter(|b| **b).count(),
+        p.num_chunks
+    );
+    let active_ids: Vec<usize> = p
+        .chunks
+        .iter()
+        .filter(|c| c.is_active)
+        .map(|c| c.chunk_id)
+        .collect();
+    let label_w = label.chars().count() + 1; // + leading gap
+    let mut bar_w = middle;
+    let mut map_cells = 0;
+    if p.num_chunks > 0 && middle >= 24 + label_w + 4 {
+        bar_w = 24;
+        map_cells = middle - bar_w - label_w;
+        if map_cells > p.num_chunks {
+            map_cells = p.num_chunks;
+            bar_w = middle - map_cells - label_w;
         }
+    }
+    if bar_w > 0 {
+        spans.push(bar_spans(pct, bar_w, Color::Cyan));
+    }
+    if map_cells > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::raw(" "));
+        spans.extend(chunk_map_spans(&p.chunk_completed, &active_ids, map_cells));
+    }
+
+    spans.push(right_block_spans(
+        &cols,
+        Some(pct),
+        Some(&speed_str),
+        Some(&eta_str),
+    ));
+    Line::from(spans)
+}
+
+fn verification_hud_line(ver: &VerificationProgress, w: usize) -> Line<'static> {
+    let cols = HudColumns::for_width(w);
+    // Ordering::Relaxed is safe here: eventual consistency is fine for display
+    let verified = ver.verified_bytes.load(Ordering::Relaxed);
+    let pct = if ver.total_bytes > 0 {
+        (verified as f64 / ver.total_bytes as f64 * 100.0) as u16
+    } else {
+        0
+    };
+    let speed_str = if ver.speed_mbps > 0.0 {
+        format_speed_hud(ver.speed_mbps)
+    } else {
+        "--".to_string()
+    };
+    let eta_str = if ver.speed_mbps > 0.0 && ver.total_bytes > verified {
+        let remaining = (ver.total_bytes - verified) as f64 / (ver.speed_mbps * 1_048_576.0);
+        format_eta_hud(remaining as u64)
+    } else {
+        "--".to_string()
+    };
+
+    let mut spans = vec!["VF ".into_green(), Span::raw("  ")];
+    spans.push(Span::raw(pad_name(&ver.filename, cols.name_w)));
+    spans.push(Span::raw(" "));
+    let middle = cols.middle_w(w);
+    if middle >= 8 {
+        spans.push(bar_spans(pct, middle, Color::Green));
+    }
+    spans.push(right_block_spans(
+        &cols,
+        Some(pct),
+        Some(&speed_str),
+        Some(&eta_str),
+    ));
+    Line::from(spans)
+}
+
+fn queue_hud_line(name: &str, size: Option<u64>, w: usize, dim: bool) -> Line<'static> {
+    let cols = HudColumns::for_width(w);
+    let size_str = size
+        .map(format_bytes_hud)
+        .unwrap_or_else(|| "--".to_string());
+    let name_span = if dim {
+        Span::styled(
+            pad_name(name, cols.name_w),
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(pad_name(name, cols.name_w))
+    };
+
+    let mut spans = vec!["Q  ".into_gray(), Span::raw("  ")];
+    spans.push(name_span);
+    spans.push(Span::raw(" "));
+    // Whitespace fills the middle (no decorative filler): fixed-column
+    // layout — stable columns + whitespace separation beat dotted rails,
+    // which read as noise and mask misalignment.
+    let middle = cols.middle_w(w);
+    spans.push(Span::raw(" ".repeat(middle)));
+    spans.push(right_block_spans(
+        &cols,
+        None,
+        Some(&size_str),
+        Some("wait"),
+    ));
+    Line::from(spans)
+}
+
+fn hud_footer_line(data: &ActivityHudData<'_>, w: usize) -> Line<'static> {
+    let mut parts: Vec<String> = Vec::new();
+    if data.verified_ok > 0 || data.verified_fail > 0 {
+        parts.push(format!(
+            "hash ✓{} ✗{}",
+            data.verified_ok, data.verified_fail
+        ));
+    }
+    if data.verification_queue_size > 0 {
+        parts.push(format!(
+            "verify q {} ({})",
+            data.verification_queue_size,
+            format_bytes_hud(data.verification_queue_bytes)
+        ));
+    }
+    if data.queue_size > 0 {
+        parts.push(format!(
+            "dl q {} ({})",
+            data.queue_size,
+            format_bytes_hud(data.queue_bytes)
+        ));
+    }
+    if let Some(p) = data.download_progress {
+        if p.speed_mbps > 0.0 {
+            let total_remaining = p.total.saturating_sub(p.downloaded) + data.queue_bytes;
+            let secs = total_remaining as f64 / (p.speed_mbps * 1_048_576.0);
+            parts.push(format!(
+                "remaining {} {}",
+                format_remaining_gb(total_remaining),
+                format_eta_hud(secs as u64)
+            ));
+        }
+    }
+
+    let inner_w = w.saturating_sub(2); // borders
+    let text = if parts.is_empty() {
+        "idle".to_string()
+    } else {
+        parts.join(" · ")
+    };
+    let used = text.chars().count() + 4; // "── " prefix + " " suffix
+    let fill = inner_w.saturating_sub(used);
+    let mut s = format!("── {text} ");
+    s.push_str(&"─".repeat(fill));
+    Line::from(Span::styled(s, Style::default().fg(Color::DarkGray)))
+}
+
+/// Filled/empty bar span in the given color, exactly `width` cells wide.
+fn bar_spans(pct: u16, width: usize, color: Color) -> Span<'static> {
+    let filled = ((width as f64 * pct as f64 / 100.0).round() as usize).min(width);
+    let empty = width - filled;
+    Span::styled(
+        format!("{}{}", "\u{2588}".repeat(filled), "\u{2591}".repeat(empty)),
+        Style::default().fg(color),
+    )
+}
+
+/// Map each of `cells` positions to its chunk bucket and pick a state char.
+fn chunk_map_spans(completed: &[bool], active_ids: &[usize], cells: usize) -> Vec<Span<'static>> {
+    let total = completed.len();
+    if total == 0 || cells == 0 {
+        return Vec::new();
+    }
+    let mut spans = Vec::with_capacity(cells);
+    for i in 0..cells {
+        let bucket = i * total / cells;
+        let (ch, color) = if completed[bucket] {
+            ('█', Color::Cyan) // done
+        } else if active_ids.contains(&bucket) {
+            ('▓', Color::Yellow) // active
+        } else {
+            ('░', Color::DarkGray) // pending
+        };
+        spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+    }
+    spans
+}
+
+/// Right-aligned pct / speed / eta block.
+fn right_block_spans(
+    cols: &HudColumns,
+    pct: Option<u16>,
+    speed: Option<&str>,
+    eta: Option<&str>,
+) -> Span<'static> {
+    let mut s = String::new();
+    match pct {
+        Some(p) => s.push_str(&format!("{:>3}%", p)),
+        None => s.push_str("  --"),
+    }
+    if cols.speed_w > 0 {
+        let sp = speed.unwrap_or("");
+        s.push(' ');
+        s.push_str(&format!("{:>width$}", sp, width = cols.speed_w));
+    }
+    if cols.eta_w > 0 {
+        let e = eta.unwrap_or("");
+        s.push(' ');
+        s.push_str(&format!("{:>width$}", e, width = cols.eta_w));
+    }
+    Span::raw(s)
+}
+
+/// Compact byte size for HUD columns, e.g. "38.2GB", "512MB".
+fn format_bytes_hud(bytes: u64) -> String {
+    const MB: f64 = 1_048_576.0;
+    const GB: f64 = 1_073_741_824.0;
+    let b = bytes as f64;
+    if bytes >= 1 << 30 {
+        format!("{:.1}GB", b / GB)
+    } else if bytes >= 1 << 20 {
+        format!("{:.0}MB", b / MB)
+    } else if bytes >= 1024 {
+        format!("{:.0}KB", b / 1024.0)
+    } else {
+        format!("{bytes}B")
     }
 }
 
-/// Render verification progress bar in bottom-right corner
-/// Format a duration in seconds as a compact human-readable ETA string
-/// (e.g. "42s", "3m 12s", "1h 05m")
-fn format_eta(secs: u64) -> String {
+/// Compact throughput, e.g. "32.8MB/s" or "1.9GB/s".
+fn format_speed_hud(mbps: f64) -> String {
+    if mbps >= 1024.0 {
+        format!("{:.1}GB/s", mbps / 1024.0)
+    } else {
+        format!("{:.1}MB/s", mbps)
+    }
+}
+
+/// Compact ETA bounded to the HUD eta column (7 cells), e.g. "~1h05m",
+/// "~12m21s", "~42s".
+fn format_eta_hud(secs: u64) -> String {
     if secs >= 3600 {
-        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+        format!("~{}h{:02}m", secs / 3600, (secs % 3600) / 60)
     } else if secs >= 60 {
-        format!("{}m {:02}s", secs / 60, secs % 60)
+        format!("~{}m{}s", secs / 60, secs % 60)
     } else {
-        format!("{}s", secs)
+        format!("~{}s", secs)
     }
 }
 
-fn render_verification_progress(
-    frame: &mut Frame,
-    verifications: &[VerificationProgress],
-    queue_size: usize,
-) {
-    if verifications.is_empty() && queue_size == 0 {
-        return;
+/// Middle-truncate a name to `max` chars (char-based, UTF-8 safe), keeping
+/// head and tail with a `~` marker: "model~.gguf".
+fn truncate_name_middle(name: &str, max: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max || max < 3 {
+        return name.chars().take(max).collect();
     }
+    let tail_w = (max - 1) / 2;
+    let head_w = max - 1 - tail_w;
+    let head: String = chars[..head_w].iter().collect();
+    let tail: String = chars[chars.len() - tail_w..].iter().collect();
+    format!("{head}~{tail}")
+}
 
-    // Calculate height: each verification gets 3 lines
-    let height = 3 + (verifications.len() as u16 * 3);
+trait StateGlyph {
+    fn into_cyan(self) -> Span<'static>;
+    fn into_green(self) -> Span<'static>;
+    fn into_gray(self) -> Span<'static>;
+}
 
-    // Position: bottom-right
-    let area = Rect {
-        x: frame.area().width.saturating_sub(52),
-        y: frame
-            .area()
-            .height
-            .saturating_sub(height.min(frame.area().height)),
-        width: 52.min(frame.area().width),
-        height: height.min(frame.area().height),
-    };
-
-    frame.render_widget(Clear, area);
-
-    // Title with queue info
-    let title = if queue_size > 0 {
-        format!("Verifying ({} queued)", queue_size)
-    } else {
-        "Verifying".to_string()
-    };
-
-    // Main container block
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Green));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Render each active verification as a progress bar
-    for (i, ver) in verifications.iter().enumerate() {
-        let ver_area = Rect {
-            x: inner.x,
-            y: inner.y + (i as u16 * 3),
-            width: inner.width,
-            height: 3.min(inner.height.saturating_sub(i as u16 * 3)),
-        };
-
-        if ver_area.height == 0 {
-            break; // No more room
-        }
-
-        let percentage = if ver.total_bytes > 0 {
-            // Ordering::Relaxed is safe here: we only need eventual consistency
-            // for progress percentage display, not strict ordering guarantees
-            let verified = ver.verified_bytes.load(Ordering::Relaxed);
-            (verified as f64 / ver.total_bytes as f64 * 100.0) as u16
-        } else {
-            0
-        };
-
-        // Speed + ETA from the current throughput; ETA is only meaningful
-        // once speed has been measured (first ~200ms window)
-        let verified_now = ver.verified_bytes.load(Ordering::Relaxed);
-        let speed_str = if ver.speed_mbps > 0.0 {
-            format!(" {:.2} GB/s", ver.speed_mbps / 1024.0)
-        } else {
-            String::new()
-        };
-        let eta_str = if ver.speed_mbps > 0.0 && ver.total_bytes > verified_now {
-            let remaining =
-                (ver.total_bytes - verified_now) as f64 / (ver.speed_mbps * 1_048_576.0);
-            format!(" ETA {}", format_eta(remaining as u64))
-        } else {
-            String::new()
-        };
-
-        // Truncate filename to fit (show end of filename)
-        let display_name = if ver.filename.len() > 35 {
-            format!("...{}", &ver.filename[ver.filename.len() - 32..])
-        } else {
-            ver.filename.clone()
-        };
-
-        let label = format!("{}%{}{}", percentage, speed_str, eta_str);
-
-        let gauge = Gauge::default()
-            .block(Block::default().borders(Borders::ALL).title(display_name))
-            .gauge_style(Style::default().fg(Color::Green).bg(Color::Black))
-            .percent(percentage)
-            .label(label);
-
-        frame.render_widget(gauge, ver_area);
+impl StateGlyph for &str {
+    fn into_cyan(self) -> Span<'static> {
+        Span::styled(
+            format!("{:<2}", self),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+    fn into_green(self) -> Span<'static> {
+        Span::styled(
+            format!("{:<2}", self),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    }
+    fn into_gray(self) -> Span<'static> {
+        Span::styled(format!("{:<2}", self), Style::default().fg(Color::DarkGray))
     }
 }
 
@@ -1882,14 +2049,248 @@ pub fn render_filter_toolbar(
 // =====================================================================
 
 #[cfg(test)]
-mod snapshot_tests {
+mod hud_tests {
     use super::*;
-    use crate::models::{
-        AppOptions, ChunkProgress, DownloadMetadata, DownloadStatus, SortDirection, SortField,
-    };
-    use ratatui::{backend::TestBackend, Terminal};
+    use crate::models::{ChunkProgress, QueueItemSummary};
+    use ratatui::Terminal;
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
+
+    fn dl_progress(done: usize, total_chunks: usize) -> DownloadProgress {
+        let mut chunk_completed = vec![false; total_chunks];
+        for (i, c) in chunk_completed.iter_mut().enumerate().take(done) {
+            *c = true;
+            let _ = i;
+        }
+        DownloadProgress {
+            model_id: "a/b".to_string(),
+            filename: "model.gguf".to_string(),
+            downloaded: 5,
+            total: 10,
+            speed_mbps: 0.0,
+            chunks: Vec::new(),
+            verifying: false,
+            num_chunks: total_chunks,
+            chunk_completed,
+        }
+    }
+
+    #[test]
+    fn hud_height_is_zero_when_idle() {
+        let none: Option<DownloadProgress> = None;
+        let data = ActivityHudData {
+            download_progress: &none,
+            queue_size: 0,
+            queue_bytes: 0,
+            queue_items: &[],
+            verification_progress: &[],
+            verification_queue_size: 0,
+            verification_queue_bytes: 0,
+            verified_ok: 0,
+            verified_fail: 0,
+        };
+        assert_eq!(activity_hud_height(&data), 0);
+    }
+
+    #[test]
+    fn hud_height_counts_rows_plus_footer() {
+        let dl = dl_progress(2, 4);
+        let v1 = VerificationProgress {
+            filename: "a".to_string(),
+            verified_bytes: Arc::new(AtomicU64::new(0)),
+            total_bytes: 1,
+            speed_mbps: 0.0,
+        };
+        let items: Vec<QueueItemSummary> = (0..5)
+            .map(|i| QueueItemSummary {
+                filename: format!("f{i}"),
+                total_size: 1,
+            })
+            .collect();
+        let none: Option<DownloadProgress> = None;
+        // 1 DL + 1 VF + 3 Q + 1 "+more" = 6 rows + footer = 7
+        let data = ActivityHudData {
+            download_progress: &Some(dl),
+            queue_size: 5,
+            queue_bytes: 5,
+            queue_items: &items,
+            verification_progress: &[v1],
+            verification_queue_size: 0,
+            verification_queue_bytes: 0,
+            verified_ok: 0,
+            verified_fail: 0,
+        };
+        assert_eq!(activity_hud_height(&data), 9); // 6 rows + footer + borders
+        let _ = none;
+    }
+
+    #[test]
+    fn hud_height_caps_at_budget() {
+        let dl = dl_progress(0, 2);
+        let vfs: Vec<VerificationProgress> = (0..4)
+            .map(|i| VerificationProgress {
+                filename: format!("v{i}"),
+                verified_bytes: Arc::new(AtomicU64::new(0)),
+                total_bytes: 1,
+                speed_mbps: 0.0,
+            })
+            .collect();
+        let items: Vec<QueueItemSummary> = (0..4)
+            .map(|i| QueueItemSummary {
+                filename: format!("f{i}"),
+                total_size: 1,
+            })
+            .collect();
+        // 1 + 4 + 3 + 1 = 9 rows uncapped -> capped to 8 + footer + borders
+        let data = ActivityHudData {
+            download_progress: &Some(dl),
+            queue_size: 4,
+            queue_bytes: 4,
+            queue_items: &items,
+            verification_progress: &vfs,
+            verification_queue_size: 0,
+            verification_queue_bytes: 0,
+            verified_ok: 0,
+            verified_fail: 0,
+        };
+        assert_eq!(activity_hud_height(&data), 11);
+    }
+
+    #[test]
+    fn chunk_map_marks_done_active_pending() {
+        // 4 chunks: 0 done, 1 done, 2 active, 3 pending -> 4 cells 1:1
+        let completed = vec![true, true, false, false];
+        let map = chunk_map_spans(&completed, &[2], 4);
+        assert_eq!(map.len(), 4);
+        let chars: String = map.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(chars, "\u{2588}\u{2588}\u{2593}\u{2591}");
+    }
+
+    #[test]
+    fn chunk_map_scales_down_without_gaps() {
+        // 20 chunks (first 10 done), 10 cells -> each cell = 2 chunks
+        let completed: Vec<bool> = (0..20).map(|i| i < 10).collect();
+        let map = chunk_map_spans(&completed, &[], 10);
+        let chars: String = map.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(
+            chars,
+            "\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}"
+        );
+    }
+
+    #[test]
+    fn truncate_name_keeps_head_and_tail() {
+        assert_eq!(
+            truncate_name_middle("model-Q4_K_M.gguf", 24),
+            "model-Q4_K_M.gguf"
+        );
+        assert_eq!(
+            truncate_name_middle("shard-00001.safetensors", 12),
+            "shard-~nsors"
+        );
+        assert_eq!(truncate_name_middle("ab", 5), "ab");
+        // UTF-8 safe
+        assert_eq!(truncate_name_middle("模　型　名　称.gguf", 7), "模　型~guf");
+    }
+
+    #[test]
+    fn pad_name_pads_to_fixed_column_width() {
+        assert_eq!(pad_name("ab", 6), "ab    ");
+        assert_eq!(pad_name("abcdefg", 6), "abc~fg"); // truncates to width, no pad needed
+        assert_eq!(pad_name("模　型.gguf", 12).chars().count(), 12);
+    }
+
+    #[test]
+    fn format_bytes_and_speed_compact() {
+        assert_eq!(format_bytes_hud(0), "0B");
+        assert_eq!(format_bytes_hud(2048), "2KB");
+        assert_eq!(format_bytes_hud(5 * 1_048_576), "5MB");
+        assert_eq!(format_bytes_hud(6_442_450_944), "6.0GB");
+        assert_eq!(format_speed_hud(32.84), "32.8MB/s");
+        assert_eq!(format_speed_hud(2048.0), "2.0GB/s");
+    }
+
+    #[test]
+    fn snapshot_activity_hud_renders_matrix() {
+        let dl = DownloadProgress {
+            model_id: "unsloth/Mistral".to_string(),
+            filename: "model-Q4_K_M.gguf".to_string(),
+            downloaded: 4_700_000_000,
+            total: 10_240_000_000,
+            speed_mbps: 32.8,
+            chunks: vec![ChunkProgress {
+                chunk_id: 12,
+                start: 0,
+                end: 0,
+                downloaded: 1,
+                total: 2,
+                speed_mbps: 4.0,
+                is_active: true,
+            }],
+            verifying: false,
+            num_chunks: 20,
+            chunk_completed: (0..20).map(|i| i < 11).collect(),
+        };
+        let vb = |n: u64| VerificationProgress {
+            filename: format!("shard-0000{n}.safetensors"),
+            verified_bytes: Arc::new(AtomicU64::new(n * 1_000_000_000)),
+            total_bytes: 5_000_000_000,
+            speed_mbps: 2000.0,
+        };
+        let vfs = vec![vb(4), vb(3), vb(2), vb(1)];
+        let items: Vec<QueueItemSummary> = vec![
+            QueueItemSummary {
+                filename: "shard-5.gguf".to_string(),
+                total_size: 6_657_199_915,
+            },
+            QueueItemSummary {
+                filename: "shard-6.gguf".to_string(),
+                total_size: 6_657_199_915,
+            },
+            QueueItemSummary {
+                filename: "shard-7.gguf".to_string(),
+                total_size: 6_657_199_915,
+            },
+            QueueItemSummary {
+                filename: "tokenizer.json".to_string(),
+                total_size: 1_048_576,
+            },
+        ];
+        let data = ActivityHudData {
+            download_progress: &Some(dl),
+            queue_size: 4,
+            queue_bytes: 19_972_000_000,
+            queue_items: &items,
+            verification_progress: &vfs,
+            verification_queue_size: 9,
+            verification_queue_bytes: 12_884_901_888,
+            verified_ok: 2,
+            verified_fail: 0,
+        };
+        let height = activity_hud_height(&data);
+        assert_eq!(height, 11); // 8 capped rows + footer + borders
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(120, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = Rect {
+                    x: 0,
+                    y: 0,
+                    width: 120,
+                    height,
+                };
+                render_activity_hud(frame, area, &data);
+            })
+            .unwrap();
+        insta::assert_snapshot!(terminal.backend());
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::models::{AppOptions, DownloadMetadata, DownloadStatus, SortDirection, SortField};
+    use ratatui::{backend::TestBackend, Terminal};
 
     const TERMINAL_WIDTH: u16 = 100;
     const TERMINAL_HEIGHT: u16 = 30;
@@ -2014,6 +2415,7 @@ mod snapshot_tests {
                         panel_areas: &mut panel_areas,
                         hovered_panel: &hovered_panel,
                         filter_areas: &mut filter_areas,
+                        hud_height: 0,
                     },
                 );
             })
@@ -2164,6 +2566,7 @@ mod snapshot_tests {
                         panel_areas: &mut panel_areas,
                         hovered_panel: &hovered_panel,
                         filter_areas: &mut filter_areas,
+                        hud_height: 0,
                     },
                 );
                 render_search_popup(frame, &input);
@@ -2346,73 +2749,6 @@ mod snapshot_tests {
                 );
             })
             .expect("failed to draw filter toolbar");
-        insta::assert_snapshot!(terminal.backend());
-    }
-
-    #[test]
-    fn snapshot_download_progress_with_chunks() {
-        // 512 MiB of 1 GiB downloaded at 85.5 MB/s, 2 queued downloads of
-        // 2 GiB total. Two active chunks plus one finished (inactive).
-        let progress = DownloadProgress {
-            model_id: "meta-llama/Llama-3.1-8B".to_string(),
-            filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
-            downloaded: 536_870_912,
-            total: 1_073_741_824,
-            speed_mbps: 85.5,
-            chunks: vec![
-                ChunkProgress {
-                    chunk_id: 0,
-                    start: 0,
-                    end: 357_913_941,
-                    downloaded: 300_000_000,
-                    total: 357_913_941,
-                    speed_mbps: 30.0,
-                    is_active: true,
-                },
-                ChunkProgress {
-                    chunk_id: 1,
-                    start: 357_913_941,
-                    end: 715_827_882,
-                    downloaded: 150_000_000,
-                    total: 357_913_941,
-                    speed_mbps: 25.5,
-                    is_active: true,
-                },
-                ChunkProgress {
-                    chunk_id: 2,
-                    start: 715_827_882,
-                    end: 1_073_741_824,
-                    downloaded: 86_870_912,
-                    total: 357_913_942,
-                    speed_mbps: 0.0,
-                    is_active: false,
-                },
-            ],
-            verifying: false,
-        };
-        let mut terminal = test_terminal();
-        terminal
-            .draw(|frame| {
-                render_progress_bars(frame, &Some(progress), 2, 2_147_483_648, &[], 0);
-            })
-            .expect("failed to draw download progress");
-        insta::assert_snapshot!(terminal.backend());
-    }
-
-    #[test]
-    fn snapshot_verification_progress_bar() {
-        let verification = VerificationProgress {
-            filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
-            verified_bytes: Arc::new(AtomicU64::new(536_870_912)),
-            total_bytes: 1_073_741_824,
-            speed_mbps: 42.0,
-        };
-        let mut terminal = test_terminal();
-        terminal
-            .draw(|frame| {
-                render_progress_bars(frame, &None, 0, 0, &[verification], 2);
-            })
-            .expect("failed to draw verification progress");
         insta::assert_snapshot!(terminal.backend());
     }
 }

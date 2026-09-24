@@ -82,7 +82,7 @@ To prevent deadlocks, all async code must acquire locks in the following order. 
 Lock Hierarchy (acquire in this order):
 
 1. download_rx (Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>)
-2. download_queue_size (Arc<Mutex<usize>>)
+2. download_queue_size (Arc<Mutex<usize>>) — and download_queue / download_queue_items (consolidated QueueState + Vec<QueueItemSummary> mirrors; acquire separately, never nested with each other)
 3. download_queue_bytes (Arc<Mutex<u64>>)
 4. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
 5. complete_downloads (Arc<Mutex<CompleteDownloads>>)
