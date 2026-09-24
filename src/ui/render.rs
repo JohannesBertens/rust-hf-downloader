@@ -853,7 +853,7 @@ pub fn render_activity_hud(frame: &mut Frame, area: Rect, data: &ActivityHudData
 
     // --- Download row ---
     if let Some(p) = data.download_progress {
-        lines.push(download_hud_line(p, data.queue_bytes, w));
+        lines.push(download_hud_line(p, w));
     }
 
     // --- Verification rows ---
@@ -943,7 +943,7 @@ impl HudColumns {
     }
 }
 
-fn download_hud_line(p: &DownloadProgress, queue_bytes: u64, w: usize) -> Line<'static> {
+fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
     let cols = HudColumns::for_width(w);
     let pct = if p.total > 0 {
         (p.downloaded as f64 / p.total as f64 * 100.0) as u16
@@ -951,16 +951,16 @@ fn download_hud_line(p: &DownloadProgress, queue_bytes: u64, w: usize) -> Line<'
         0
     };
 
-    // Speed + ETA over current file plus the rest of the queue
+    // Speed + ETA for the CURRENT FILE only; whole-queue totals live in the
+    // footer line (see hud_footer_line)
     let current_remaining = p.total.saturating_sub(p.downloaded);
-    let total_remaining = current_remaining + queue_bytes;
     let speed_str = if p.speed_mbps > 0.0 {
         format_speed_hud(p.speed_mbps)
     } else {
         "--".to_string()
     };
     let eta_str = if p.speed_mbps > 0.0 {
-        let secs = total_remaining as f64 / (p.speed_mbps * 1_048_576.0);
+        let secs = current_remaining as f64 / (p.speed_mbps * 1_048_576.0);
         format_eta_hud(secs as u64)
     } else {
         "--".to_string()
