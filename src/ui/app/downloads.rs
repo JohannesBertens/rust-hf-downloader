@@ -202,10 +202,7 @@ impl App {
                             }
                         };
 
-                    let url = format!(
-                        "https://huggingface.co/{}/resolve/main/{}",
-                        model.id, filename
-                    );
+                    let url = crate::api::resolve_url(&model.id, filename);
                     let local_path_str = validated_path.to_string_lossy().to_string();
 
                     // Only add if not already in registry
@@ -477,10 +474,7 @@ impl App {
                             }
                         };
 
-                    let url = format!(
-                        "https://huggingface.co/{}/resolve/main/{}",
-                        model.id, filename
-                    );
+                    let url = crate::api::resolve_url(&model.id, filename);
                     let local_path_str = validated_path.to_string_lossy().to_string();
 
                     // Only add if not already in registry

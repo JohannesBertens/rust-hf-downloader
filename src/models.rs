@@ -162,6 +162,38 @@ pub struct DownloadRegistry {
     pub downloads: Vec<DownloadMetadata>,
 }
 
+/// Typed per-file result of a download attempt, collected by the engine's
+/// download manager. The TUI ignores these (it renders from status strings);
+/// the CLI maps them to events and exit codes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileOutcome {
+    Complete { filename: String, bytes: u64 },
+    AlreadyExists { filename: String, bytes: u64 },
+    AuthRequired { model_id: String },
+    Failed { filename: String, reason: String },
+}
+
+/// Typed verification result, reported through the engine's `verify_tx`
+/// channel as each background verification finishes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Ok {
+        filename: String,
+    },
+    Mismatch {
+        filename: String,
+        expected_sha256: String,
+        actual_sha256: String,
+    },
+    Error {
+        filename: String,
+        reason: String,
+    },
+    Missing {
+        filename: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PopupMode {
     None,

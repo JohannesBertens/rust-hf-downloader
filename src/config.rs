@@ -56,6 +56,72 @@ pub fn save_config(options: &AppOptions) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// Apply loaded options to the global engine configuration atomics
+/// (download, rate-limit, and verification settings).
+///
+/// Shared by the TUI (`App::sync_options_to_config` delegates here) and the
+/// CLI so both frontends tune the engine identically. Must be called from
+/// within a tokio runtime (it spawns the rate-limiter update task).
+pub fn apply_options(options: &AppOptions) {
+    use std::sync::atomic::Ordering;
+
+    // Download config
+    crate::download::DOWNLOAD_CONFIG
+        .concurrent_threads
+        .store(options.concurrent_threads, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .target_chunks
+        .store(options.num_chunks, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .min_chunk_size
+        .store(options.min_chunk_size, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .max_chunk_size
+        .store(options.max_chunk_size, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .enable_verification
+        .store(options.verification_on_completion, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .max_retries
+        .store(options.max_retries, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .download_timeout_secs
+        .store(options.download_timeout_secs, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .retry_delay_secs
+        .store(options.retry_delay_secs, Ordering::Relaxed);
+    crate::download::DOWNLOAD_CONFIG
+        .progress_update_interval_ms
+        .store(options.progress_update_interval_ms, Ordering::Relaxed);
+
+    // Rate limiting config
+    let rate_limit_enabled = options.download_rate_limit_enabled;
+    crate::download::DOWNLOAD_CONFIG
+        .rate_limit_enabled
+        .store(rate_limit_enabled, Ordering::Relaxed);
+    let bytes_per_sec = (options.download_rate_limit_mbps * 1_048_576.0) as u64;
+    crate::download::DOWNLOAD_CONFIG
+        .rate_limit_bytes_per_sec
+        .store(bytes_per_sec, Ordering::Relaxed);
+
+    // Update rate limiter asynchronously
+    tokio::spawn(async move {
+        crate::download::RATE_LIMITER.set_rate(bytes_per_sec).await;
+        crate::download::RATE_LIMITER.set_enabled(rate_limit_enabled);
+    });
+
+    // Verification config
+    crate::verification::VERIFICATION_CONFIG
+        .concurrent_verifications
+        .store(options.concurrent_verifications, Ordering::Relaxed);
+    crate::verification::VERIFICATION_CONFIG
+        .buffer_size
+        .store(options.verification_buffer_size, Ordering::Relaxed);
+    crate::verification::VERIFICATION_CONFIG
+        .update_interval_iterations
+        .store(options.verification_update_interval, Ordering::Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

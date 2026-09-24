@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod download;
+mod engine;
 mod http_client;
 mod models;
 mod rate_limiter;

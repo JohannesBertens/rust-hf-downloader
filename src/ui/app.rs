@@ -8,7 +8,6 @@ mod verification;
 // Re-export App struct
 pub use state::App;
 
-use crate::download::start_download;
 use crate::models::PopupMode;
 use color_eyre::Result;
 use crossterm::event::{Event, KeyEventKind};
@@ -31,75 +30,14 @@ impl App {
         *self.status.write() = "Welcome! Press '/' to search for models".to_string();
         terminal.draw(|frame| self.draw(frame))?;
 
-        // Spawn verification worker
-        let verification_queue = self.verification_queue.clone();
-        let verification_progress = self.verification_progress.clone();
-        let verification_queue_size = self.verification_queue_size.clone();
-        let status_tx_verify = self.status_tx.clone();
-        let download_registry = self.download_registry.clone();
-        let verification_results = self.verification_results.clone();
-
-        tokio::spawn(async move {
-            crate::verification::verification_worker(
-                verification_queue,
-                verification_progress,
-                verification_queue_size,
-                status_tx_verify,
-                download_registry,
-                verification_results,
-            )
-            .await;
-        });
-
-        // Spawn download manager task
-        let download_rx = self.download_rx.clone();
-        let download_progress = self.download_progress.clone();
-        let download_queue = self.download_queue.clone();
-        let download_queue_items = self.download_queue_items.clone();
-        let status_tx = self.status_tx.clone();
-        let complete_downloads = self.complete_downloads.clone();
-        let verification_queue = self.verification_queue.clone();
-        let verification_queue_size = self.verification_queue_size.clone();
-        tokio::spawn(async move {
-            loop {
-                // Lock only when receiving, release immediately after
-                // This prevents deadlock by not holding download_rx while acquiring other locks
-                let (model_id, filename, path, sha256, hf_token, total_size) = {
-                    let mut rx = download_rx.lock().await;
-                    match rx.recv().await {
-                        Some(msg) => msg,
-                        None => break, // Channel closed
-                    }
-                };
-
-                // download_rx lock is now released before we acquire other locks
-                // Decrement queue size and bytes when we start processing
-                {
-                    let mut queue = download_queue.lock().await;
-                    queue.remove(1, total_size);
-                }
-                // Remove the mirrored queue item (first match by filename)
-                {
-                    let mut items = download_queue_items.lock().await;
-                    if let Some(pos) = items.iter().position(|it| it.filename == filename) {
-                        items.remove(pos);
-                    }
-                }
-                start_download(crate::download::DownloadParams {
-                    model_id,
-                    filename,
-                    base_path: path,
-                    progress: download_progress.clone(),
-                    status_tx: status_tx.clone(),
-                    complete_downloads: complete_downloads.clone(),
-                    expected_sha256: sha256,
-                    verification_queue: verification_queue.clone(),
-                    verification_queue_size: verification_queue_size.clone(),
-                    hf_token,
-                })
-                .await;
-            }
-        });
+        // Spawn the shared engine tasks (verification worker + download
+        // manager). Both the TUI and the CLI bootstrap through these same
+        // functions in `engine`, so the two frontends cannot drift. The TUI
+        // keeps its download_tx alive for the whole session, so the manager
+        // runs until the process exits (the join handle is dropped, i.e. the
+        // task stays detached — same behavior as the previous inline spawn).
+        crate::engine::spawn_verification_worker(self.engine_state());
+        let _manager = crate::engine::spawn_manager(self.engine_state());
 
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;

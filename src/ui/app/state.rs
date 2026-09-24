@@ -4,18 +4,14 @@ use parking_lot::RwLock;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::Input;
 
-/// Type alias for download message tuple
-/// Tuple: (model_id, filename, path, sha256, hf_token, total_size)
-pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>, u64);
-
-/// Type alias for download receiver to reduce complexity
-pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
+// The queue transport types live in the engine module (single source of
+// truth shared with the CLI frontend).
+pub use crate::engine::{DownloadMessage, DownloadReceiver};
 
 /// Main application state container
 #[derive(Debug)]
@@ -53,6 +49,14 @@ pub struct App {
     pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
     pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
     pub verification_queue_size: Arc<AtomicUsize>,
+    /// Verification tasks spawned but unfinished (engine drain signal;
+    /// unread by the TUI itself, rendered through verification_progress)
+    pub verification_in_flight: Arc<AtomicUsize>,
+    /// Typed verification results (engine channel; the TUI does not read it,
+    /// the CLI consumes it for events/exit codes). The sender half is held so
+    /// the channel stays connected for the engine's lifetime.
+    pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
+    pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
@@ -107,6 +111,7 @@ impl App {
 
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
+        let (verify_tx, verify_rx) = mpsc::unbounded_channel();
 
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
@@ -156,6 +161,9 @@ impl App {
             verification_progress: Arc::new(Mutex::new(Vec::new())),
             verification_queue: Arc::new(Mutex::new(Vec::new())),
             verification_queue_size: Arc::new(AtomicUsize::new(0)),
+            verification_in_flight: Arc::new(AtomicUsize::new(0)),
+            verify_tx,
+            verify_rx: Arc::new(Mutex::new(verify_rx)),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -189,65 +197,33 @@ impl App {
         }
     }
 
+    /// Bundle this app's shared handles into an engine state snapshot
+    /// (cheap: every field is an Arc or a channel endpoint clone). Used to
+    /// spawn the shared engine tasks and keeps the App the single owner of
+    /// the state the renderer reads.
+    pub fn engine_state(&self) -> crate::engine::EngineState {
+        crate::engine::EngineState {
+            download_rx: self.download_rx.clone(),
+            download_queue: self.download_queue.clone(),
+            download_queue_items: self.download_queue_items.clone(),
+            download_progress: self.download_progress.clone(),
+            complete_downloads: self.complete_downloads.clone(),
+            status_tx: self.status_tx.clone(),
+            status_rx: self.status_rx.clone(),
+            verification_queue: self.verification_queue.clone(),
+            verification_queue_size: self.verification_queue_size.clone(),
+            verification_in_flight: self.verification_in_flight.clone(),
+            verification_progress: self.verification_progress.clone(),
+            download_registry: self.download_registry.clone(),
+            verify_tx: self.verify_tx.clone(),
+            verify_rx: self.verify_rx.clone(),
+            verification_results: self.verification_results.clone(),
+        }
+    }
+
     /// Synchronize options to global config atomics
     pub fn sync_options_to_config(&self) {
-        use std::sync::atomic::Ordering;
-
-        // Download config
-        crate::download::DOWNLOAD_CONFIG
-            .concurrent_threads
-            .store(self.options.concurrent_threads, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .target_chunks
-            .store(self.options.num_chunks, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .min_chunk_size
-            .store(self.options.min_chunk_size, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .max_chunk_size
-            .store(self.options.max_chunk_size, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .enable_verification
-            .store(self.options.verification_on_completion, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .max_retries
-            .store(self.options.max_retries, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .download_timeout_secs
-            .store(self.options.download_timeout_secs, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .retry_delay_secs
-            .store(self.options.retry_delay_secs, Ordering::Relaxed);
-        crate::download::DOWNLOAD_CONFIG
-            .progress_update_interval_ms
-            .store(self.options.progress_update_interval_ms, Ordering::Relaxed);
-
-        // Rate limiting config
-        let rate_limit_enabled = self.options.download_rate_limit_enabled;
-        crate::download::DOWNLOAD_CONFIG
-            .rate_limit_enabled
-            .store(rate_limit_enabled, Ordering::Relaxed);
-        let bytes_per_sec = (self.options.download_rate_limit_mbps * 1_048_576.0) as u64;
-        crate::download::DOWNLOAD_CONFIG
-            .rate_limit_bytes_per_sec
-            .store(bytes_per_sec, Ordering::Relaxed);
-
-        // Update rate limiter asynchronously
-        tokio::spawn(async move {
-            crate::download::RATE_LIMITER.set_rate(bytes_per_sec).await;
-            crate::download::RATE_LIMITER.set_enabled(rate_limit_enabled);
-        });
-
-        // Verification config
-        crate::verification::VERIFICATION_CONFIG
-            .concurrent_verifications
-            .store(self.options.concurrent_verifications, Ordering::Relaxed);
-        crate::verification::VERIFICATION_CONFIG
-            .buffer_size
-            .store(self.options.verification_buffer_size, Ordering::Relaxed);
-        crate::verification::VERIFICATION_CONFIG
-            .update_interval_iterations
-            .store(self.options.verification_update_interval, Ordering::Relaxed);
+        crate::config::apply_options(&self.options);
     }
 
     /// Terminate application

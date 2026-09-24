@@ -4,6 +4,28 @@ use crate::models::{
 };
 use std::collections::HashMap;
 
+/// Base URL for all HuggingFace Hub requests.
+///
+/// Overridable via the `HF_ENDPOINT` environment variable (same convention
+/// as `huggingface_hub`), which enables mirror support (e.g.
+/// `HF_ENDPOINT=https://hf-mirror.com`) and hermetic integration tests
+/// against a local mock server.
+pub fn api_base() -> String {
+    std::env::var("HF_ENDPOINT")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://huggingface.co".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Canonical `resolve` download URL for a repo file. Used by the download
+/// engine, the registry bookkeeping in both frontends, and the CLI — keeping
+/// one builder guarantees the URLs always match.
+pub fn resolve_url(model_id: &str, filename: &str) -> String {
+    format!("{}/{}/resolve/main/{}", api_base(), model_id, filename)
+}
+
 /// Fetch models with sorting and filtering parameters
 pub async fn fetch_models_filtered(
     query: &str,
@@ -34,7 +56,8 @@ pub async fn fetch_models_filtered(
     // Request more results (100) since we'll filter client-side
     // Use full=true to get complete metadata including lastModified
     let url = format!(
-        "https://huggingface.co/api/models?search={}&limit=100&sort={}&direction={}&full=true",
+        "{}/api/models?search={}&limit=100&sort={}&direction={}&full=true",
+        api_base(),
         urlencoding::encode(query),
         sort,
         direction
@@ -71,7 +94,7 @@ pub async fn fetch_model_metadata(
     model_id: &str,
     token: Option<&String>,
 ) -> Result<ModelMetadata, reqwest::Error> {
-    let url = format!("https://huggingface.co/api/models/{}", model_id);
+    let url = format!("{}/api/models/{}", api_base(), model_id);
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let mut metadata: ModelMetadata = response.json().await?;
@@ -102,12 +125,9 @@ fn fetch_recursive_tree<'a>(
 > {
     Box::pin(async move {
         let tree_url = if path.is_empty() {
-            format!("https://huggingface.co/api/models/{}/tree/main", model_id)
+            format!("{}/api/models/{}/tree/main", api_base(), model_id)
         } else {
-            format!(
-                "https://huggingface.co/api/models/{}/tree/main/{}",
-                model_id, path
-            )
+            format!("{}/api/models/{}/tree/main/{}", api_base(), model_id, path)
         };
 
         let response = crate::http_client::get_with_optional_token(&tree_url, token).await?;
@@ -238,7 +258,7 @@ pub async fn fetch_model_files(
     model_id: &str,
     token: Option<&String>,
 ) -> Result<Vec<QuantizationGroup>, reqwest::Error> {
-    let url = format!("https://huggingface.co/api/models/{}/tree/main", model_id);
+    let url = format!("{}/api/models/{}/tree/main", api_base(), model_id);
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;
@@ -280,8 +300,10 @@ pub async fn fetch_model_files(
         else if file.file_type == "directory" && is_quantization_directory(&file.path) {
             // Fetch files from this subdirectory
             let subdir_url = format!(
-                "https://huggingface.co/api/models/{}/tree/main/{}",
-                model_id, file.path
+                "{}/api/models/{}/tree/main/{}",
+                api_base(),
+                model_id,
+                file.path
             );
 
             if let Ok(subdir_response) =
@@ -352,7 +374,7 @@ pub async fn fetch_model_files(
         })
         .collect();
 
-    quantization_groups.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    quantization_groups.sort_by_key(|b| std::cmp::Reverse(b.total_size));
 
     Ok(quantization_groups)
 }
@@ -365,7 +387,7 @@ pub async fn fetch_multipart_sha256s(
     token: Option<&String>,
 ) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
     // Single API call to get all files
-    let url = format!("https://huggingface.co/api/models/{}/tree/main", model_id);
+    let url = format!("{}/api/models/{}/tree/main", api_base(), model_id);
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;

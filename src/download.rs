@@ -1,6 +1,6 @@
 use crate::models::{
     ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus,
-    VerificationQueueItem,
+    FileOutcome, VerificationQueueItem,
 };
 use crate::rate_limiter::RateLimiter;
 use crate::registry;
@@ -139,7 +139,7 @@ pub fn validate_and_sanitize_path(
     Ok(final_path)
 }
 
-pub async fn start_download(params: DownloadParams) {
+pub async fn start_download(params: DownloadParams) -> FileOutcome {
     let DownloadParams {
         model_id,
         filename,
@@ -165,22 +165,25 @@ pub async fn start_download(params: DownloadParams) {
                 Some(p) => sanitized_parts.push(p),
                 None => {
                     let _ = status_tx.send(format!("Error: Invalid filename component: {}", part));
-                    return;
+                    return FileOutcome::Failed {
+                        filename: filename.clone(),
+                        reason: format!("invalid filename component: {}", part),
+                    };
                 }
             }
         }
         sanitized_parts.join("/")
     };
 
-    let url = format!(
-        "https://huggingface.co/{}/resolve/main/{}",
-        model_id, sanitized_filename
-    );
+    let url = crate::api::resolve_url(&model_id, &sanitized_filename);
 
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
         let _ = status_tx.send(format!("Error: Failed to create directory: {}", e));
-        return;
+        return FileOutcome::Failed {
+            filename: filename.clone(),
+            reason: format!("failed to create directory: {}", e),
+        };
     }
 
     // Canonicalize base path for safety checks
@@ -188,7 +191,10 @@ pub async fn start_download(params: DownloadParams) {
         Ok(path) => path,
         Err(e) => {
             let _ = status_tx.send(format!("Error: Cannot canonicalize base path: {}", e));
-            return;
+            return FileOutcome::Failed {
+                filename: filename.clone(),
+                reason: format!("cannot canonicalize base path: {}", e),
+            };
         }
     };
 
@@ -201,7 +207,10 @@ pub async fn start_download(params: DownloadParams) {
         if let Ok(canonical_final_parent) = parent.canonicalize() {
             if !canonical_final_parent.starts_with(&canonical_base) {
                 let _ = status_tx.send("Error: Path traversal detected".to_string());
-                return;
+                return FileOutcome::Failed {
+                    filename: filename.clone(),
+                    reason: "path traversal detected".to_string(),
+                };
             }
         }
     }
@@ -216,7 +225,10 @@ pub async fn start_download(params: DownloadParams) {
     if let Some(parent) = final_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
             let _ = status_tx.send(format!("Error: Failed to create parent directory: {}", e));
-            return;
+            return FileOutcome::Failed {
+                filename: filename.clone(),
+                reason: format!("failed to create parent directory: {}", e),
+            };
         }
     }
     if let Some(parent) = incomplete_path.parent() {
@@ -225,7 +237,10 @@ pub async fn start_download(params: DownloadParams) {
                 "Error: Failed to create parent directory for incomplete file: {}",
                 e
             ));
-            return;
+            return FileOutcome::Failed {
+                filename: filename.clone(),
+                reason: format!("failed to create parent directory: {}", e),
+            };
         }
     }
 
@@ -247,6 +262,11 @@ pub async fn start_download(params: DownloadParams) {
             filename
         ));
 
+        let file_size = tokio::fs::metadata(&final_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         // Update registry as complete
         let mut registry = registry::load_registry();
         if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
@@ -260,12 +280,6 @@ pub async fn start_download(params: DownloadParams) {
         let verification_enabled = DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
         if verification_enabled {
             if let Some(expected_hash) = &expected_sha256 {
-                // Get file size for progress tracking
-                let file_size = tokio::fs::metadata(&final_path)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0);
-
                 let item = VerificationQueueItem {
                     filename: filename.clone(),
                     local_path: final_path.to_string_lossy().to_string(),
@@ -292,11 +306,14 @@ pub async fn start_download(params: DownloadParams) {
 
         let mut prog = progress.lock().await;
         *prog = None;
-        return;
+        return FileOutcome::AlreadyExists {
+            filename: filename.clone(),
+            bytes: file_size,
+        };
     }
 
     let mut retries = DOWNLOAD_CONFIG.max_retries.load(Ordering::Relaxed);
-
+    let outcome;
     loop {
         let chunked_params = ChunkedDownloadParams {
             url: &url,
@@ -355,11 +372,22 @@ pub async fn start_download(params: DownloadParams) {
                     } else {
                         let _ = status_tx.send(format!("Download complete: {}", filename));
                     }
+                    outcome = FileOutcome::Complete {
+                        filename: filename.clone(),
+                        bytes: final_size,
+                    };
                 } else {
                     let _ = status_tx.send(format!(
                         "Warning: Download may be incomplete: {} (got {} bytes, expected {})",
                         filename, final_size, expected_size
                     ));
+                    outcome = FileOutcome::Failed {
+                        filename: filename.clone(),
+                        reason: format!(
+                            "incomplete download: got {} bytes, expected {}",
+                            final_size, expected_size
+                        ),
+                    };
                 }
                 break;
             }
@@ -397,9 +425,10 @@ pub async fn start_download(params: DownloadParams) {
                         }
                         registry::save_registry(&registry);
 
-                        let mut prog = progress.lock().await;
-                        *prog = None;
-                        return;
+                        outcome = FileOutcome::AuthRequired {
+                            model_id: model_id.clone(),
+                        };
+                        break;
                     }
                 }
 
@@ -418,9 +447,11 @@ pub async fn start_download(params: DownloadParams) {
                 }
                 registry::save_registry(&registry);
 
-                let mut prog = progress.lock().await;
-                *prog = None;
-                return;
+                outcome = FileOutcome::Failed {
+                    filename: filename.clone(),
+                    reason: format!("download failed after retries: {}", e),
+                };
+                break;
             }
         }
     }
@@ -428,6 +459,8 @@ pub async fn start_download(params: DownloadParams) {
     // Clear progress when done
     let mut prog = progress.lock().await;
     *prog = None;
+
+    outcome
 }
 
 #[allow(clippy::borrowed_box)]

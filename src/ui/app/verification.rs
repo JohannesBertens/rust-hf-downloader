@@ -49,8 +49,7 @@ impl App {
 
                 // Check if file exists
                 if !local_path.exists() {
-                    *self.status.write() =
-                        format!("File not found: {}", local_path.display());
+                    *self.status.write() = format!("File not found: {}", local_path.display());
                     *self.error.write() = Some(format!(
                         "File marked as downloaded but not found at {}",
                         local_path.display()
@@ -80,8 +79,7 @@ impl App {
                 )
                 .await;
 
-                *self.status.write() =
-                    format!("Queued {} for verification", quant.filename);
+                *self.status.write() = format!("Queued {} for verification", quant.filename);
             }
         }
     }

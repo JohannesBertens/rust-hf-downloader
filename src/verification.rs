@@ -1,11 +1,10 @@
-use crate::models::{
-    DownloadRegistry, DownloadStatus, VerificationProgress, VerificationQueueItem,
-};
+use crate::engine::EngineState;
+use crate::models::{DownloadStatus, VerificationProgress, VerificationQueueItem, VerifyOutcome};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 
 /// Global verification configuration (thread-safe, runtime-modifiable)
 pub struct VerificationConfig {
@@ -34,56 +33,55 @@ pub static VERIFICATION_CONFIG: VerificationConfig = VerificationConfig::new();
 
 /// Main verification worker that processes the verification queue
 /// Runs continuously in the background, processing items as they arrive
-#[allow(clippy::too_many_arguments)]
-pub async fn verification_worker(
-    verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    verification_queue_size: Arc<AtomicUsize>,
-    status_tx: mpsc::UnboundedSender<String>,
-    download_registry: Arc<Mutex<DownloadRegistry>>,
-    result_counters: VerificationResultCounters,
-) {
+pub async fn verification_worker(state: EngineState) {
     let max_concurrent = VERIFICATION_CONFIG
         .concurrent_verifications
         .load(Ordering::Relaxed);
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
 
     loop {
-        // Check if there's work to do - remove item and decrement size atomically while holding lock
+        // Check if there's work to do - remove item and decrement size
+        // atomically while holding the lock. The in-flight counter is
+        // incremented *before* the item leaves the queue (still under the
+        // lock), so `EngineState::verification_idle()` can never observe a
+        // false idle in the gap between the removal and the task start.
         let item = {
-            let mut queue = verification_queue.lock().await;
+            let mut queue = state.verification_queue.lock().await;
             if queue.is_empty() {
                 None
             } else {
+                state.verification_in_flight.fetch_add(1, Ordering::Relaxed);
                 let item = queue.remove(0);
-                // Decrement size atomically while holding the lock
-                verification_queue_size.fetch_sub(1, Ordering::Relaxed);
+                state
+                    .verification_queue_size
+                    .fetch_sub(1, Ordering::Relaxed);
                 Some(item)
             }
         };
 
         if let Some(item) = item {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let verification_progress = verification_progress.clone();
-            let status_tx = status_tx.clone();
-            let download_registry = download_registry.clone();
-            let result_counters = result_counters.clone();
+            let state = state.clone();
 
             tokio::spawn(async move {
-                verify_file(
-                    item,
-                    verification_progress,
-                    status_tx,
-                    download_registry,
-                    result_counters,
-                )
-                .await;
+                // Decrements in_flight on any exit path, including panics
+                let _in_flight = InFlightGuard(state.verification_in_flight.clone());
+                verify_file(item, state).await;
                 drop(permit);
             });
         } else {
             // No work, sleep briefly
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
+    }
+}
+
+/// RAII guard that decrements the engine's verification in-flight counter.
+struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -94,30 +92,27 @@ pub struct VerificationResultCounters {
     pub failed: Arc<AtomicUsize>,
 }
 
-/// Verify a single file's SHA256 hash
-#[allow(clippy::too_many_arguments)]
-async fn verify_file(
-    item: VerificationQueueItem,
-    verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    status_tx: mpsc::UnboundedSender<String>,
-    download_registry: Arc<Mutex<DownloadRegistry>>,
-    result_counters: VerificationResultCounters,
-) {
+/// Verify a single file's SHA256 hash and report a typed
+/// [`VerifyOutcome`] through the engine's verify channel.
+async fn verify_file(item: VerificationQueueItem, state: EngineState) {
     let local_path = PathBuf::from(&item.local_path);
 
     // Check if file exists
     if !local_path.exists() {
-        let _ = status_tx.send(format!(
+        let _ = state.status_tx.send(format!(
             "Error: Cannot verify {}, file not found",
             item.filename
         ));
+        let _ = state.verify_tx.send(VerifyOutcome::Missing {
+            filename: item.filename.clone(),
+        });
         return;
     }
 
     // Add to active verifications
     let verified_bytes = Arc::new(AtomicU64::new(0));
     {
-        let mut progress = verification_progress.lock().await;
+        let mut progress = state.verification_progress.lock().await;
         progress.push(VerificationProgress {
             filename: item.filename.clone(),
             verified_bytes: verified_bytes.clone(),
@@ -126,12 +121,14 @@ async fn verify_file(
         });
     }
 
-    let _ = status_tx.send(format!("Verifying integrity of {}...", item.filename));
+    let _ = state
+        .status_tx
+        .send(format!("Verifying integrity of {}...", item.filename));
 
     // Calculate hash with progress tracking (use filename as identifier)
     match calculate_sha256_with_progress(
         &local_path,
-        &verification_progress,
+        &state.verification_progress,
         &item.filename,
         item.total_size,
     )
@@ -139,19 +136,35 @@ async fn verify_file(
     {
         Ok(calculated_hash) => {
             if calculated_hash == item.expected_sha256 {
-                result_counters.ok.fetch_add(1, Ordering::Relaxed);
-                let _ = status_tx.send(format!("✓ Hash verified for {}", item.filename));
+                state
+                    .verification_results
+                    .ok
+                    .fetch_add(1, Ordering::Relaxed);
+                let _ = state
+                    .status_tx
+                    .send(format!("✓ Hash verified for {}", item.filename));
+                let _ = state.verify_tx.send(VerifyOutcome::Ok {
+                    filename: item.filename.clone(),
+                });
             } else {
-                result_counters.failed.fetch_add(1, Ordering::Relaxed);
-                let _ = status_tx.send(format!(
+                state
+                    .verification_results
+                    .failed
+                    .fetch_add(1, Ordering::Relaxed);
+                let _ = state.status_tx.send(format!(
                     "✗ Hash mismatch for {}: expected {}..., got {}...",
                     item.filename,
                     &item.expected_sha256[..16],
                     &calculated_hash[..16]
                 ));
+                let _ = state.verify_tx.send(VerifyOutcome::Mismatch {
+                    filename: item.filename.clone(),
+                    expected_sha256: item.expected_sha256.clone(),
+                    actual_sha256: calculated_hash,
+                });
 
                 // Update registry to HashMismatch
-                let mut registry = download_registry.lock().await;
+                let mut registry = state.download_registry.lock().await;
                 if let Some(entry) = registry
                     .downloads
                     .iter_mut()
@@ -163,16 +176,20 @@ async fn verify_file(
             }
         }
         Err(e) => {
-            let _ = status_tx.send(format!(
+            let _ = state.status_tx.send(format!(
                 "Warning: Failed to verify {}: {}",
                 item.filename, e
             ));
+            let _ = state.verify_tx.send(VerifyOutcome::Error {
+                filename: item.filename.clone(),
+                reason: e.to_string(),
+            });
         }
     }
 
     // Remove from active verifications
     {
-        let mut progress = verification_progress.lock().await;
+        let mut progress = state.verification_progress.lock().await;
         progress.retain(|p| p.filename != item.filename);
     }
 }
