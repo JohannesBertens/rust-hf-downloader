@@ -348,8 +348,16 @@ pub fn resolve_files(
         }
         Selector::Quant(quant) => {
             let mut out = Vec::new();
+            // `--quant mmproj` selects every multimodal-projector group
+            // (MMPROJ, MMPROJ-Q8_0, …) in one go (issue #25)
+            let wants_mmproj = quant.eq_ignore_ascii_case(crate::api::MMPROJ_QUANT_TYPE);
             for group in quants {
-                if group.quant_type.eq_ignore_ascii_case(quant) {
+                let matches = group.quant_type.eq_ignore_ascii_case(quant)
+                    || (wants_mmproj
+                        && group
+                            .quant_type
+                            .starts_with(crate::api::MMPROJ_QUANT_TYPE));
+                if matches {
                     for file in &group.files {
                         out.push(FileSpec {
                             filename: file.filename.clone(),
@@ -838,19 +846,12 @@ async fn run_download(args: DownloadArgs) -> i32 {
         }
     };
 
-    // Quantization listing is only needed to resolve --quant
+    // Quantization groups derive (pure) from the recursive tree already
+    // fetched with the metadata — no second API round-trip. Issue #25:
+    // this now finds GGUFs stored in subdirectories and keeps mmproj
+    // files in their own groups.
     let quants = if matches!(selector, Selector::Quant(_)) {
-        match crate::api::fetch_model_files(&args.model_id, token.as_ref()).await {
-            Ok(quants) => quants,
-            Err(e) => {
-                reporter.emit(&Event::Error {
-                    code: "network".to_string(),
-                    message: format!("failed to list model files: {}", e),
-                    available: None,
-                });
-                return EXIT_FAILURE;
-            }
-        }
+        crate::api::classify_quantizations(&metadata.siblings)
     } else {
         Vec::new()
     };

@@ -1,5 +1,5 @@
 use super::state::App;
-use crate::api::{build_file_tree, fetch_model_files, fetch_model_metadata, has_gguf_files};
+use crate::api::{build_file_tree, classify_quantizations, fetch_model_metadata};
 use crate::models::ModelDisplayMode;
 
 impl App {
@@ -228,6 +228,7 @@ impl App {
         let loading_quants = self.loading_quants.clone();
         let error = self.error.clone();
         let display_mode = self.display_mode.clone();
+        let status = self.status.clone();
         let token = self.options.hf_token.clone();
 
         // Spawn background task (non-blocking)
@@ -262,102 +263,99 @@ impl App {
                 }
             };
 
-            // Now process based on metadata
-            if true {
-                // Placeholder to keep structure
-                if has_gguf_files(&metadata) {
-                    // GGUF mode: show quantizations
-                    *display_mode.write() = ModelDisplayMode::Gguf;
+            // Classify the full recursive tree (pure function — issue #25:
+            // GGUFs in arbitrarily named subdirectories used to be invisible
+            // because quant listing walked only the repo root).
+            let groups = classify_quantizations(&metadata.siblings);
 
-                    // Check quantization cache with read lock
-                    let cached_result = {
-                        let cache = api_cache.read();
-                        cache.quantizations.get(&model_id).cloned()
-                    };
+            if groups.is_empty() {
+                // Standard mode: metadata + file tree (non-GGUF repos, or
+                // repos with no GGUF-family files at all). This is also the
+                // fallback that replaces the old dead-end empty quant panel.
+                *display_mode.write() = ModelDisplayMode::Standard;
 
-                    if let Some(cached_groups) = cached_result {
-                        let mut quants_lock = quantizations.write();
-                        *quants_lock = cached_groups;
-                        *loading_quants.write() = false;
-
-                        // Reset file tree state
-                        *model_metadata.write() = None;
-                        *file_tree.write() = None;
-                        return;
-                    }
-
-                    match fetch_model_files(&model_id, token.as_ref()).await {
-                        Ok(quants) => {
-                            // Double-check and cache using Entry API
-                            let quants_to_store = {
-                                let mut cache = api_cache.write();
-                                match cache.quantizations.entry(model_id.clone()) {
-                                    std::collections::hash_map::Entry::Occupied(o) => {
-                                        o.get().clone()
-                                    }
-                                    std::collections::hash_map::Entry::Vacant(v) => {
-                                        v.insert(quants.clone());
-                                        quants
-                                    }
-                                }
-                            };
-
-                            let mut quants_lock = quantizations.write();
-                            *quants_lock = quants_to_store;
-                            *loading_quants.write() = false;
-
-                            // Reset file tree state
-                            *model_metadata.write() = None;
-                            *file_tree.write() = None;
-                        }
-                        Err(_) => {
-                            *loading_quants.write() = false;
-                            let mut quants_lock = quantizations.write();
-                            quants_lock.clear();
-                        }
-                    }
-                } else {
-                    // Standard mode: show metadata + file tree
-                    *display_mode.write() = ModelDisplayMode::Standard;
-
-                    // Clear quantizations
-                    let mut quants_lock = quantizations.write();
-                    quants_lock.clear();
-                    drop(quants_lock);
-
-                    // Check file tree cache with read lock
-                    let cached_tree = {
-                        let cache = api_cache.read();
-                        cache.file_trees.get(&model_id).cloned()
-                    };
-
-                    let tree_to_store = if let Some(tree) = cached_tree {
-                        tree // Use cached tree
-                    } else {
-                        // Build tree
-                        let tree = build_file_tree(metadata.siblings.clone());
-
-                        // Double-check and cache using Entry API
-                        let tree_to_store = {
-                            let mut cache = api_cache.write();
-                            match cache.file_trees.entry(model_id.clone()) {
-                                std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
-                                std::collections::hash_map::Entry::Vacant(v) => {
-                                    v.insert(tree.clone());
-                                    tree
-                                }
-                            }
-                        };
-
-                        tree_to_store
-                    };
-
-                    // Store metadata and tree in UI state
-                    *model_metadata.write() = Some(metadata.clone());
-                    *file_tree.write() = Some(tree_to_store);
-
-                    *loading_quants.write() = false;
+                if !metadata.siblings.is_empty() {
+                    *status.write() =
+                        "No quantization groups detected — showing full file tree".to_string();
                 }
+
+                // Clear quantizations
+                let mut quants_lock = quantizations.write();
+                quants_lock.clear();
+                drop(quants_lock);
+
+                // Check file tree cache with read lock
+                let cached_tree = {
+                    let cache = api_cache.read();
+                    cache.file_trees.get(&model_id).cloned()
+                };
+
+                let tree_to_store = if let Some(tree) = cached_tree {
+                    tree // Use cached tree
+                } else {
+                    // Build tree
+                    let tree = build_file_tree(metadata.siblings.clone());
+
+                    // Double-check and cache using Entry API
+                    let tree_to_store = {
+                        let mut cache = api_cache.write();
+                        match cache.file_trees.entry(model_id.clone()) {
+                            std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                            std::collections::hash_map::Entry::Vacant(v) => {
+                                v.insert(tree.clone());
+                                tree
+                            }
+                        }
+                    };
+
+                    tree_to_store
+                };
+
+                // Store metadata and tree in UI state
+                *model_metadata.write() = Some(metadata.clone());
+                *file_tree.write() = Some(tree_to_store);
+
+                *loading_quants.write() = false;
+            } else {
+                // GGUF mode: show quantization groups
+                *display_mode.write() = ModelDisplayMode::Gguf;
+
+                // Check quantization cache with read lock
+                let cached_result = {
+                    let cache = api_cache.read();
+                    cache.quantizations.get(&model_id).cloned()
+                };
+
+                if let Some(cached_groups) = cached_result {
+                    let mut quants_lock = quantizations.write();
+                    *quants_lock = cached_groups;
+                    *loading_quants.write() = false;
+
+                    // Reset file tree state
+                    *model_metadata.write() = None;
+                    *file_tree.write() = None;
+                    return;
+                }
+
+                // Cache via Entry API (atomic get-or-insert with write lock)
+                let groups_to_store = {
+                    let mut cache = api_cache.write();
+                    match cache.quantizations.entry(model_id.clone()) {
+                        std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
+                        std::collections::hash_map::Entry::Vacant(v) => {
+                            v.insert(groups.clone());
+                            groups
+                        }
+                    }
+                };
+
+                let mut quants_lock = quantizations.write();
+                *quants_lock = groups_to_store;
+                *loading_quants.write() = false;
+
+                // Reset file tree state
+                *model_metadata.write() = None;
+                *file_tree.write() = None;
             }
         });
     }
@@ -481,27 +479,11 @@ impl App {
                     meta_to_store
                 };
 
-                // Process based on model type
-                if has_gguf_files(&metadata) {
-                    // GGUF model: prefetch quantizations
-                    let quants_cached = {
-                        let cache = api_cache.read();
-                        cache.quantizations.contains_key(&model_id)
-                    };
+                // Process based on classification of the recursive tree
+                // (pure — no second fetch; issue #25)
+                let groups = classify_quantizations(&metadata.siblings);
 
-                    if !quants_cached {
-                        // Fetch and cache quantizations with double-check using Entry API
-                        if let Ok(quants) = fetch_model_files(&model_id, token.as_ref()).await {
-                            let mut cache = api_cache.write();
-                            if matches!(
-                                cache.quantizations.entry(model_id.clone()),
-                                std::collections::hash_map::Entry::Vacant(_)
-                            ) {
-                                cache.quantizations.insert(model_id.clone(), quants);
-                            }
-                        }
-                    }
-                } else {
+                if groups.is_empty() {
                     // Standard model: prefetch file tree
                     let tree_cached = {
                         let cache = api_cache.read();
@@ -517,6 +499,23 @@ impl App {
                             std::collections::hash_map::Entry::Vacant(_)
                         ) {
                             cache.file_trees.insert(model_id.clone(), tree);
+                        }
+                    }
+                } else {
+                    // GGUF model: prefetch quantization groups
+                    let quants_cached = {
+                        let cache = api_cache.read();
+                        cache.quantizations.contains_key(&model_id)
+                    };
+
+                    if !quants_cached {
+                        // Cache classified groups with double-check using Entry API
+                        let mut cache = api_cache.write();
+                        if matches!(
+                            cache.quantizations.entry(model_id.clone()),
+                            std::collections::hash_map::Entry::Vacant(_)
+                        ) {
+                            cache.quantizations.insert(model_id.clone(), groups);
                         }
                     }
                 }
