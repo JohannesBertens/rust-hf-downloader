@@ -1,5 +1,12 @@
 # AI-skill usage: one-shot model download
 
+> **This snippet is now a real installable skill.** The full Agent Skills
+> version — with routing, an NDJSON event reference, and a ready-made
+> probe→select→download wrapper — lives in
+> [`.agents/skills/hf-downloader/`](../.agents/skills/hf-downloader/SKILL.md)
+> (see the README's "Use as an agent skill" section for installation).
+> This file remains as a compact human-readable example.
+
 `rust-hf-downloader download` is designed to be driven by scripts and agent
 skills. Together with `search`, the whole flow stays inside the binary:
 

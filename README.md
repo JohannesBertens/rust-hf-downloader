@@ -326,6 +326,51 @@ registry, so files downloaded headlessly show up in the TUI's resume/complete
 views. Events and behavior are covered end-to-end by integration tests
 against a mock HuggingFace server.
 
+### Use as an agent skill
+
+This repository ships a ready-made [Agent Skills](https://agentskills.io/specification)
+skill that encodes the whole probe→select→download protocol, exit-code
+decisions, and the NDJSON event schema:
+
+```text
+.agents/skills/hf-downloader/
+├── SKILL.md                 # routing + core protocol + exit-code policy
+├── references/
+│   ├── cli-reference.md      # every flag, defaults, aliases, error codes
+│   └── events.md             # full NDJSON event schema
+└── scripts/
+    └── hf-get.sh             # probe→select→download wrapper (needs jq)
+```
+
+**Installation** (for [pi](https://github.com/earendil-works/pi-coding-agent)
+and any Agent Skills-compatible agent):
+
+- **Inside this repo:** nothing to do — agents discover `.agents/skills/`
+  from the working directory automatically.
+- **Globally (this machine):** symlink or copy the directory into your
+  skills location:
+
+  ```bash
+  mkdir -p ~/.agents/skills
+  ln -s "$(pwd)/.agents/skills/hf-downloader" ~/.agents/skills/hf-downloader
+  # or, for pi's user directory:
+  ln -s "$(pwd)/.agents/skills/hf-downloader" ~/.pi/agent/skills/hf-downloader
+  ```
+
+- **From a release/crates.io unpack:** the skill is included in the package;
+  copy `.agents/skills/hf-downloader` out of the extracted archive the same
+  way.
+
+Verify with `pi` startup diagnostics or `/skill:hf-downloader`, then try:
+
+```bash
+.agents/skills/hf-downloader/scripts/hf-get.sh bartowski/Qwen2.5-7B-GGUF
+```
+
+The skill versions with the binary because the exit codes and event schema
+are contracts — keep the installed skill in sync with the CLI version
+(>= 2.3.0).
+
 ## Technical Details
 
 ### Architecture
