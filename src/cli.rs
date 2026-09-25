@@ -354,9 +354,7 @@ pub fn resolve_files(
             for group in quants {
                 let matches = group.quant_type.eq_ignore_ascii_case(quant)
                     || (wants_mmproj
-                        && group
-                            .quant_type
-                            .starts_with(crate::api::MMPROJ_QUANT_TYPE));
+                        && group.quant_type.starts_with(crate::api::MMPROJ_QUANT_TYPE));
                 if matches {
                     for file in &group.files {
                         out.push(FileSpec {
@@ -1526,6 +1524,36 @@ mod tests {
         let err = resolve_files(&metadata, &[], &Selector::Quant("Q8_0".to_string())).unwrap_err();
         assert!(matches!(err, ResolveError::NoFilesMatch { .. }));
         assert_eq!(err.code(), "no_files_match");
+    }
+
+    #[test]
+    fn resolve_quant_mmproj_selects_all_projector_groups() {
+        // Issue #25: `--quant mmproj` spans every MMPROJ* group; exact names
+        // (MMPROJ-Q8_0) still match directly and never pull weight files in.
+        let metadata = metadata_with(&[
+            ("model.Q8_0.gguf", Some(10)),
+            ("model.mmproj-Q8_0.gguf", Some(2)),
+            ("mmproj-F32.gguf", Some(3)),
+        ]);
+        let quants = crate::api::classify_quantizations(&metadata.siblings);
+
+        let files =
+            resolve_files(&metadata, &quants, &Selector::Quant("mmproj".to_string())).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                file_spec("mmproj-F32.gguf", 3),
+                file_spec("model.mmproj-Q8_0.gguf", 2)
+            ]
+        );
+
+        let files = resolve_files(
+            &metadata,
+            &quants,
+            &Selector::Quant("MMPROJ-Q8_0".to_string()),
+        )
+        .unwrap();
+        assert_eq!(files, vec![file_spec("model.mmproj-Q8_0.gguf", 2)]);
     }
 
     #[test]

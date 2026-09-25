@@ -44,9 +44,16 @@ Key modules
 - fetch_model_metadata(model_id, token)
   • Enriches metadata.siblings with complete recursive tree (fetch_recursive_tree)
 - build_file_tree(files: Vec<RepoFile>) -> FileTreeNode with sizes and sorted dirs-first
-- has_gguf_files(metadata) -> bool
+- has_gguf_files(metadata) -> bool (test-only since v2.4; classification replaced its call sites)
+- classify_quantizations(files: &[RepoFile]) -> Vec<QuantizationGroup>
+  • Pure classifier over the full recursive tree (issue #25): mmproj files get
+    MMPROJ/MMPROJ-<quant> groups; quant-named ancestor dirs are inherited;
+    unrecognized GGUFs land in OTHER (sorted last) instead of being dropped;
+    groups sorted by total_size desc
+  • One predicate everywhere: looks_like_quant_type (Q/IQ/TQ/MXFP + BF16/F16/FP16/FP32)
 - fetch_model_files(model_id, token) -> Vec<QuantizationGroup>
-  • Detects single/multipart .gguf and quantization dirs; groups by type, sorts by total_size desc
+  • Compat wrapper: fetch_model_metadata + classify_quantizations; frontends
+    holding metadata call classify_quantizations directly (no second fetch)
 - fetch_multipart_sha256s(model_id, filenames[], token) -> map filename -> Option<sha256>
 - Helpers: extract_quantization_type, is_quantization_directory, parse_multipart_filename, get_multipart_base_name
 
@@ -88,7 +95,7 @@ Key modules
 Common extension points
 - Add new filters/sorts: update models::SortField/SortDirection, ui render toolbar, events handlers, and api::fetch_models_filtered
 - New verification logic: modify verification.rs and AppOptions + config mapping and UI options
-- Additional file types: extend api::has_gguf_files/extract_quantization_type and Standard mode panels
+- Additional file types: extend api::looks_like_quant_type/classify_quantizations and Standard mode panels
 
 Conventions & gotchas
 - Never add Authorization unless token is present and non-empty

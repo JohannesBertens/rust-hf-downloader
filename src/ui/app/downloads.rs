@@ -63,8 +63,7 @@ impl App {
             FocusedPane::FileTree => {
                 // Download the selected file (or every file under the selected
                 // directory) from the Standard-mode tree — issue #25 P5
-                let tree =
-                    futures::executor::block_on(async { self.file_tree.read().clone() });
+                let tree = futures::executor::block_on(async { self.file_tree.read().clone() });
                 let Some(tree) = tree else {
                     return;
                 };
@@ -82,10 +81,8 @@ impl App {
                 self.popup_mode = PopupMode::DownloadPath;
                 if node.is_dir {
                     let count = count_tree_files(node);
-                    *self.status.write() = format!(
-                        "Download all {} files under {}",
-                        count, node.path
-                    );
+                    *self.status.write() =
+                        format!("Download all {} files under {}", count, node.path);
                 } else {
                     *self.status.write() = format!("Download file {}", node.path);
                 }
@@ -669,15 +666,13 @@ impl App {
         for file in &files_to_download {
             let filename = &file.rfilename;
 
-            let validated_path =
-                match validate_and_sanitize_path(&base_path, &model.id, filename) {
-                    Ok(validated) => validated,
-                    Err(e) => {
-                        *self.error.write() =
-                            Some(format!("Invalid filename '{}': {}", filename, e));
-                        continue;
-                    }
-                };
+            let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
+                Ok(validated) => validated,
+                Err(e) => {
+                    *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, e));
+                    continue;
+                }
+            };
 
             let url = crate::api::resolve_url(&model.id, filename);
             let local_path_str = validated_path.to_string_lossy().to_string();

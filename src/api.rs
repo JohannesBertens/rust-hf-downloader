@@ -266,7 +266,7 @@ fn sort_tree_recursive(node: &mut FileTreeNode) {
 /// Compat wrapper: frontends that already hold `ModelMetadata` should call
 /// [`classify_quantizations`] directly over `metadata.siblings` to avoid the
 /// extra API round-trip.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub async fn fetch_model_files(
     model_id: &str,
     token: Option<&String>,
@@ -388,12 +388,15 @@ pub fn classify_quantizations(files: &[RepoFile]) -> Vec<QuantizationGroup> {
         }
 
         let quant_type = classify_file_quant_type(path);
-        grouped.entry(quant_type.clone()).or_default().push(QuantizationInfo {
-            quant_type,
-            filename: path.clone(),
-            size: file.size.unwrap_or(0),
-            sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
-        });
+        grouped
+            .entry(quant_type.clone())
+            .or_default()
+            .push(QuantizationInfo {
+                quant_type,
+                filename: path.clone(),
+                size: file.size.unwrap_or(0),
+                sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+            });
     }
 
     let mut groups: Vec<QuantizationGroup> = grouped
@@ -516,7 +519,6 @@ pub fn extract_quantization_type_from_dirname(dirname: &str) -> String {
     }
     dirname.to_uppercase()
 }
-
 
 pub fn extract_quantization_type(filename: &str) -> Option<String> {
     // Extract quantization type from filenames like:
@@ -915,10 +917,7 @@ mod tests {
         assert!(is_quantization_directory("MXFP4"));
         assert!(is_quantization_directory("mxfp4"));
         assert!(!is_quantization_directory("MXFP4_MOE"));
-        assert_eq!(
-            extract_quantization_type_from_dirname("MXFP4"),
-            "MXFP4"
-        );
+        assert_eq!(extract_quantization_type_from_dirname("MXFP4"), "MXFP4");
     }
 
     // ---- extract_quantization_type_from_dirname ----
@@ -1048,9 +1047,15 @@ mod tests {
         let groups = classify_quantizations(&[
             repo_file(".gitattributes", 1746),
             repo_file("README.md", 7167),
-            repo_file("Dynamic/Qwen3.5-122B-A10B-PRISM-LITE-Dynamic.gguf", 61_970_228_480),
+            repo_file(
+                "Dynamic/Qwen3.5-122B-A10B-PRISM-LITE-Dynamic.gguf",
+                61_970_228_480,
+            ),
             repo_file("Dynamic/imatrix.dat", 358_906_272),
-            repo_file("Dynamic/mmproj-Qwen3.5-122B-A10B-PRISM-LITE.gguf", 912_263_520),
+            repo_file(
+                "Dynamic/mmproj-Qwen3.5-122B-A10B-PRISM-LITE.gguf",
+                912_263_520,
+            ),
         ]);
         assert_eq!(group_types(&groups), vec!["MMPROJ", "OTHER"]);
         assert_eq!(
@@ -1069,9 +1074,18 @@ mod tests {
         // Issue #25 case D: `mxfp4_moe` multiparts were silently dropped and
         // `mmproj-F32.gguf` was dropped (F32 not a known quant).
         let groups = classify_quantizations(&[
-            repo_file("Qwen3.5-122B-A10B-heretic.BF16-00001-of-00006.gguf", 48_656_272_000),
-            repo_file("Qwen3.5-122B-A10B-heretic.mxfp4_moe-00001-of-00002.gguf", 39_636_333_056),
-            repo_file("Qwen3.5-122B-A10B-heretic.mxfp4_moe-00002-of-00002.gguf", 28_629_663_936),
+            repo_file(
+                "Qwen3.5-122B-A10B-heretic.BF16-00001-of-00006.gguf",
+                48_656_272_000,
+            ),
+            repo_file(
+                "Qwen3.5-122B-A10B-heretic.mxfp4_moe-00001-of-00002.gguf",
+                39_636_333_056,
+            ),
+            repo_file(
+                "Qwen3.5-122B-A10B-heretic.mxfp4_moe-00002-of-00002.gguf",
+                28_629_663_936,
+            ),
             repo_file("mmproj-F32.gguf", 1_805_183_712),
             repo_file("README.md", 122),
         ]);
@@ -1089,7 +1103,10 @@ mod tests {
             repo_file("Qwen3.5-27B-heretic.mmproj-Q8_0.gguf", 100),
         ]);
         assert_eq!(group_types(&groups), vec!["Q8_0", "MMPROJ-Q8_0"]);
-        assert_eq!(group_files(&groups, "Q8_0"), vec!["Qwen3.5-27B-heretic.Q8_0.gguf"]);
+        assert_eq!(
+            group_files(&groups, "Q8_0"),
+            vec!["Qwen3.5-27B-heretic.Q8_0.gguf"]
+        );
         assert_eq!(
             group_files(&groups, "MMPROJ-Q8_0"),
             vec!["Qwen3.5-27B-heretic.mmproj-Q8_0.gguf"]
@@ -1136,11 +1153,8 @@ mod tests {
     #[test]
     fn classify_sha256_and_size_carried_through() {
         // Nested files keep LFS oid + size so verification still works.
-        let groups = classify_quantizations(&[repo_file_lfs(
-            "Dynamic/model-Q4_K.gguf",
-            42,
-            "deadbeef",
-        )]);
+        let groups =
+            classify_quantizations(&[repo_file_lfs("Dynamic/model-Q4_K.gguf", 42, "deadbeef")]);
         let file = &groups[0].files[0];
         assert_eq!(file.sha256.as_deref(), Some("deadbeef"));
         assert_eq!(file.size, 42);
@@ -1159,10 +1173,8 @@ mod tests {
     #[test]
     fn classify_skips_directory_entries() {
         // Siblings listings sometimes include trailing-slash directory rows.
-        let groups = classify_quantizations(&[
-            repo_file("Dynamic/", 0),
-            repo_file("Dynamic/model.gguf", 5),
-        ]);
+        let groups =
+            classify_quantizations(&[repo_file("Dynamic/", 0), repo_file("Dynamic/model.gguf", 5)]);
         assert_eq!(group_types(&groups), vec!["OTHER"]);
     }
 

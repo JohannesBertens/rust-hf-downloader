@@ -116,7 +116,7 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 | `/` | Open search popup |
 | `o` | Toggle options screen (configure settings) |
 | `Tab` | Switch focus between Models and Quantizations lists |
-| `d` | Download selected quantization (when Quantizations list is focused) |
+| `d` | Download selected quantization (Quantizations list), whole repo (Models list, non-GGUF repos), or the selected file/folder (Repository Files tree) |
 | `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
 | `Enter` | Execute search (in search popup) / Show details (in browse mode) / Edit directory (in options) |
 | `Esc` | Close search popup / Cancel popup / Close options |
@@ -210,6 +210,11 @@ Mouse-supported panels:
    - Press Enter to confirm and start download
    - Files are saved to: `{path}/{author}/{model-name}/{filename}`
    - For multi-part GGUFs, all parts are queued automatically
+
+12. **Non-GGUF repos** (safetensors, exl2, …) show a **Repository Files** tree
+    instead of quantizations: `Tab` into it, then `d` downloads the selected
+    file or every file under a selected folder (`d` on the Models list grabs
+    the whole repo)
    - Press Esc to cancel
    - Download progress appears in the top right corner with:
      - Progress percentage
@@ -287,12 +292,19 @@ ascending sorts apply client-side too (the API only sorts descending).
 |---|---|
 | *(none)* | Works only when the repo has exactly one downloadable file; otherwise exits 64 listing every file |
 | `--quant Q4_K_M` | All files of that quantization (case-insensitive; includes every part of multi-part GGUFs) |
-| `--file PATH` | Exact repo-relative path (repeatable) |
+| `--quant mmproj` | Every multimodal-projector file (`MMPROJ`, `MMPROJ-Q8_0`, …) in one go |
+| `--file PATH` | Exact repo-relative path, subdirectories included (repeatable) |
 | `--all` | Everything in the repository |
 
 Selectors are mutually exclusive. Ambiguity is never guessed: the failure
 output includes the structured file list so an agent can pick a selector and
 re-invoke in one round-trip.
+
+Quantization detection walks the **whole repository tree**, so GGUFs stored
+in subdirectories (e.g. a `Dynamic/` folder) are found and classified too.
+Quant hints come from the filename first, then from quantization-named
+directories (`Q4_K_M/…`, `MXFP4/…`); `mmproj` files always land in their own
+groups, and unrecognized GGUFs appear under `OTHER` instead of vanishing.
 
 ### Other options
 
