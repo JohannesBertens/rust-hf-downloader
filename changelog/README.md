@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.0] - 2026-09-25
+
+### Version 2.5.0 (2026-09-25)
+- **Added**: tag-triggered CI release builds
+  (`.github/workflows/release.yml`): pushing a `vX.Y.Z` tag builds release
+  binaries on Linux, macOS (arm64), and Windows runners and uploads them as
+  workflow artifacts on the tag's run page. No CI runs between releases.
+- **Docs**: README gains a prebuilt-binaries section; CONTRIBUTING documents
+  the release process (version bump → changelog → tag → CI artifacts).
+
 ## [2.4.0] - 2026-09-25
 
 ### Version 2.4.0 (2026-09-25)
