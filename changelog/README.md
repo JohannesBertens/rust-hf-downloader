@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-09-25
+
+### Version 2.4.0 (2026-09-25)
+- **Fixed**: quantization detection now walks the full recursive repository
+  tree instead of only the root (#25). GGUFs stored in arbitrarily named
+  subdirectories (e.g. `Ex0bit/…​-PRISM-LITE-GGUF`'s `Dynamic/`) appear and
+  download; repos whose layout yields no groups fall back to the full file
+  tree instead of a dead-end empty panel.
+- **Fixed**: `mmproj` (multimodal projector) files no longer mix into weight
+  quantization groups (`*.mmproj-Q8_0.gguf` used to land in `Q8_0`) and are
+  no longer dropped (`mmproj-F32.gguf`); they get their own `MMPROJ` /
+  `MMPROJ-<quant>` groups (#25).
+- **Fixed**: `mxfp4_moe` multipart GGUFs are recognized (`--quant mxfp4`
+  selects all parts) instead of silently vanishing (#25).
+- **Added**: `--quant mmproj` CLI selector spanning every projector group in
+  one go.
+- **Added**: per-file and subtree downloads from the Standard-mode file tree —
+  `d` on the Repository Files pane queues the selected file or every file
+  under the selected folder; non-GGUF repos previously offered whole-repo
+  download only (#25).
+- **Changed**: unrecognized GGUFs land in a visible `OTHER` group (sorted
+  last) instead of being silently dropped.
+- **Changed**: the quant-type predicate is unified in `looks_like_quant_type`
+  (the three drifted copies are how MXFP went missing from directory
+  heuristics); a bare `Q`-prefixed directory (e.g. `QuickCheck`) is no longer
+  treated as a quantization directory.
+- **Performance**: quantization groups derive from the metadata fetch the
+  frontends already perform — the extra root-only tree listing (and per-dir
+  follow-ups) are gone.
+- **Testing**: regression fixtures recorded from the live HF API for all four
+  repos named in #25; mock server serves directory-aware tree listings.
+
 ## [2.3.0] - 2026-09-24
 
 ### Version 2.3.0 (2026-09-24)
