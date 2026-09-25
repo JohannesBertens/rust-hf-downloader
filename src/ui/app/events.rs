@@ -44,10 +44,12 @@ impl App {
                 *self.status.write() = "Search Models".to_string();
             }
             (_, KeyCode::Char('d')) => {
-                // Allow download from Models pane (for non-GGUF), QuantizationGroups, or QuantizationFiles
+                // Allow download from Models pane (for non-GGUF), QuantizationGroups,
+                // QuantizationFiles, or the Standard-mode FileTree
                 if self.focused_pane == FocusedPane::Models
                     || self.focused_pane == FocusedPane::QuantizationGroups
                     || self.focused_pane == FocusedPane::QuantizationFiles
+                    || self.focused_pane == FocusedPane::FileTree
                 {
                     self.trigger_download();
                 }
@@ -433,6 +435,7 @@ impl App {
                 self.popup_mode = PopupMode::None;
             }
             KeyCode::Esc => {
+                self.pending_tree_download = None;
                 self.popup_mode = PopupMode::None;
                 *self.status.write() = "Download cancelled".to_string();
             }

@@ -34,6 +34,10 @@ pub struct App {
     pub api_cache: Arc<RwLock<crate::models::ApiCache>>,
     pub popup_mode: PopupMode,
     pub download_path_input: Input,
+    /// Tree-pane download target set by `trigger_download` when 'd' is
+    /// pressed on the Standard-mode file tree: (repo path, is_directory).
+    /// A directory queues every file under it. Cleared on confirm/cancel.
+    pub pending_tree_download: Option<(String, bool)>,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
     pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
     pub download_rx: DownloadReceiver,
@@ -153,6 +157,7 @@ impl App {
             api_cache: Arc::new(RwLock::new(crate::models::ApiCache::default())),
             popup_mode: PopupMode::None,
             download_path_input,
+            pending_tree_download: None,
             download_progress: Arc::new(Mutex::new(None)),
             download_tx,
             download_rx: Arc::new(Mutex::new(download_rx)),

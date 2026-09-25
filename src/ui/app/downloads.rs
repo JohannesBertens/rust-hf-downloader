@@ -60,6 +60,36 @@ impl App {
                     }
                 }
             }
+            FocusedPane::FileTree => {
+                // Download the selected file (or every file under the selected
+                // directory) from the Standard-mode tree — issue #25 P5
+                let tree =
+                    futures::executor::block_on(async { self.file_tree.read().clone() });
+                let Some(tree) = tree else {
+                    return;
+                };
+                let Some(selected) = self.file_tree_state.selected() else {
+                    return;
+                };
+                let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
+                let Some(node) = flat.get(selected) else {
+                    return;
+                };
+
+                self.pending_tree_download = Some((node.path.clone(), node.is_dir));
+                self.download_path_input =
+                    Input::default().with_value(self.options.default_directory.clone());
+                self.popup_mode = PopupMode::DownloadPath;
+                if node.is_dir {
+                    let count = count_tree_files(node);
+                    *self.status.write() = format!(
+                        "Download all {} files under {}",
+                        count, node.path
+                    );
+                } else {
+                    *self.status.write() = format!("Download file {}", node.path);
+                }
+            }
             FocusedPane::QuantizationGroups => {
                 // Download entire quantization group
                 let quantizations =
@@ -95,6 +125,12 @@ impl App {
 
     /// Complete download with validation - create metadata and queue download
     pub async fn confirm_download(&mut self) {
+        // Tree-pane selection (Standard mode): single file or subtree
+        if let Some((path, is_dir)) = self.pending_tree_download.take() {
+            self.confirm_tree_download(&path, is_dir).await;
+            return;
+        }
+
         // Check if we're downloading a full repository (non-GGUF model)
         if self.focused_pane == FocusedPane::Models
             && *self.display_mode.read() == crate::models::ModelDisplayMode::Standard
@@ -576,5 +612,170 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Queue a download for a Standard-mode tree selection: a single file
+    /// (`path`, `is_dir == false`) or every file under a directory
+    /// (`path`, `is_dir == true`). Issue #25 P5: non-GGUF repos previously
+    /// only offered whole-repo download.
+    async fn confirm_tree_download(&mut self, path: &str, is_dir: bool) {
+        let models = self.models.read().clone();
+        let metadata = self.model_metadata.read().clone();
+
+        let model_selected = self.list_state.selected();
+
+        let Some(model_idx) = model_selected else {
+            return;
+        };
+        let Some(meta) = metadata else {
+            return;
+        };
+        let Some(model) = models.get(model_idx) else {
+            return;
+        };
+
+        let base_path = self.download_path_input.value().to_string();
+
+        // Select the file itself, or every file inside the directory
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let files_to_download: Vec<_> = meta
+            .siblings
+            .iter()
+            .filter(|f| {
+                f.size.is_some()
+                    && !f.rfilename.ends_with('/')
+                    && if is_dir {
+                        f.rfilename.starts_with(&prefix)
+                    } else {
+                        f.rfilename == path
+                    }
+            })
+            .collect();
+
+        if files_to_download.is_empty() {
+            *self.error.write() = Some(format!("No downloadable files match {}", path));
+            *self.status.write() = "Download cancelled".to_string();
+            return;
+        }
+
+        let num_files = files_to_download.len();
+
+        // Load registry
+        let mut registry = {
+            let reg = self.download_registry.lock().await;
+            reg.clone()
+        };
+
+        for file in &files_to_download {
+            let filename = &file.rfilename;
+
+            let validated_path =
+                match validate_and_sanitize_path(&base_path, &model.id, filename) {
+                    Ok(validated) => validated,
+                    Err(e) => {
+                        *self.error.write() =
+                            Some(format!("Invalid filename '{}': {}", filename, e));
+                        continue;
+                    }
+                };
+
+            let url = crate::api::resolve_url(&model.id, filename);
+            let local_path_str = validated_path.to_string_lossy().to_string();
+
+            if !registry.downloads.iter().any(|d| d.url == url) {
+                registry.downloads.push(DownloadMetadata {
+                    model_id: model.id.clone(),
+                    filename: filename.clone(),
+                    url: url.clone(),
+                    local_path: local_path_str,
+                    total_size: file.size.unwrap_or(0),
+                    downloaded_size: 0,
+                    status: DownloadStatus::Incomplete,
+                    expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+                });
+            }
+        }
+
+        registry::save_registry(&registry);
+        {
+            let mut reg = self.download_registry.lock().await;
+            *reg = registry;
+        }
+
+        let total_queued_bytes: u64 = files_to_download.iter().filter_map(|f| f.size).sum();
+        {
+            let mut queue = self.download_queue.lock().await;
+            queue.add(num_files, total_queued_bytes);
+        }
+
+        // Files land under base/author/model/<repo subpath>
+        let model_parts: Vec<&str> = model.id.split('/').collect();
+        let model_root = if model_parts.len() == 2 {
+            PathBuf::from(&base_path)
+                .join(model_parts[0])
+                .join(model_parts[1])
+        } else {
+            PathBuf::from(&base_path)
+        };
+
+        let mut success_count = 0;
+        let hf_token = self.options.hf_token.clone();
+        for file in &files_to_download {
+            let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
+            let file_size = file.size.unwrap_or(0);
+
+            if self
+                .download_tx
+                .send((
+                    model.id.clone(),
+                    file.rfilename.clone(),
+                    model_root.clone(),
+                    sha256,
+                    hf_token.clone(),
+                    file_size,
+                ))
+                .is_ok()
+            {
+                success_count += 1;
+                let mut items = self.download_queue_items.lock().await;
+                items.push(crate::models::QueueItemSummary {
+                    filename: file.rfilename.clone(),
+                    total_size: file_size,
+                });
+            }
+        }
+
+        if success_count > 0 {
+            *self.status.write() = format!(
+                "Queued {} file{} from {} to {}",
+                success_count,
+                if success_count == 1 { "" } else { "s" },
+                path,
+                model_root.display()
+            );
+        } else {
+            *self.error.write() = Some("Failed to start downloads".to_string());
+        }
+
+        if success_count < num_files {
+            let failed_count = num_files - success_count;
+            let failed_bytes: u64 = files_to_download
+                .iter()
+                .skip(success_count)
+                .filter_map(|f| f.size)
+                .sum();
+            let mut queue = self.download_queue.lock().await;
+            queue.remove(failed_count, failed_bytes);
+        }
+    }
+}
+
+/// Recursively count file nodes under a tree node (for the download popup
+/// label).
+fn count_tree_files(node: &FileTreeNode) -> usize {
+    if node.is_dir {
+        node.children.iter().map(count_tree_files).sum()
+    } else {
+        1
     }
 }
