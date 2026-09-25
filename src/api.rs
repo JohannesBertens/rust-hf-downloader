@@ -158,6 +158,7 @@ fn fetch_recursive_tree<'a>(
 }
 
 /// Check if model has GGUF files
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn has_gguf_files(metadata: &ModelMetadata) -> bool {
     metadata
         .siblings
@@ -260,115 +261,145 @@ fn sort_tree_recursive(node: &mut FileTreeNode) {
     }
 }
 
+/// Fetch and classify a model's GGUF files into quantization groups.
+///
+/// Compat wrapper: frontends that already hold `ModelMetadata` should call
+/// [`classify_quantizations`] directly over `metadata.siblings` to avoid the
+/// extra API round-trip.
+#[allow(dead_code)]
 pub async fn fetch_model_files(
     model_id: &str,
     token: Option<&String>,
 ) -> Result<Vec<QuantizationGroup>, reqwest::Error> {
-    let url = format!("{}/api/models/{}/tree/main", api_base(), model_id);
+    // Thin wrapper kept for API compatibility: classification is a pure
+    // function over the full recursive tree (see `classify_quantizations`),
+    // so a single metadata fetch is all we need.
+    let metadata = fetch_model_metadata(model_id, token).await?;
+    Ok(classify_quantizations(&metadata.siblings))
+}
 
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
-    let files: Vec<ModelFile> = response.json().await?;
+/// Quantization group for GGUF files whose layout we don't recognize.
+/// These files used to be silently dropped (issue #25); they now stay
+/// visible and downloadable. Always sorted last.
+pub const OTHER_QUANT_TYPE: &str = "OTHER";
 
-    let mut quantizations = Vec::new();
-    let mut multi_part_groups: HashMap<String, Vec<ModelFile>> = HashMap::new();
+/// Quantization group prefix for multimodal projector files (`mmproj-*`),
+/// which are companions to (not part of) the model weights and must never
+/// be mixed into a weight quantization group (issue #25).
+pub const MMPROJ_QUANT_TYPE: &str = "MMPROJ";
 
-    for file in &files {
-        // Handle GGUF files in root directory
-        // Match both .gguf and .gguf.partNofM patterns
-        let is_gguf_file = file.file_type == "file"
-            && (file.path.ends_with(".gguf") || file.path.contains(".gguf.part"));
+/// Is this repo path a GGUF-family file (single or multipart)?
+fn is_gguf_path(path: &str) -> bool {
+    path.ends_with(".gguf") || path.contains(".gguf.part")
+}
 
-        if is_gguf_file {
-            // Extract SHA256 from lfs.oid (available for all files)
-            let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
+/// Basename with the `.gguf` extension and any multipart suffix removed —
+/// the string quantization hints live in.
+/// `Dynamic/model.Q4_K_M-00001-of-00002.gguf` -> `model.Q4_K_M`.
+fn classification_stem(path: &str) -> String {
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    let base = get_multipart_base_name(basename);
+    base.strip_suffix(".gguf").unwrap_or(&base).to_string()
+}
 
-            // Check if this is a multi-part file
-            if let Some((_, _)) = parse_multipart_filename(&file.path) {
-                // Group multi-part files by their base name
-                let base_name = get_multipart_base_name(&file.path);
-                multi_part_groups
-                    .entry(base_name)
-                    .or_default()
-                    .push(file.clone());
-            } else {
-                // Single file
-                if let Some(quant_type) = extract_quantization_type(&file.path) {
-                    quantizations.push(QuantizationInfo {
-                        quant_type,
-                        filename: file.path.clone(),
-                        size: file.size,
-                        sha256,
-                    });
-                }
-            }
-        }
-        // Handle subdirectories named by quantization type (e.g., Q4_K_M/, Q8_0/)
-        else if file.file_type == "directory" && is_quantization_directory(&file.path) {
-            // Fetch files from this subdirectory
-            let subdir_url = format!(
-                "{}/api/models/{}/tree/main/{}",
-                api_base(),
-                model_id,
-                file.path
-            );
+/// Does the (multipart-stripped) basename identify a multimodal projector
+/// file? Token match on `mmproj` so names like `model-mmproj-Q8_0.gguf`,
+/// `mmproj-F32.gguf`, and `mmproj-Qwen3.5-….gguf` all match.
+fn is_mmproj_name(stem: &str) -> bool {
+    stem.split(['.', '-', '_'])
+        .any(|token| token.eq_ignore_ascii_case("mmproj"))
+}
 
-            if let Ok(subdir_response) =
-                crate::http_client::get_with_optional_token(&subdir_url, token).await
-            {
-                if let Ok(subdir_files) = subdir_response.json::<Vec<ModelFile>>().await {
-                    let quant_type = extract_quantization_type_from_dirname(&file.path);
+/// Quantization type for one repo file, applying the issue #25 rules:
+/// 1. mmproj files get their own `MMPROJ`/`MMPROJ-<quant>` group
+/// 2. a quant hint in the filename wins (`model.Q4_K_M.gguf`)
+/// 3. otherwise inherit from a quant-named ancestor directory (`Q4_K_M/…`)
+/// 4. otherwise land in the `OTHER` group instead of being dropped
+fn classify_file_quant_type(path: &str) -> String {
+    let stem = classification_stem(path);
 
-                    // Add each individual file in the directory as a separate QuantizationInfo
-                    for subdir_file in subdir_files {
-                        if subdir_file.file_type == "file"
-                            && (subdir_file.path.ends_with(".gguf")
-                                || subdir_file.path.contains(".gguf.part"))
-                        {
-                            let sha256 = subdir_file.lfs.as_ref().map(|lfs| lfs.oid.clone());
-
-                            quantizations.push(QuantizationInfo {
-                                quant_type: quant_type.clone(),
-                                filename: subdir_file.path.clone(),
-                                size: subdir_file.size,
-                                sha256,
-                            });
-                        }
-                    }
-                }
-            }
-        }
+    if is_mmproj_name(&stem) {
+        return match extract_quantization_type(&stem) {
+            Some(quant) => format!("{}-{}", MMPROJ_QUANT_TYPE, quant),
+            None => MMPROJ_QUANT_TYPE.to_string(),
+        };
     }
 
-    // Process multi-part groups - keep all individual files
-    // Note: Multi-part files are separate complete files, each with their own SHA256
-    // They are NOT downloaded as chunks and concatenated
-    for (base_name, parts) in multi_part_groups {
-        if let Some(quant_type) = extract_quantization_type(&base_name) {
-            // Add each individual part as a separate QuantizationInfo
-            for part in parts {
-                let sha256 = part.lfs.as_ref().map(|lfs| lfs.oid.clone());
-                quantizations.push(QuantizationInfo {
-                    quant_type: quant_type.clone(),
-                    filename: part.path.clone(),
-                    size: part.size,
-                    sha256,
-                });
-            }
-        }
+    if let Some(quant) = extract_quantization_type(&stem) {
+        return quant;
     }
 
-    // Group quantizations by type
+    if let Some(quant) = quant_type_from_directory(path) {
+        return quant;
+    }
+
+    OTHER_QUANT_TYPE.to_string()
+}
+
+/// Strictly extract a quantization type from a directory name.
+/// Unlike `extract_quantization_type_from_dirname` this never falls back to
+/// the raw (uppercased) name — inheritance only fires for recognized
+/// patterns, so `Dynamic/` never becomes a quant group.
+fn quant_type_from_dirname_strict(dirname: &str) -> Option<String> {
+    let upper = dirname.to_uppercase();
+    if looks_like_quant_type(&upper) {
+        return Some(upper);
+    }
+    // Model-name-suffixed dirs: `cerebras_…-Q8_0` -> `Q8_0`
+    if let Some(last) = upper.rsplit('-').next() {
+        if looks_like_quant_type(last) {
+            return Some(last.to_string());
+        }
+    }
+    None
+}
+
+/// First quant-named ancestor directory of `path` (root scanned first, so
+/// the top-level quant layout wins over deeper coincidences).
+fn quant_type_from_directory(path: &str) -> Option<String> {
+    let mut components = path.split('/');
+    let mut current = components.next()?;
+    for next in components {
+        if let Some(quant) = quant_type_from_dirname_strict(current) {
+            return Some(quant);
+        }
+        current = next;
+    }
+    None
+}
+
+/// Classify a repo's files into quantization groups.
+///
+/// Pure function over the complete recursive file listing
+/// (`ModelMetadata::siblings`) — no I/O, exhaustively unit-testable.
+/// Replaces the old root-only tree walk which missed GGUFs stored in
+/// arbitrarily named subdirectories (issue #25).
+///
+/// Only GGUF-family files are grouped; other files (safetensors, configs…)
+/// stay for the Standard-mode file tree.
+pub fn classify_quantizations(files: &[RepoFile]) -> Vec<QuantizationGroup> {
     let mut grouped: HashMap<String, Vec<QuantizationInfo>> = HashMap::new();
 
-    for quant in quantizations {
+    for file in files {
+        let path = &file.rfilename;
+        // Defensive: siblings may contain directory entries (trailing '/')
+        if path.ends_with('/') || !is_gguf_path(path) {
+            continue;
+        }
+
+        let quant_type = classify_file_quant_type(path);
         grouped
-            .entry(quant.quant_type.clone())
+            .entry(quant_type.clone())
             .or_default()
-            .push(quant);
+            .push(QuantizationInfo {
+                quant_type,
+                filename: path.clone(),
+                size: file.size.unwrap_or(0),
+                sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+            });
     }
 
-    // Convert to QuantizationGroups and sort by total size (largest first)
-    let mut quantization_groups: Vec<QuantizationGroup> = grouped
+    let mut groups: Vec<QuantizationGroup> = grouped
         .into_iter()
         .map(|(quant_type, files)| {
             let total_size: u64 = files.iter().map(|f| f.size).sum();
@@ -380,9 +411,18 @@ pub async fn fetch_model_files(
         })
         .collect();
 
-    quantization_groups.sort_by_key(|b| std::cmp::Reverse(b.total_size));
+    // Largest group first (previous behavior); `OTHER` always pinned last so
+    // recognized quants stay at the top of the list.
+    groups.sort_by(|a, b| {
+        let is_other = |g: &QuantizationGroup| g.quant_type == OTHER_QUANT_TYPE;
+        match (is_other(a), is_other(b)) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => b.total_size.cmp(&a.total_size),
+        }
+    });
 
-    Ok(quantization_groups)
+    groups
 }
 
 /// Fetch SHA256 hashes for multiple files in a single API call
@@ -452,93 +492,32 @@ pub fn get_multipart_base_name(filename: &str) -> String {
     filename.to_string()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn is_quantization_directory(dirname: &str) -> bool {
     // Check if directory name looks like a quantization type
-    // Examples: Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, TQ1_0, BF16, etc.
+    // Examples: Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, TQ1_0, MXFP4, BF16, etc.
     // Also handles patterns like: cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0
-    let upper = dirname.to_uppercase();
-
-    // First check if it starts with a known quantization pattern (original behavior)
-    if upper.starts_with('Q')
-        || upper.starts_with("IQ")
-        || upper.starts_with("TQ")
-        || upper == "BF16"
-        || upper == "F16"
-        || upper == "FP16"
-    {
-        return true;
-    }
-
-    // Extract the last component after the last hyphen
-    // This handles cases like "cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0" -> "Q8_0"
-    let parts: Vec<&str> = upper.split('-').collect();
-    if let Some(&last_part) = parts.last() {
-        // Check if last part looks like a quantization type
-        // Q followed by digit (Q4, Q5, Q8, etc.)
-        if last_part.starts_with('Q')
-            && last_part.len() > 1
-            && last_part.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-        // IQ followed by digit (IQ4, IQ3, etc.)
-        if last_part.starts_with("IQ")
-            && last_part.len() > 2
-            && last_part.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-        // TQ followed by digit (TQ1_0, TQ2_0, etc.)
-        if last_part.starts_with("TQ")
-            && last_part.len() > 2
-            && last_part.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-        // Special formats
-        if last_part == "BF16" || last_part == "F16" || last_part == "FP16" || last_part == "FP32" {
-            return true;
-        }
-    }
-
-    false
+    //
+    // Delegates to the shared predicate (via `quant_type_from_dirname_strict`)
+    // so filename and directory heuristics can never drift apart again
+    // (issue #25: MXFP was missing here while filenames knew it).
+    quant_type_from_dirname_strict(dirname).is_some()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_quantization_type_from_dirname(dirname: &str) -> String {
     // Extract just the quantization type from a directory name
     // Examples:
     //   "Q4_K_M" -> "Q4_K_M"
     //   "cerebras_MiniMax-M2-REAP-139B-A10B-Q8_0" -> "Q8_0"
-    let upper = dirname.to_uppercase();
-
-    // If it already starts with a quantization pattern, return as-is
-    if upper.starts_with('Q')
-        || upper.starts_with("IQ")
-        || upper.starts_with("TQ")
-        || upper == "BF16"
-        || upper == "F16"
-        || upper == "FP16"
-    {
-        return upper;
+    //
+    // Delegates to the shared predicate; keeps the historical uppercased
+    // fallback for unrecognized names (classification uses the strict
+    // `quant_type_from_dirname_strict` instead).
+    if let Some(quant) = quant_type_from_dirname_strict(dirname) {
+        return quant;
     }
-
-    // Extract the last component after the last hyphen
-    let parts: Vec<&str> = upper.split('-').collect();
-    if let Some(&last_part) = parts.last() {
-        if last_part.starts_with('Q')
-            || last_part.starts_with("IQ")
-            || last_part.starts_with("TQ")
-            || last_part == "BF16"
-            || last_part == "F16"
-            || last_part == "FP16"
-            || last_part == "FP32"
-        {
-            return last_part.to_string();
-        }
-    }
-
-    // Fallback: return the original name uppercased
-    upper
+    dirname.to_uppercase()
 }
 
 pub fn extract_quantization_type(filename: &str) -> Option<String> {
@@ -582,60 +561,20 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
         }
     }
 
-    // Helper function to check if a string looks like a quantization type
-    let is_quant_type = |s: &str| -> bool {
-        let upper = s.to_uppercase();
-        // Check for common quantization patterns
-        // Q followed by digit (Q4, Q5, Q8, etc.)
-        if upper.starts_with('Q')
-            && upper.len() > 1
-            && upper.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-        // IQ followed by digit (IQ4_XS, IQ3_M, etc.)
-        if upper.starts_with("IQ")
-            && upper.len() > 2
-            && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-        // TQ followed by digit (TQ1_0, TQ2_0, etc.) - ternary packing for TriLMs/BitNet
-        if upper.starts_with("TQ")
-            && upper.len() > 2
-            && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-        // MXFP followed by digit (MXFP4, MXFP6, MXFP8, etc.)
-        // But not MXFP4_MOE (that should be split to MXFP4)
-        if upper.starts_with("MXFP")
-            && upper.len() > 4
-            && upper.chars().nth(4).is_some_and(|c| c.is_ascii_digit())
-        {
-            // Make sure there's no underscore with additional suffix
-            if !upper.contains('_')
-                || upper
-                    .chars()
-                    .nth(5)
-                    .is_some_and(|c| c == '_' && upper.len() == 6)
-            {
-                return true;
-            }
-        }
-        // Special formats
-        if upper == "BF16" || upper == "F16" || upper == "FP16" || upper == "FP32" {
-            return true;
-        }
-        false
-    };
-
     // Try splitting by '.' first (handles model.Q4_K_M.gguf)
     let parts: Vec<&str> = name.split('.').collect();
     if parts.len() > 1 {
         if let Some(last_part) = parts.last() {
-            if is_quant_type(last_part) {
+            if looks_like_quant_type(last_part) {
                 return Some(last_part.to_uppercase());
+            }
+            // Underscore-prefix fallback: `mxfp4_moe` -> `MXFP4`. Only fires
+            // when the whole part is NOT a quant type, so `Q4_K_M` stays
+            // intact (issue #25).
+            if let Some(prefix) = last_part.split('_').next() {
+                if looks_like_quant_type(prefix) {
+                    return Some(prefix.to_uppercase());
+                }
             }
         }
     }
@@ -644,7 +583,7 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
     let parts: Vec<&str> = name.split('-').collect();
     for part in parts.iter().rev() {
         // First check if the whole part is a valid quant type (e.g., Q4_K_M, IQ4_XS)
-        if is_quant_type(part) {
+        if looks_like_quant_type(part) {
             return Some(part.to_uppercase());
         }
         // If not, check if it contains an underscore and the prefix is a quant type
@@ -653,7 +592,7 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
         if part.contains('_') {
             let subparts: Vec<&str> = part.split('_').collect();
             if let Some(first) = subparts.first() {
-                if is_quant_type(first) {
+                if looks_like_quant_type(first) {
                     // Only use the prefix if it's different from checking the whole part
                     // This prevents Q4_K_M from becoming just Q4
                     return Some(first.to_uppercase());
@@ -665,6 +604,60 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
     None
 }
 
+/// Does `s` look like a quantization type? The ONE predicate shared by
+/// filename, directory, and classification logic (the three drifted copies
+/// are how MXFP went missing from the directory heuristics — issue #25).
+///
+/// Recognizes: `Q<digit>…` (Q4, Q4_K_M), `IQ<digit>…`, `TQ<digit>…`,
+/// `MXFP<digit>` (MXFP4, but not MXFP4_MOE), and the exact formats
+/// BF16 / F16 / FP16 / FP32.
+pub fn looks_like_quant_type(s: &str) -> bool {
+    let upper = s.to_uppercase();
+    // Q followed by digit (Q4, Q5, Q8, etc.)
+    if upper.starts_with('Q')
+        && upper.len() > 1
+        && upper.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // IQ followed by digit (IQ4_XS, IQ3_M, etc.)
+    if upper.starts_with("IQ")
+        && upper.len() > 2
+        && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // TQ followed by digit (TQ1_0, TQ2_0, etc.) - ternary packing for TriLMs/BitNet
+    if upper.starts_with("TQ")
+        && upper.len() > 2
+        && upper.chars().nth(2).is_some_and(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // MXFP followed by digit (MXFP4, MXFP6, MXFP8, etc.)
+    // But not MXFP4_MOE (that should be split to MXFP4)
+    if upper.starts_with("MXFP")
+        && upper.len() > 4
+        && upper.chars().nth(4).is_some_and(|c| c.is_ascii_digit())
+    {
+        // Make sure there's no underscore with additional suffix
+        if !upper.contains('_')
+            || upper
+                .chars()
+                .nth(5)
+                .is_some_and(|c| c == '_' && upper.len() == 6)
+        {
+            return true;
+        }
+    }
+    // Special formats
+    if upper == "BF16" || upper == "F16" || upper == "FP16" || upper == "FP32" {
+        return true;
+    }
+    false
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
     // Parse filenames like:
     // "Q2_K/MiniMax-M2-Q2_K-00001-of-00002.gguf" (5-digit format)
@@ -711,6 +704,30 @@ mod tests {
             size: Some(size),
             lfs: None,
         }
+    }
+
+    fn repo_file_lfs(path: &str, size: u64, oid: &str) -> RepoFile {
+        RepoFile {
+            rfilename: path.to_string(),
+            size: Some(size),
+            lfs: Some(crate::models::LfsInfo {
+                oid: oid.to_string(),
+                size,
+                pointer_size: 136,
+            }),
+        }
+    }
+
+    fn group_types(groups: &[QuantizationGroup]) -> Vec<&str> {
+        groups.iter().map(|g| g.quant_type.as_str()).collect()
+    }
+
+    fn group_files<'a>(groups: &'a [QuantizationGroup], quant: &str) -> Vec<&'a str> {
+        groups
+            .iter()
+            .find(|g| g.quant_type == quant)
+            .map(|g| g.files.iter().map(|f| f.filename.as_str()).collect())
+            .unwrap_or_default()
     }
 
     fn make_metadata(siblings: &[&str]) -> ModelMetadata {
@@ -881,10 +898,26 @@ mod tests {
     }
 
     #[test]
-    fn quant_dir_loose_q_prefix_matching() {
-        // Documents actual behavior: ANY name starting with 'Q' is treated as
-        // a quantization directory, even without a trailing digit.
-        assert!(is_quantization_directory("QuickCheck"));
+    fn quant_dir_strict_q_prefix_matching() {
+        // Tightened with the unified predicate (issue #25): a bare 'Q' prefix
+        // without a digit is NOT a quantization directory — this used to
+        // swallow arbitrary dirs like "QuickCheck" or "Qwen-backup" into
+        // junk quant groups.
+        assert!(!is_quantization_directory("QuickCheck"));
+        assert!(!is_quantization_directory("Qwen-backup"));
+        // Real quant dirs still match
+        assert!(is_quantization_directory("Q4_K_M"));
+        assert!(is_quantization_directory("Q8_0"));
+    }
+
+    #[test]
+    fn quant_dir_mxfp_recognized() {
+        // MXFP was known to filename heuristics but missing from directory
+        // heuristics (drifted copies) — issue #25
+        assert!(is_quantization_directory("MXFP4"));
+        assert!(is_quantization_directory("mxfp4"));
+        assert!(!is_quantization_directory("MXFP4_MOE"));
+        assert_eq!(extract_quantization_type_from_dirname("MXFP4"), "MXFP4");
     }
 
     // ---- extract_quantization_type_from_dirname ----
@@ -988,5 +1021,172 @@ mod tests {
             "weights.safetensors"
         ])));
         assert!(!has_gguf_files(&make_metadata(&[])));
+    }
+
+    // ---- classify_quantizations: issue #25 regression fixtures ----
+    // Layouts recorded from the live HuggingFace API (2026-09-25) for the
+    // four repos named in the issue. Any classifier change must keep these
+    // green.
+
+    #[test]
+    fn classify_root_layout_unchanged() {
+        // Baseline: classic mradermacher-style root layout keeps working.
+        let groups = classify_quantizations(&[
+            repo_file("model.Q4_K_M.gguf", 100),
+            repo_file("model.Q8_0.gguf", 50),
+            repo_file("README.md", 1),
+        ]);
+        assert_eq!(group_types(&groups), vec!["Q4_K_M", "Q8_0"]);
+        assert_eq!(group_files(&groups, "Q4_K_M"), vec!["model.Q4_K_M.gguf"]);
+    }
+
+    #[test]
+    fn classify_ex0bit_nested_dynamic_directory() {
+        // Issue #25 case B: all GGUFs live in a non-quant-named `Dynamic/`
+        // directory. Previously: zero groups (dead-end UI). Now: visible.
+        let groups = classify_quantizations(&[
+            repo_file(".gitattributes", 1746),
+            repo_file("README.md", 7167),
+            repo_file(
+                "Dynamic/Qwen3.5-122B-A10B-PRISM-LITE-Dynamic.gguf",
+                61_970_228_480,
+            ),
+            repo_file("Dynamic/imatrix.dat", 358_906_272),
+            repo_file(
+                "Dynamic/mmproj-Qwen3.5-122B-A10B-PRISM-LITE.gguf",
+                912_263_520,
+            ),
+        ]);
+        assert_eq!(group_types(&groups), vec!["MMPROJ", "OTHER"]);
+        assert_eq!(
+            group_files(&groups, "OTHER"),
+            vec!["Dynamic/Qwen3.5-122B-A10B-PRISM-LITE-Dynamic.gguf"]
+        );
+        assert_eq!(
+            group_files(&groups, "MMPROJ"),
+            vec!["Dynamic/mmproj-Qwen3.5-122B-A10B-PRISM-LITE.gguf"]
+        );
+        // imatrix.dat is not GGUF: stays out of quant groups
+    }
+
+    #[test]
+    fn classify_sabomako_mxfp4_moe_and_mmproj_f32() {
+        // Issue #25 case D: `mxfp4_moe` multiparts were silently dropped and
+        // `mmproj-F32.gguf` was dropped (F32 not a known quant).
+        let groups = classify_quantizations(&[
+            repo_file(
+                "Qwen3.5-122B-A10B-heretic.BF16-00001-of-00006.gguf",
+                48_656_272_000,
+            ),
+            repo_file(
+                "Qwen3.5-122B-A10B-heretic.mxfp4_moe-00001-of-00002.gguf",
+                39_636_333_056,
+            ),
+            repo_file(
+                "Qwen3.5-122B-A10B-heretic.mxfp4_moe-00002-of-00002.gguf",
+                28_629_663_936,
+            ),
+            repo_file("mmproj-F32.gguf", 1_805_183_712),
+            repo_file("README.md", 122),
+        ]);
+        assert_eq!(group_types(&groups), vec!["MXFP4", "BF16", "MMPROJ"]);
+        assert_eq!(group_files(&groups, "MXFP4").len(), 2);
+        assert_eq!(group_files(&groups, "MMPROJ"), vec!["mmproj-F32.gguf"]);
+    }
+
+    #[test]
+    fn classify_mradermacher_mmproj_not_mixed_into_weights() {
+        // Issue #25 case C: `*.mmproj-Q8_0.gguf` used to land in the Q8_0
+        // weight group; it gets its own MMPROJ-Q8_0 group now.
+        let groups = classify_quantizations(&[
+            repo_file("Qwen3.5-27B-heretic.Q8_0.gguf", 1000),
+            repo_file("Qwen3.5-27B-heretic.mmproj-Q8_0.gguf", 100),
+        ]);
+        assert_eq!(group_types(&groups), vec!["Q8_0", "MMPROJ-Q8_0"]);
+        assert_eq!(
+            group_files(&groups, "Q8_0"),
+            vec!["Qwen3.5-27B-heretic.Q8_0.gguf"]
+        );
+        assert_eq!(
+            group_files(&groups, "MMPROJ-Q8_0"),
+            vec!["Qwen3.5-27B-heretic.mmproj-Q8_0.gguf"]
+        );
+    }
+
+    #[test]
+    fn classify_quant_named_directory_inheritance() {
+        // `Q4_K_M/model.gguf` inherits the quant type from the directory
+        // (the old root-only walk's one subdir case, now generalized).
+        let groups = classify_quantizations(&[
+            repo_file("Q4_K_M/model.gguf", 100),
+            repo_file("Q8_0/model.gguf", 80),
+            repo_file("MXFP4/model.gguf", 60),
+        ]);
+        assert_eq!(group_types(&groups), vec!["Q4_K_M", "Q8_0", "MXFP4"]);
+        assert_eq!(group_files(&groups, "Q4_K_M"), vec!["Q4_K_M/model.gguf"]);
+    }
+
+    #[test]
+    fn classify_deeply_nested_quant_dir_and_multipart() {
+        // Deeply nested branch: e/f/g.gguf — dir hint wins even when the
+        // filename itself has no quant info; multipart parts stay together.
+        let groups = classify_quantizations(&[
+            repo_file("Q4_K_M/model.Q4_K_M-00001-of-00002.gguf", 10),
+            repo_file("Q4_K_M/model.Q4_K_M-00002-of-00002.gguf", 10),
+        ]);
+        assert_eq!(group_types(&groups), vec!["Q4_K_M"]);
+        assert_eq!(group_files(&groups, "Q4_K_M").len(), 2);
+    }
+
+    #[test]
+    fn classify_non_gguf_repo_yields_no_groups() {
+        // Issue #25 case A (stepfun-ai Int4): safetensors-only repos produce
+        // no quant groups — the TUI falls back to the Standard file tree.
+        let groups = classify_quantizations(&[
+            repo_file("config.json", 100),
+            repo_file("model-00001-of-00002.safetensors", 1000),
+            repo_file("tokenizer.json", 10),
+        ]);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn classify_sha256_and_size_carried_through() {
+        // Nested files keep LFS oid + size so verification still works.
+        let groups =
+            classify_quantizations(&[repo_file_lfs("Dynamic/model-Q4_K.gguf", 42, "deadbeef")]);
+        let file = &groups[0].files[0];
+        assert_eq!(file.sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(file.size, 42);
+        assert_eq!(groups[0].total_size, 42);
+    }
+
+    #[test]
+    fn classify_other_group_sorted_last() {
+        let groups = classify_quantizations(&[
+            repo_file("mystery.gguf", 999),
+            repo_file("model.Q2_K.gguf", 10),
+        ]);
+        assert_eq!(group_types(&groups), vec!["Q2_K", "OTHER"]);
+    }
+
+    #[test]
+    fn classify_skips_directory_entries() {
+        // Siblings listings sometimes include trailing-slash directory rows.
+        let groups =
+            classify_quantizations(&[repo_file("Dynamic/", 0), repo_file("Dynamic/model.gguf", 5)]);
+        assert_eq!(group_types(&groups), vec!["OTHER"]);
+    }
+
+    // ---- mmproj helpers ----
+
+    #[test]
+    fn mmproj_detection_variants() {
+        assert!(is_mmproj_name("mmproj-Q8_0"));
+        assert!(is_mmproj_name("model.mmproj-Q8_0"));
+        assert!(is_mmproj_name("mmproj-F32"));
+        assert!(is_mmproj_name("mmproj-Qwen3.5-122B"));
+        assert!(!is_mmproj_name("model-Q8_0"));
+        assert!(!is_mmproj_name("mmprojector-adjacent-false-positive-check"));
     }
 }

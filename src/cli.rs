@@ -348,8 +348,14 @@ pub fn resolve_files(
         }
         Selector::Quant(quant) => {
             let mut out = Vec::new();
+            // `--quant mmproj` selects every multimodal-projector group
+            // (MMPROJ, MMPROJ-Q8_0, …) in one go (issue #25)
+            let wants_mmproj = quant.eq_ignore_ascii_case(crate::api::MMPROJ_QUANT_TYPE);
             for group in quants {
-                if group.quant_type.eq_ignore_ascii_case(quant) {
+                let matches = group.quant_type.eq_ignore_ascii_case(quant)
+                    || (wants_mmproj
+                        && group.quant_type.starts_with(crate::api::MMPROJ_QUANT_TYPE));
+                if matches {
                     for file in &group.files {
                         out.push(FileSpec {
                             filename: file.filename.clone(),
@@ -838,19 +844,12 @@ async fn run_download(args: DownloadArgs) -> i32 {
         }
     };
 
-    // Quantization listing is only needed to resolve --quant
+    // Quantization groups derive (pure) from the recursive tree already
+    // fetched with the metadata — no second API round-trip. Issue #25:
+    // this now finds GGUFs stored in subdirectories and keeps mmproj
+    // files in their own groups.
     let quants = if matches!(selector, Selector::Quant(_)) {
-        match crate::api::fetch_model_files(&args.model_id, token.as_ref()).await {
-            Ok(quants) => quants,
-            Err(e) => {
-                reporter.emit(&Event::Error {
-                    code: "network".to_string(),
-                    message: format!("failed to list model files: {}", e),
-                    available: None,
-                });
-                return EXIT_FAILURE;
-            }
-        }
+        crate::api::classify_quantizations(&metadata.siblings)
     } else {
         Vec::new()
     };
@@ -1525,6 +1524,36 @@ mod tests {
         let err = resolve_files(&metadata, &[], &Selector::Quant("Q8_0".to_string())).unwrap_err();
         assert!(matches!(err, ResolveError::NoFilesMatch { .. }));
         assert_eq!(err.code(), "no_files_match");
+    }
+
+    #[test]
+    fn resolve_quant_mmproj_selects_all_projector_groups() {
+        // Issue #25: `--quant mmproj` spans every MMPROJ* group; exact names
+        // (MMPROJ-Q8_0) still match directly and never pull weight files in.
+        let metadata = metadata_with(&[
+            ("model.Q8_0.gguf", Some(10)),
+            ("model.mmproj-Q8_0.gguf", Some(2)),
+            ("mmproj-F32.gguf", Some(3)),
+        ]);
+        let quants = crate::api::classify_quantizations(&metadata.siblings);
+
+        let files =
+            resolve_files(&metadata, &quants, &Selector::Quant("mmproj".to_string())).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                file_spec("mmproj-F32.gguf", 3),
+                file_spec("model.mmproj-Q8_0.gguf", 2)
+            ]
+        );
+
+        let files = resolve_files(
+            &metadata,
+            &quants,
+            &Selector::Quant("MMPROJ-Q8_0".to_string()),
+        )
+        .unwrap();
+        assert_eq!(files, vec![file_spec("model.mmproj-Q8_0.gguf", 2)]);
     }
 
     #[test]

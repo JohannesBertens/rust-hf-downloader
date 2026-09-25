@@ -49,11 +49,34 @@ struct MockRepo {
 }
 
 impl MockRepo {
-    fn tree_json(&self) -> Vec<u8> {
-        let entries: Vec<Value> = self
-            .files
-            .iter()
-            .map(|f| {
+    /// Tree listing for a directory path ("" = repo root), deriving
+    /// directory entries from file paths — mirrors the real API where
+    /// subdir listings carry full paths (`Dynamic/model.gguf`).
+    fn tree_json_for(&self, dir: &str) -> Vec<u8> {
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", dir)
+        };
+        let mut entries: Vec<Value> = Vec::new();
+        let mut seen_dirs = std::collections::BTreeSet::new();
+
+        for f in &self.files {
+            if !f.path.starts_with(&prefix) {
+                continue;
+            }
+            let rest = &f.path[prefix.len()..];
+            if let Some(slash) = rest.find('/') {
+                // First-level subdirectory: one directory entry per name
+                let dir_name = &rest[..slash];
+                if seen_dirs.insert(dir_name.to_string()) {
+                    entries.push(json!({
+                        "type": "directory",
+                        "path": format!("{}{}", prefix, dir_name),
+                        "size": 0,
+                    }));
+                }
+            } else {
                 let mut entry = json!({
                     "type": "file",
                     "path": f.path,
@@ -66,10 +89,14 @@ impl MockRepo {
                         "pointerSize": 136,
                     });
                 }
-                entry
-            })
-            .collect();
+                entries.push(entry);
+            }
+        }
         serde_json::to_vec(&entries).unwrap()
+    }
+
+    fn tree_json(&self) -> Vec<u8> {
+        self.tree_json_for("")
     }
 }
 
@@ -114,6 +141,13 @@ async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
             .status(StatusCode::OK)
             .header("content-type", "application/json")
             .body(Body::from(repo.tree_json()))
+            .unwrap();
+    }
+    if let Some(subdir) = path.strip_prefix(&format!("{}/tree/main/", api_prefix)) {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::from(repo.tree_json_for(subdir)))
             .unwrap();
     }
 
@@ -1019,4 +1053,197 @@ async fn search_network_error_emits_error_event_and_exits_one() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["type"], json!("error"));
     assert_eq!(events[0]["code"], json!("network"));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #25 regression: subdirectory layouts and mmproj/mxfp4 classification
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn nested_subdirectory_files_download_and_verify() {
+    // Ex0bit/Qwen3.5-122B-A10B-PRISM-LITE-GGUF layout: every GGUF lives in a
+    // non-quant-named `Dynamic/` directory. The quant walk used to skip it
+    // entirely (zero groups, nothing downloadable).
+    let weights = fixture_bytes(50_000);
+    let mmproj = fixture_bytes(5_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "Ex0bit/PRISM-LITE-GGUF".to_string(),
+        files: vec![
+            FileEntry {
+                path: "README.md".to_string(),
+                advertised_sha256: None,
+                content: b"# readme".to_vec(),
+            },
+            FileEntry {
+                path: "Dynamic/model.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&weights)),
+                content: weights.clone(),
+            },
+            FileEntry {
+                path: "Dynamic/mmproj-model.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&mmproj)),
+                content: mmproj.clone(),
+            },
+        ],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+
+    // --file with the full nested path downloads + verifies, preserving the
+    // subdirectory structure on disk
+    let (code, stdout, stderr) = env
+        .run(&[
+            "download",
+            "Ex0bit/PRISM-LITE-GGUF",
+            "--file",
+            "Dynamic/model.gguf",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0, "stdout:\n{}\nstderr:{}", stdout, stderr);
+    assert_file_content(
+        &env.models_dir()
+            .join("Ex0bit/PRISM-LITE-GGUF/Dynamic/model.gguf"),
+        &weights,
+    );
+    let verify = json_lines(&stdout)
+        .into_iter()
+        .find(|e| e["type"] == "verification_result")
+        .unwrap();
+    assert_eq!(verify["ok"], json!(true));
+
+    // --quant other resolves the unclassified nested GGUF (was: dropped)
+    let (code, stdout, stderr) = env
+        .run(&[
+            "download",
+            "Ex0bit/PRISM-LITE-GGUF",
+            "--quant",
+            "other",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0, "stderr:{}", stderr);
+    let resolved = json_lines(&stdout)
+        .into_iter()
+        .find(|e| e["type"] == "resolved")
+        .unwrap();
+    assert_eq!(
+        resolved["files"].as_array().unwrap().len(),
+        1,
+        "resolved: {}",
+        resolved
+    );
+
+    // --quant mmproj resolves the nested projector file
+    let (code, _stdout, stderr) = env
+        .run(&[
+            "download",
+            "Ex0bit/PRISM-LITE-GGUF",
+            "--quant",
+            "mmproj",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0, "stderr:{}", stderr);
+    assert_file_content(
+        &env.models_dir()
+            .join("Ex0bit/PRISM-LITE-GGUF/Dynamic/mmproj-model.gguf"),
+        &mmproj,
+    );
+}
+
+#[tokio::test]
+async fn mmproj_and_mxfp4_moe_quant_selectors() {
+    // Sabomako/mradermacher layout: `mxfp4_moe` multiparts were silently
+    // dropped, and `*.mmproj-Q8_0.gguf` was mixed into the Q8_0 weight group.
+    let weights = fixture_bytes(30_000);
+    let mmproj = fixture_bytes(3_000);
+    let mxfp4_p1 = fixture_bytes(10_000);
+    let mxfp4_p2 = fixture_bytes(11_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "Sabomako/heretic-GGUF".to_string(),
+        files: vec![
+            FileEntry {
+                path: "model.Q8_0.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&weights)),
+                content: weights.clone(),
+            },
+            FileEntry {
+                path: "model.mmproj-Q8_0.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&mmproj)),
+                content: mmproj.clone(),
+            },
+            FileEntry {
+                path: "model.mxfp4_moe-00001-of-00002.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&mxfp4_p1)),
+                content: mxfp4_p1.clone(),
+            },
+            FileEntry {
+                path: "model.mxfp4_moe-00002-of-00002.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&mxfp4_p2)),
+                content: mxfp4_p2.clone(),
+            },
+        ],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let base = env.models_dir().join("Sabomako/heretic-GGUF");
+
+    // --quant Q8_0 grabs the weights ONLY (mmproj used to pollute this group)
+    let (code, _stdout, stderr) = env
+        .run(&[
+            "download",
+            "Sabomako/heretic-GGUF",
+            "--quant",
+            "Q8_0",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0, "stderr:{}", stderr);
+    assert_file_content(&base.join("model.Q8_0.gguf"), &weights);
+    assert!(!base.join("model.mmproj-Q8_0.gguf").exists());
+
+    // --quant mmproj selects the projector (own group now)
+    let (code, _, stderr) = env
+        .run(&[
+            "download",
+            "Sabomako/heretic-GGUF",
+            "--quant",
+            "mmproj",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0, "stderr:{}", stderr);
+    assert_file_content(&base.join("model.mmproj-Q8_0.gguf"), &mmproj);
+
+    // --quant mxfp4 selects BOTH multipart files (group used to vanish)
+    let (code, stdout, stderr) = env
+        .run(&[
+            "download",
+            "Sabomako/heretic-GGUF",
+            "--quant",
+            "mxfp4",
+            "--json",
+        ])
+        .await;
+    assert_eq!(code, 0, "stderr:{}", stderr);
+    let resolved = json_lines(&stdout)
+        .into_iter()
+        .find(|e| e["type"] == "resolved")
+        .unwrap();
+    assert_eq!(resolved["files"].as_array().unwrap().len(), 2);
+    assert_file_content(&base.join("model.mxfp4_moe-00001-of-00002.gguf"), &mxfp4_p1);
+    assert_file_content(&base.join("model.mxfp4_moe-00002-of-00002.gguf"), &mxfp4_p2);
 }
