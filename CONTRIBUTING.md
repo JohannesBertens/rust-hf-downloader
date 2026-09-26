@@ -168,6 +168,16 @@ Include:
 3. Suggested implementation (optional)
 4. Alternative solutions considered (optional)
 
+## Release Process
+
+1. Bump `version` in `Cargo.toml` (refresh `Cargo.lock` with `cargo check`)
+2. Add `changelog/RELEASE_NOTES_X.Y.Z.md` and a summary entry in `changelog/README.md`
+3. Commit and merge the release PR into `main`
+4. Tag the release commit: `git tag vX.Y.Z && git push origin vX.Y.Z`
+5. The tag push triggers `.github/workflows/release.yml`, which builds
+   release binaries on Linux, macOS (arm64), and Windows runners and uploads
+   them as artifacts on the workflow run page
+
 ## Code of Conduct
 
 This project follows the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html).

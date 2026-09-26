@@ -52,6 +52,18 @@ dropping `download_tx` (manager join resolves) and then waiting for
 base URLs — required knowledge for integration tests and mirror users.
 Check `README.md` for more information.
 
+### CI & Release Builds (v2.5.0)
+- `.github/workflows/release.yml` fires ONLY on `v*` tag pushes: builds
+  `cargo build --release --locked` on ubuntu/windows/macos-latest and uploads
+  per-OS binaries as workflow artifacts. No PR/push CI — zero CI load between
+  releases.
+- Release flow: bump Cargo.toml (+lock) → changelog entries → merge PR → push
+  `vX.Y.Z` tag → binaries appear as artifacts on the tag's workflow run.
+- macOS artifacts are arm64 (`macos-latest`); there are no Intel-mac builds.
+- Gotcha: a tag whose workflow file exists only in the tagged commit (not on
+  the default branch) may not trigger the run — tag a commit that is already
+  on `main`.
+
 ### Filter & Sort System (v1.0.0)
 - **Filter State**: `src/ui/app/state.rs` - sort_field, sort_direction, filter_min_*
 - **Filter Logic**: `src/ui/app/events.rs` - keyboard controls and presets

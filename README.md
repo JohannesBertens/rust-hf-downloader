@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.4.0
+# Rust HF Downloader v2.5.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -73,6 +73,13 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 - **Cargo**: Latest stable version
 
 ## Installation
+
+### Prebuilt binaries (CI artifacts)
+
+Every `vX.Y.Z` tag push triggers a GitHub Actions **Release build** on
+Linux, macOS (arm64), and Windows. The compiled binaries are uploaded as
+artifacts of the workflow run for that tag (repo → Actions tab → the run
+for the tag → Artifacts). Downloading artifacts requires a GitHub account.
 
 ### From source
 
@@ -483,6 +490,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.5.0] | 2026-09-25 | CI: tag-triggered release builds on Linux/macOS/Windows runners |
 | [2.4.0] | 2026-09-25 | Quant detection from full recursive tree: subdirectory GGUFs, `MMPROJ` groups, `mxfp4_moe`, `OTHER` fallback; per-file/folder tree downloads (#25) |
 | [2.3.0] | 2026-09-24 | CLI: one-shot `download` + query-only `search` subcommands (JSON output, exit codes, HF_ENDPOINT); shared download engine extracted |
 | [2.2.0] | 2026-09-24 | Activity HUD: compact matrix queue view (chunks, parallel verification, queue) |
