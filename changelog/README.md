@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.7.0] - 2026-09-26
+
+### Version 2.7.0 (2026-09-26)
+- **Added**: `--revision REV` on `download` — fetch from any git branch
+  (incl. `release/1.0`-style names), tag, or commit SHA instead of `main`
+  (issue #28). File listing, resolve URLs, and the registry all follow the
+  revision; TUI resume re-downloads from the recorded revision.
+- **Added**: rate-limit control without a config file (issue #26) —
+  `--rate-limit-mbps MBPS` (implies enabling), `--rate-limit` (configured
+  rate), `--no-rate-limit` (disable); flags override the config file.
+- **Fixed**: unknown repos and revisions now exit `64` with a `not_found`
+  error event instead of a JSON-decode `network` error (metadata/tree
+  fetches call `error_for_status`).
+- **Fixed**: the raw-endpoint fallback rewrite is revision-aware
+  (`/resolve/{rev}/` → `/raw/{rev}/`) instead of hardcoded to `main`.
+- **Tests**: revision-aware e2e mock server + three new e2e tests;
+  arg-parser and config-override unit tests for both features.
+  See [RELEASE_NOTES_2.7.0.md](RELEASE_NOTES_2.7.0.md).
+
 ## [2.6.1] - 2026-09-26
 
 ### Version 2.6.1 (2026-09-26)
@@ -330,7 +349,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For detailed release notes of older versions, see the [changelog directory](.).
 
-[Unreleased]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v1.4.0...main
+[Unreleased]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v2.7.0...main
+[2.7.0]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v2.6.1...v2.7.0
+[2.6.1]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v2.6.0...v2.6.1
+[2.6.0]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v2.5.0...v2.6.0
 [1.4.0]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/JohannesBertens/rust-hf-downloader/compare/v1.3.0...v1.3.1

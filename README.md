@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.6.1
+# Rust HF Downloader v2.7.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -523,6 +523,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.7.0] | 2026-09-26 | `--revision` branch/tag/SHA downloads (#28); `--rate-limit`/`--rate-limit-mbps` CLI flags (#26); 404s map to `not_found` |
 | [2.6.1] | 2026-09-26 | Fix flaky e2e temp-home collision; rename retry for transient FS locks (#37) |
 | [2.6.0] | 2026-09-26 | Cross-platform paths: dirs-based config/registry/download roots, env overrides, portable mode, Windows-safe path sanitization |
 | [2.5.0] | 2026-09-25 | CI: tag-triggered release builds on Linux/macOS/Windows runners |
