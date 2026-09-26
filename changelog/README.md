@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.1] - 2026-09-26
+
+### Version 2.6.1 (2026-09-26)
+- **Fixed**: intermittent e2e failures (incident #37) — parallel tests could
+  share one temp home when `SystemTime::as_nanos()` collided, and the first
+  test's cleanup deleted the other's downloads mid-flight. Test homes now
+  use a process-unique atomic counter.
+- **Fixed**: a transient filesystem lock (antivirus/indexer on Windows,
+  sharing violation/access denied) no longer fails the final
+  `.incomplete → final` rename of an otherwise complete download; it is
+  retried with backoff (5 attempts).
+- **Fixed**: a failed chunk download no longer abandons its sibling chunk
+  tasks, which could keep writing across the retry loop's delete/recreate
+  of the `.incomplete` file.
+- **Tests**: e2e asserts now dump the child's stdout/stderr, present event
+  types, and directory contents on failure — the diagnostics that made #37
+  diagnosable.
+
 ## [2.6.0] - 2026-09-26
 
 ### Version 2.6.0 (2026-09-26)
