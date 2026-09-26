@@ -51,11 +51,40 @@ pub fn sanitize_path_component(component: &str) -> Option<String> {
         return None;
     }
 
+    // Reject any ASCII control character (0x00-0x1F, 0x7F) and the
+    // Windows-illegal characters `< > : " | ? *`. Rejecting these on all
+    // platforms keeps behaviour consistent across Unix and Windows; they
+    // never occur in real HuggingFace file names.
+    if component
+        .chars()
+        .any(|c| c.is_ascii_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
+        return None;
+    }
+
     // Remove leading/trailing whitespace, but preserve leading dots (for dotfiles like .gitattributes)
     // Only trim trailing dots (can cause issues on Windows)
     let trimmed = component.trim().trim_end_matches('.');
 
     if trimmed.is_empty() {
+        return None;
+    }
+
+    // Reject Windows reserved device names, case-insensitive, with or
+    // without a file extension (e.g. `CON`, `con.txt`, `LPT3.gguf` are all
+    // reserved). Opening such names on Windows can target a device or hang
+    // legacy I/O; rejecting them on every platform is safe — they are not
+    // used by real HuggingFace model files.
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    let stem = trimmed
+        .split('.')
+        .next()
+        .unwrap_or(trimmed)
+        .to_ascii_lowercase();
+    if RESERVED.contains(&stem.as_str()) {
         return None;
     }
 
@@ -929,6 +958,62 @@ async fn download_chunk_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_accepts_normal_components() {
+        assert_eq!(
+            sanitize_path_component("Qwen3.5-27B-Q8_0.gguf"),
+            Some("Qwen3.5-27B-Q8_0.gguf".to_string())
+        );
+        assert_eq!(
+            sanitize_path_component(".gitattributes"),
+            Some(".gitattributes".to_string())
+        );
+        assert_eq!(
+            sanitize_path_component("dir v2"),
+            Some("dir v2".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_rejects_windows_illegal_characters() {
+        for bad in ["a<b", "a>b", "a:b", "a\"b", "a|b", "a?b", "a*b"] {
+            assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_control_characters() {
+        for bad in ["a\nb", "a\tb", "a\u{1b}b", "a\u{7f}"] {
+            assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_windows_reserved_device_names() {
+        for bad in [
+            "CON",
+            "con",
+            "con.txt",
+            "LPT3.gguf",
+            "aux",
+            "NUL",
+            "com7.safetensors",
+        ] {
+            assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+        }
+        // Stem-based check must not reject similar-but-fine names.
+        assert!(sanitize_path_component("config.json").is_some());
+        assert!(sanitize_path_component("console.log").is_some());
+        assert!(sanitize_path_component("nul-pre-check.json").is_some());
+    }
+
+    #[test]
+    fn sanitize_rejects_traversal_and_empty() {
+        for bad in ["", ".", "..", "a/b", "a\\\\b", "a\0b", "   ", "..."] {
+            assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+        }
+    }
 
     #[test]
     fn validate_accepts_not_yet_created_base_directory() {

@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.0] - 2026-09-26
+
+### Version 2.6.0 (2026-09-26)
+- **Added**: cross-platform path resolution (`src/paths.rs`) — config,
+  registry, and the default download directory now resolve via the `dirs`
+  crate on Linux, macOS, and Windows instead of hardcoded `$HOME`/`/tmp`
+  paths (which broke Windows entirely). Resolution order: env override
+  (`RUST_HF_DOWNLOADER_CONFIG_DIR` / `_DATA_DIR`) → portable mode
+  (`config.toml` next to the executable) → platform defaults → temp
+  fallback.
+- **Added**: portable mode — drop a `config.toml` next to the exe to run
+  from a USB stick / arbitrary folder.
+- **Changed**: macOS config location moved from `~/.config/jreb/` to
+  `~/Library/Application Support/jreb/` (platform convention). Pre-v2.6
+  configs are still read on first run and migrate on the next save.
+- **Fixed**: path-component sanitization now rejects ASCII control chars,
+  Windows-illegal characters (`< > : " | ? *`), and reserved device names
+  (`CON`, `NUL`, `COM1-9`, `LPT1-9` — case-insensitive, with or without
+  extension) on all platforms.
+- **Changed**: release CI now runs `cargo test --locked` on all three OSes
+  before building artifacts.
+
 ## [2.5.0] - 2026-09-25
 
 ### Version 2.5.0 (2026-09-25)

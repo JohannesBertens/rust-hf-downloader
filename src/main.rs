@@ -5,6 +5,7 @@ mod download;
 mod engine;
 mod http_client;
 mod models;
+mod paths;
 mod rate_limiter;
 mod registry;
 mod ui;

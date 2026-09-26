@@ -2,10 +2,11 @@ use crate::models::AppOptions;
 use std::fs;
 use std::path::PathBuf;
 
-/// Get the path to the configuration file
+/// Get the canonical path to the configuration file.
+/// Writes must always use this path; reads go through
+/// [`crate::paths::read_config_path`] to honour the legacy layout.
 pub fn get_config_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(format!("{}/.config/jreb/config.toml", home))
+    crate::paths::config_path()
 }
 
 /// Ensure the config directory exists
@@ -19,7 +20,7 @@ fn ensure_config_dir() -> Result<(), std::io::Error> {
 
 /// Load configuration from disk, or return defaults if not found
 pub fn load_config() -> AppOptions {
-    let path = get_config_path();
+    let path = crate::paths::read_config_path();
 
     if !path.exists() {
         return AppOptions::default();
@@ -128,29 +129,47 @@ mod tests {
 
     #[test]
     fn test_get_config_path() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let path = get_config_path();
-        assert!(path.to_string_lossy().contains(".config/jreb/config.toml"));
+        // Separator-agnostic assertions (would fail on Windows if built
+        // with hardcoded '/' separators).
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("config.toml")
+        );
+        assert!(path
+            .parent()
+            .and_then(|p| p.file_name())
+            .is_some_and(|d| d.to_str() == Some("jreb")));
     }
 
     #[test]
     fn test_load_nonexistent_config() {
-        // Isolate HOME so the developer's real config file cannot leak into
-        // this test (it asserts defaults, which only hold when no config exists).
+        // Isolate the config dir so the developer's real config file cannot
+        // leak into this test (it asserts defaults, which only hold when no
+        // config exists). Env override also disables the legacy-layout
+        // fallback in paths::read_config_path.
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "rust-hf-downloader-test-config-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("failed to create temp HOME");
+        std::fs::create_dir_all(&tmp).expect("failed to create temp config dir");
 
-        let original_home = std::env::var("HOME").ok();
-        std::env::set_var("HOME", &tmp);
+        let key = crate::paths::ENV_CONFIG_DIR;
+        let original = std::env::var_os(key);
+        std::env::set_var(key, &tmp);
 
         let options = load_config();
 
-        match original_home {
-            Some(home) => std::env::set_var("HOME", home),
-            None => std::env::remove_var("HOME"),
+        match original {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
         }
         let _ = std::fs::remove_dir_all(&tmp);
 

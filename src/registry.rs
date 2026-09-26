@@ -4,8 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 pub fn get_registry_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(format!("{}/models/hf-downloads.toml", home))
+    crate::paths::registry_path()
 }
 
 pub fn load_registry() -> DownloadRegistry {
