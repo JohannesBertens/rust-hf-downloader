@@ -2,10 +2,13 @@
 //!
 //! Runs the real binary (`CARGO_BIN_EXE_rust-hf-downloader`) against an
 //! in-process mock HuggingFace server (hyper, Range-request aware), with full
-//! `HOME` isolation so config, registry, and download directory all land in
-//! per-test temp dirs — see plans/add-cli.md §6.2.
+//! isolation via the `RUST_HF_DOWNLOADER_CONFIG_DIR` / `_DATA_DIR` env
+//! overrides so config, registry, and download directory all land in
+//! per-test temp dirs on every OS (HOME-based isolation stopped working
+//! cross-platform once path resolution moved to `dirs` in v2.6.0).
+//! See plans/add-cli.md §6.2.
 //!
-//! The mock-HOME config.toml shrinks `min_chunk_size`/`max_chunk_size` so
+//! The isolated config.toml shrinks `min_chunk_size`/`max_chunk_size` so
 //! small fixtures still exercise the multi-chunk download path.
 
 use hyper::service::{make_service_fn, service_fn};
@@ -281,11 +284,11 @@ impl TestEnv {
             std::process::id(),
             nanos_suffix()
         ));
-        std::fs::create_dir_all(home.join(".config/jreb")).unwrap();
+        std::fs::create_dir_all(home.join("config")).unwrap();
 
         let config = format!(
             r#"
-default_directory = "{models_dir}"
+default_directory = '{models_dir}'
 hf_token = ""
 concurrent_threads = 4
 num_chunks = 8
@@ -304,7 +307,7 @@ download_rate_limit_mbps = 50.0
 "#,
             models_dir = home.join("models").display(),
         );
-        std::fs::write(home.join(".config/jreb/config.toml"), config).unwrap();
+        std::fs::write(home.join("config/config.toml"), config).unwrap();
 
         Self {
             home,
@@ -314,7 +317,7 @@ download_rate_limit_mbps = 50.0
 
     /// Override scalar engine options in the child config (timeout/retry tests).
     fn set(&self, key: &str, value: &str) {
-        let path = self.home.join(".config/jreb/config.toml");
+        let path = self.home.join("config/config.toml");
         let mut text = std::fs::read_to_string(&path).unwrap();
         let mut updated = false;
         text = text
@@ -350,7 +353,8 @@ download_rate_limit_mbps = 50.0
             Duration::from_secs(60),
             tokio::process::Command::new(binary)
                 .args(args)
-                .env("HOME", &self.home)
+                .env("RUST_HF_DOWNLOADER_CONFIG_DIR", self.home.join("config"))
+                .env("RUST_HF_DOWNLOADER_DATA_DIR", self.home.join("models"))
                 .env("HF_ENDPOINT", &self.endpoint)
                 .env_remove("HF_TOKEN")
                 .current_dir(&self.home)
