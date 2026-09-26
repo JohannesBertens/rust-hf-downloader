@@ -340,6 +340,11 @@ groups, and unrecognized GGUFs appear under `OTHER` instead of vanishing.
 `-q/--quiet`, and `HF_ENDPOINT` (base-URL override for mirrors such as
 `https://hf-mirror.com` or local testing).
 
+Rate limiting can be controlled per-run without editing the config file:
+`--rate-limit-mbps MBPS` enables the limiter at the given rate (e.g.
+`--rate-limit-mbps 25`), `--rate-limit` enables it at the configured rate,
+and `--no-rate-limit` disables it (both flags override the config file).
+
 ### Output and exit codes
 
 Human mode prints progress to **stderr** (single-line rewrites when

@@ -214,6 +214,24 @@ pub struct DownloadArgs {
     /// Suppress progress output; errors and the final summary only
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Enable download rate limiting (uses --rate-limit-mbps or the
+    /// config-file value)
+    #[arg(long, conflicts_with = "no_rate_limit")]
+    pub rate_limit: bool,
+
+    /// Disable download rate limiting (overrides the config file)
+    #[arg(long)]
+    pub no_rate_limit: bool,
+
+    /// Download rate limit in Mbps (implies --rate-limit)
+    #[arg(
+        long,
+        value_name = "MBPS",
+        value_parser = parse_rate_limit_mbps,
+        conflicts_with = "no_rate_limit"
+    )]
+    pub rate_limit_mbps: Option<f64>,
 }
 
 /// Token precedence: `--token` flag → `$HF_TOKEN` env → config file.
@@ -225,6 +243,38 @@ pub fn merge_token(
     flag.filter(|token| !token.is_empty())
         .or_else(|| env.filter(|token| !token.is_empty()))
         .or_else(|| file.filter(|token| !token.is_empty()))
+}
+
+/// Parse a positive, finite `--rate-limit-mbps` value. Zero is rejected
+/// because it would stall the transfer entirely.
+fn parse_rate_limit_mbps(s: &str) -> Result<f64, String> {
+    let v: f64 = s
+        .parse()
+        .map_err(|_| format!("invalid MBPS value {s:?} — expected a positive number"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(format!("rate limit must be a positive MBPS value (got {v})"));
+    }
+    Ok(v)
+}
+
+/// Apply the rate-limit CLI overrides to loaded config options (issue #26:
+/// pipeline use without a config file). Explicit flags win over the config
+/// file; `--no-rate-limit` wins over `--rate-limit`; `--rate-limit-mbps`
+/// implies enabling.
+pub fn apply_rate_limit_overrides(
+    options: &mut crate::models::AppOptions,
+    rate_limit: bool,
+    no_rate_limit: bool,
+    rate_limit_mbps: Option<f64>,
+) {
+    if no_rate_limit {
+        options.download_rate_limit_enabled = false;
+    } else if rate_limit || rate_limit_mbps.is_some() {
+        options.download_rate_limit_enabled = true;
+    }
+    if let Some(mbps) = rate_limit_mbps {
+        options.download_rate_limit_mbps = mbps;
+    }
 }
 
 /// A model ID must be exactly `author/name` with non-empty parts.
@@ -789,6 +839,12 @@ async fn run_download(args: DownloadArgs) -> i32 {
     if let Some(dir) = &args.output {
         options.default_directory = dir.clone();
     }
+    apply_rate_limit_overrides(
+        &mut options,
+        args.rate_limit,
+        args.no_rate_limit,
+        args.rate_limit_mbps,
+    );
     let token = merge_token(
         args.token.clone(),
         std::env::var("HF_TOKEN").ok(),
@@ -1609,6 +1665,9 @@ mod tests {
             no_verify: false,
             json: false,
             quiet: false,
+            rate_limit: false,
+            no_rate_limit: false,
+            rate_limit_mbps: None,
         }
     }
 
@@ -1660,6 +1719,87 @@ mod tests {
     }
 
     // --- CLI parsing --------------------------------------------------------
+
+    // --- Rate-limit overrides (issue #26) ---------------------------------
+
+    #[test]
+    fn rate_limit_overrides() {
+        let mut options = crate::models::AppOptions::default();
+        assert!(!options.download_rate_limit_enabled); // default: off
+        assert_eq!(options.download_rate_limit_mbps, 50.0);
+
+        // --rate-limit-mbps implies enable and sets the rate
+        apply_rate_limit_overrides(&mut options, false, false, Some(12.5));
+        assert!(options.download_rate_limit_enabled);
+        assert_eq!(options.download_rate_limit_mbps, 12.5);
+
+        // --no-rate-limit disables again (rate stays but is unused)
+        apply_rate_limit_overrides(&mut options, false, true, None);
+        assert!(!options.download_rate_limit_enabled);
+
+        // config-enabled survives when no flags are passed
+        options.download_rate_limit_enabled = true;
+        options.download_rate_limit_mbps = 42.0;
+        apply_rate_limit_overrides(&mut options, false, false, None);
+        assert!(options.download_rate_limit_enabled);
+        assert_eq!(options.download_rate_limit_mbps, 42.0);
+
+        // --rate-limit alone enables with the configured rate
+        options.download_rate_limit_enabled = false;
+        apply_rate_limit_overrides(&mut options, true, false, None);
+        assert!(options.download_rate_limit_enabled);
+        assert_eq!(options.download_rate_limit_mbps, 42.0);
+    }
+
+    #[test]
+    fn rate_limit_mbps_parser_rejects_bad_values() {
+        assert_eq!(parse_rate_limit_mbps("10").ok(), Some(10.0));
+        assert_eq!(parse_rate_limit_mbps("10.5").ok(), Some(10.5));
+        assert!(parse_rate_limit_mbps("0").is_err());
+        assert!(parse_rate_limit_mbps("-3").is_err());
+        assert!(parse_rate_limit_mbps("abc").is_err());
+        assert!(parse_rate_limit_mbps("inf").is_err());
+        assert!(parse_rate_limit_mbps("NaN").is_err());
+    }
+
+    #[test]
+    fn rate_limit_flags_parse() {
+        let args = Cli::try_parse_from([
+            "hf-downloader",
+            "download",
+            "a/b",
+            "--rate-limit-mbps",
+            "7.25",
+        ])
+        .unwrap();
+        let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
+            panic!("expected download subcommand");
+        };
+        assert_eq!(args.rate_limit_mbps, Some(7.25));
+        assert!(!args.rate_limit);
+        assert!(!args.no_rate_limit);
+
+        // --rate-limit and --no-rate-limit conflict
+        assert!(Cli::try_parse_from([
+            "hf-downloader",
+            "download",
+            "a/b",
+            "--rate-limit",
+            "--no-rate-limit",
+        ])
+        .is_err());
+
+        // --rate-limit-mbps and --no-rate-limit conflict
+        assert!(Cli::try_parse_from([
+            "hf-downloader",
+            "download",
+            "a/b",
+            "--rate-limit-mbps",
+            "5",
+            "--no-rate-limit",
+        ])
+        .is_err());
+    }
 
     #[test]
     fn version_string_matches_cargo_pkg_version() {
