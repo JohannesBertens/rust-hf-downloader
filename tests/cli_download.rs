@@ -378,11 +378,22 @@ impl Drop for TestEnv {
     }
 }
 
+/// Unique per-process suffix for test-home directories.
+///
+/// Incident #37 root cause: `SystemTime::as_nanos()` alone COLLIDES when
+/// two tests construct a `TestEnv` in the same clock tick — the tests then
+/// share one home, one test's cleanup deletes the other's downloads
+/// mid-flight (sporadic ENOENT / missing files / clobbered registry),
+/// reproducing only under parallel load. The atomic counter guarantees
+/// in-process uniqueness; the pid covers cross-process runs.
 fn nanos_suffix() -> u128 {
-    std::time::SystemTime::now()
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_nanos()
+        .as_nanos();
+    (nanos << 21) | u128::from(seq) // counter can never collide within the process
 }
 
 fn fixture_bytes(len: usize) -> Vec<u8> {
