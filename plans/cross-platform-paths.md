@@ -1,6 +1,6 @@
 # Plan: Cross-platform path resolution (config, registry, downloads) for all environments
 
-**Status:** proposed — not started. Target release: **v2.6.0**
+**Status:** implemented on `feature/cross-platform-paths`; shipped in **v2.6.0**
 **Goal:** Replace the three `$HOME`-hardcoded, `/tmp`-fallback path sites with a
 centralized `src/paths.rs` module backed by the `dirs` crate, so config,
 registry, and default downloads resolve correctly on **Linux, macOS, and
