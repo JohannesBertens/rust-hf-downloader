@@ -412,8 +412,50 @@ fn json_lines(stdout: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Assert the child's exit code, dumping BOTH streams on failure.
+///
+/// Incident #37: the Windows-only flake produced exit 1 with empty stderr
+/// because JSON-mode error events go to stdout — asserts that only printed
+/// stderr were blind.
+fn assert_exit_code(code: i32, expected: i32, stdout: &str, stderr: &str) {
+    assert_eq!(
+        code, expected,
+        "exit {code} != {expected}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
+    );
+}
+
+/// Find the first event of `ty`, dumping every event type present (plus the
+/// raw stdout) on failure. Incident #37: bare `.unwrap()` on the find
+/// printed nothing, hiding whether e.g. a `verification_error` (file
+/// reported missing) replaced the expected `verification_result`.
+fn event_of<'a>(events: &'a [Value], ty: &str, stdout: &str) -> &'a Value {
+    events.iter().find(|e| e["type"] == ty).unwrap_or_else(|| {
+        let present: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
+        panic!("no {ty:?} event; event types present: {present:?}\n--- stdout ---\n{stdout}")
+    })
+}
+
 fn assert_file_content(path: &Path, expected: &[u8]) {
-    let actual = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let actual = std::fs::read(path).unwrap_or_else(|e| {
+        // Incident #37 diagnostics: list the directory so a missing file is
+        // distinguishable from a renamed-elsewhere file (e.g. an orphaned
+        // `.incomplete` sibling).
+        let mut siblings = Vec::new();
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::read_dir(parent) {
+                siblings.extend(dir.flatten().map(|d| d.path().display().to_string()));
+            }
+        }
+        panic!(
+            "read {}: {}\ndirectory contents of {}: {:?}",
+            path.display(),
+            e,
+            path.parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            siblings
+        )
+    });
     assert_eq!(
         actual,
         expected,
@@ -452,7 +494,7 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         .run(&["download", "a/b", "--file", "model-Q4_K_M.gguf", "--json"])
         .await;
 
-    assert_eq!(code, 0, "stdout:\n{}\nstderr:\n{}", stdout, stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     let events = json_lines(&stdout);
     let types: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
@@ -465,19 +507,13 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
     assert_eq!(types.last(), Some(&"done"), "types: {:?}", types);
 
     // Multi-chunk config really split the file (chunk count > 1)
-    let start = events
-        .iter()
-        .find(|e| e["type"] == "download_start")
-        .unwrap();
+    let start = event_of(&events, "download_start", &stdout);
     assert_eq!(start["size_bytes"].as_u64(), Some(2 * 1024 * 1024));
 
     // File on disk with exact bytes, in the author/model layout
     assert_file_content(&env.models_dir().join("a/b/model-Q4_K_M.gguf"), &content);
     // Verification passed
-    let verify = events
-        .iter()
-        .find(|e| e["type"] == "verification_result")
-        .unwrap();
+    let verify = event_of(&events, "verification_result", &stdout);
     assert_eq!(verify["ok"], json!(true));
     // Registry marked complete
     let registry = env.registry_toml();
@@ -505,7 +541,7 @@ async fn human_mode_summary_on_stdout() {
     let env = TestEnv::new(&endpoint);
     // Single-file repo: implicit selector works without --file/--all
     let (code, stdout, stderr) = env.run(&["download", "a/b"]).await;
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert!(
         stdout.starts_with("Done: 1 file(s)"),
         "stdout: {:?}",
@@ -540,22 +576,16 @@ async fn already_exists_skips_download_and_verifies() {
     std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
     std::fs::write(&dest, &content).unwrap();
 
-    let (code, stdout, _stderr) = env
+    let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     let events = json_lines(&stdout);
-    let complete = events
-        .iter()
-        .find(|e| e["type"] == "file_complete")
-        .unwrap();
+    let complete = event_of(&events, "file_complete", &stdout);
     assert_eq!(complete["status"], json!("already_exists"));
     // Existing file was still hash-verified
-    let verify = events
-        .iter()
-        .find(|e| e["type"] == "verification_result")
-        .unwrap();
+    let verify = event_of(&events, "verification_result", &stdout);
     assert_eq!(verify["ok"], json!(true));
 }
 
@@ -582,7 +612,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
-    assert_eq!(code, 1, "stderr: {}", stderr);
+    assert_exit_code(code, 1, &stdout, &stderr);
 
     let events = json_lines(&stdout);
     // done first, error event is always the LAST line on failure
@@ -590,10 +620,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
     assert_eq!(last["type"], json!("error"));
     assert_eq!(last["code"], json!("hash_mismatch"));
     // mismatch event carries both hashes
-    let mismatch = events
-        .iter()
-        .find(|e| e["type"] == "verification_result")
-        .unwrap();
+    let mismatch = event_of(&events, "verification_result", &stdout);
     assert_eq!(mismatch["ok"], json!(false));
     assert_eq!(mismatch["expected_sha256"], json!(wrong));
     assert_eq!(mismatch["actual_sha256"], json!(sha256_hex(&content)));
@@ -624,7 +651,7 @@ async fn gated_repo_exits_two() {
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
-    assert_eq!(code, 2, "stdout: {}\nstderr: {}", stdout, stderr);
+    assert_exit_code(code, 2, &stdout, &stderr);
 
     let events = json_lines(&stdout);
     let last = events.last().unwrap();
@@ -657,8 +684,8 @@ async fn ambiguous_selector_exits_64_with_available_list() {
     .await;
 
     let env = TestEnv::new(&endpoint);
-    let (code, stdout, _stderr) = env.run(&["download", "a/b", "--json"]).await;
-    assert_eq!(code, 64);
+    let (code, stdout, stderr) = env.run(&["download", "a/b", "--json"]).await;
+    assert_exit_code(code, 64, &stdout, &stderr);
 
     let events = json_lines(&stdout);
     let error = events.last().unwrap();
@@ -700,15 +727,13 @@ async fn quant_selector_downloads_only_that_quantization() {
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--quant", "Q4_K_M", "--json"])
         .await;
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     assert_file_content(&env.models_dir().join("a/b/model-Q4_K_M.gguf"), &q4);
     assert!(!env.models_dir().join("a/b/model-Q8_0.gguf").exists());
 
-    let resolved = json_lines(&stdout)
-        .into_iter()
-        .find(|e| e["type"] == "resolved")
-        .unwrap();
+    let events = json_lines(&stdout);
+    let resolved = event_of(&events, "resolved", &stdout);
     assert_eq!(resolved["files"].as_array().unwrap().len(), 1);
 }
 
@@ -740,15 +765,13 @@ async fn all_selector_downloads_every_file() {
 
     let env = TestEnv::new(&endpoint);
     let (code, stdout, stderr) = env.run(&["download", "a/b", "--all", "--json"]).await;
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     assert_file_content(&env.models_dir().join("a/b/one.gguf"), &one);
     assert_file_content(&env.models_dir().join("a/b/two.gguf"), &two);
 
-    let done = json_lines(&stdout)
-        .into_iter()
-        .find(|e| e["type"] == "done")
-        .unwrap();
+    let events = json_lines(&stdout);
+    let done = event_of(&events, "done", &stdout);
     assert_eq!(done["summary"]["downloaded"], json!(2));
     assert_eq!(done["summary"]["verified"], json!(2));
 }
@@ -780,7 +803,7 @@ async fn transient_timeout_is_retried() {
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
-    assert_eq!(code, 0, "stdout: {}\nstderr: {}", stdout, stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(&env.models_dir().join("a/b/model.gguf"), &content);
 }
 
@@ -803,7 +826,7 @@ async fn no_verify_skips_verification_events() {
     .await;
 
     let env = TestEnv::new(&endpoint);
-    let (code, stdout, _stderr) = env
+    let (code, stdout, stderr) = env
         .run(&[
             "download",
             "a/b",
@@ -813,7 +836,7 @@ async fn no_verify_skips_verification_events() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     let events = json_lines(&stdout);
     let types: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
@@ -822,10 +845,8 @@ async fn no_verify_skips_verification_events() {
         "types: {:?}",
         types
     );
-    let done = json_lines(&stdout)
-        .into_iter()
-        .find(|e| e["type"] == "done")
-        .unwrap();
+    let events = json_lines(&stdout);
+    let done = event_of(&events, "done", &stdout);
     assert_eq!(done["summary"]["verified"], json!(0));
 }
 
@@ -852,7 +873,7 @@ async fn raw_endpoint_fallback_after_resolve_404() {
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
-    assert_eq!(code, 0, "stdout: {}\nstderr: {}", stdout, stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(&env.models_dir().join("a/b/model.gguf"), &content);
     // Registry URL was updated to the successful raw endpoint
     assert!(
@@ -938,7 +959,7 @@ async fn search_json_returns_array_and_applies_filters() {
     let (code, stdout, stderr) = env
         .run(&["search", "model", "--min-downloads", "1000", "--json"])
         .await;
-    assert_eq!(code, 0, "stderr: {}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     // The 50-download model was filtered out client-side
@@ -953,7 +974,7 @@ async fn search_sort_name_orders_client_side() {
     let env = TestEnv::new(&endpoint);
 
     // explicit ascending: fixture order (by downloads) is re-sorted a..z
-    let (code, stdout, _stderr) = env
+    let (code, stdout, stderr) = env
         .run(&[
             "search",
             "model",
@@ -964,7 +985,7 @@ async fn search_sort_name_orders_client_side() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
     let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     let ids: Vec<&str> = results.iter().filter_map(|r| r["id"].as_str()).collect();
     assert_eq!(
@@ -973,10 +994,10 @@ async fn search_sort_name_orders_client_side() {
     );
 
     // default direction (config default_sort_direction = Descending) → z..a
-    let (code, stdout, _stderr) = env
+    let (code, stdout, stderr) = env
         .run(&["search", "model", "--sort", "name", "--json"])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
     let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
     let ids: Vec<&str> = results.iter().filter_map(|r| r["id"].as_str()).collect();
     assert_eq!(
@@ -990,10 +1011,10 @@ async fn search_limit_is_forwarded_to_the_api() {
     let endpoint = spawn_mock(search_repo()).await;
     let env = TestEnv::new(&endpoint);
 
-    let (code, stdout, _stderr) = env
+    let (code, stdout, stderr) = env
         .run(&["search", "model", "--limit", "2", "--json"])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
 
     // The mock honors limit= from the query string; 3 fixtures -> 2 results
     let results: Vec<Value> = serde_json::from_str(&stdout).unwrap();
@@ -1008,7 +1029,7 @@ async fn search_human_table_and_empty_results() {
     let (code, stdout, stderr) = env
         .run(&["search", "model", "--min-downloads", "1000"])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert!(stdout.contains("MODEL ID"), "stdout: {:?}", stdout);
     assert!(stdout.contains("zeta/large-model"));
     // utils::format_number rendering in the table
@@ -1016,16 +1037,16 @@ async fn search_human_table_and_empty_results() {
     assert!(stderr.contains("2 model(s)"), "stderr: {:?}", stderr);
 
     // Successful query with zero hits is still exit 0
-    let (code, stdout, _stderr) = env
+    let (code, stdout, stderr) = env
         .run(&["search", "model", "--min-downloads", "999999999", "--json"])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_eq!(stdout.trim(), "[]");
 
     let (code, stdout, stderr) = env
         .run(&["search", "model", "--min-downloads", "999999999"])
         .await;
-    assert_eq!(code, 0);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert!(stdout.is_empty());
     assert!(stderr.contains("No models found"), "stderr: {:?}", stderr);
 }
@@ -1051,8 +1072,8 @@ async fn search_network_error_emits_error_event_and_exits_one() {
         .port();
     let env = TestEnv::new(&format!("http://127.0.0.1:{}", port));
 
-    let (code, stdout, _stderr) = env.run(&["search", "model", "--json"]).await;
-    assert_eq!(code, 1);
+    let (code, stdout, stderr) = env.run(&["search", "model", "--json"]).await;
+    assert_exit_code(code, 1, &stdout, &stderr);
     let events = json_lines(&stdout);
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["type"], json!("error"));
@@ -1110,16 +1131,14 @@ async fn nested_subdirectory_files_download_and_verify() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0, "stdout:\n{}\nstderr:{}", stdout, stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(
         &env.models_dir()
             .join("Ex0bit/PRISM-LITE-GGUF/Dynamic/model.gguf"),
         &weights,
     );
-    let verify = json_lines(&stdout)
-        .into_iter()
-        .find(|e| e["type"] == "verification_result")
-        .unwrap();
+    let events = json_lines(&stdout);
+    let verify = event_of(&events, "verification_result", &stdout);
     assert_eq!(verify["ok"], json!(true));
 
     // --quant other resolves the unclassified nested GGUF (was: dropped)
@@ -1132,11 +1151,9 @@ async fn nested_subdirectory_files_download_and_verify() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0, "stderr:{}", stderr);
-    let resolved = json_lines(&stdout)
-        .into_iter()
-        .find(|e| e["type"] == "resolved")
-        .unwrap();
+    assert_exit_code(code, 0, &stdout, &stderr);
+    let events = json_lines(&stdout);
+    let resolved = event_of(&events, "resolved", &stdout);
     assert_eq!(
         resolved["files"].as_array().unwrap().len(),
         1,
@@ -1145,7 +1162,7 @@ async fn nested_subdirectory_files_download_and_verify() {
     );
 
     // --quant mmproj resolves the nested projector file
-    let (code, _stdout, stderr) = env
+    let (code, stdout, stderr) = env
         .run(&[
             "download",
             "Ex0bit/PRISM-LITE-GGUF",
@@ -1154,7 +1171,7 @@ async fn nested_subdirectory_files_download_and_verify() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0, "stderr:{}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(
         &env.models_dir()
             .join("Ex0bit/PRISM-LITE-GGUF/Dynamic/mmproj-model.gguf"),
@@ -1206,7 +1223,7 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
     let base = env.models_dir().join("Sabomako/heretic-GGUF");
 
     // --quant Q8_0 grabs the weights ONLY (mmproj used to pollute this group)
-    let (code, _stdout, stderr) = env
+    let (code, stdout, stderr) = env
         .run(&[
             "download",
             "Sabomako/heretic-GGUF",
@@ -1215,12 +1232,12 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0, "stderr:{}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(&base.join("model.Q8_0.gguf"), &weights);
     assert!(!base.join("model.mmproj-Q8_0.gguf").exists());
 
     // --quant mmproj selects the projector (own group now)
-    let (code, _, stderr) = env
+    let (code, stdout, stderr) = env
         .run(&[
             "download",
             "Sabomako/heretic-GGUF",
@@ -1229,7 +1246,7 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0, "stderr:{}", stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(&base.join("model.mmproj-Q8_0.gguf"), &mmproj);
 
     // --quant mxfp4 selects BOTH multipart files (group used to vanish)
@@ -1242,11 +1259,9 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
             "--json",
         ])
         .await;
-    assert_eq!(code, 0, "stderr:{}", stderr);
-    let resolved = json_lines(&stdout)
-        .into_iter()
-        .find(|e| e["type"] == "resolved")
-        .unwrap();
+    assert_exit_code(code, 0, &stdout, &stderr);
+    let events = json_lines(&stdout);
+    let resolved = event_of(&events, "resolved", &stdout);
     assert_eq!(resolved["files"].as_array().unwrap().len(), 2);
     assert_file_content(&base.join("model.mxfp4_moe-00001-of-00002.gguf"), &mxfp4_p1);
     assert_file_content(&base.join("model.mxfp4_moe-00002-of-00002.gguf"), &mxfp4_p2);
