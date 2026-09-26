@@ -67,6 +67,13 @@ Resulting user-visible locations:
 | config | `~/.config/jreb/config.toml` *(unchanged)* | `~/Library/Application Support/jreb/config.toml` *(moves from `~/.config/jreb` — see P2)* | `%APPDATA%\jreb\config.toml` |
 | data | `~/models/` *(unchanged)* | `~/models/` *(unchanged)* | `%USERPROFILE%\models\` |
 
+**Decision (maintainer, 2026-09-26): the config directory stays `jreb` on all
+platforms.** Rationale: `~/.config/jreb` is the existing Linux location (since
+v0.9.0); a single `APP_DIR` constant keeps one code path and simple docs; on
+Windows/macOS (new platforms, no legacy) the short brand name is acceptable.
+Do not "fix" this to `rust-hf-downloader` — changing it later would require a
+legacy-read migration on every platform.
+
 ## 3. Phases
 
 ### P1 — `src/paths.rs` module + rewire the three sites
