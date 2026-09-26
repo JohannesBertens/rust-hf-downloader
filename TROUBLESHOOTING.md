@@ -11,6 +11,7 @@ This document covers common issues, their causes, and solutions.
 - [Performance Issues](#performance-issues)
 - [File Path Issues](#file-path-issues)
 - [Configuration Issues](#configuration-issues)
+- [Platform-Specific Issues (Windows / macOS)](#platform-specific-issues-windows--macos)
 
 ## Installation Issues
 
@@ -296,9 +297,67 @@ chmod 755 ~/models
 
 ### Cannot Find Configuration File
 
-**Location**: `~/.config/jreb/config.toml`
+**Location** (per platform — see README "Where your files live"):
+
+- Linux: `~/.config/jreb/config.toml`
+- macOS: `~/Library/Application Support/jreb/config.toml`
+- Windows: `%APPDATA%\jreb\config.toml`
+
+Also check the `RUST_HF_DOWNLOADER_CONFIG_DIR` env var and portable mode
+(a `config.toml` next to the executable redirects everything). On macOS,
+pre-v2.6 configs at `~/.config/jreb/config.toml` are still read and
+migrate on the next save.
 
 If missing, the application will regenerate defaults on next start.
+
+## Platform-Specific Issues (Windows / macOS)
+
+### Windows: SmartScreen blocks the binary
+
+**Symptom**: "Windows protected your PC" when running the downloaded exe
+
+**Solution**: The CI artifacts are unsigned. Click *More info* → *Run
+anyway*, or build from source. Verify the SHA256 against the artifact
+digest on the Actions run page if in doubt.
+
+### Windows: no colors / garbled UI
+
+**Symptom**: Escape sequences render as text or the TUI looks broken
+
+**Solution**: Use a modern ANSI-capable terminal (Windows Terminal is
+recommended; classic `cmd.exe` conhost support is limited).
+
+### Windows: HF token not persisted
+
+**Solution**: `HF_TOKEN` is read from the environment at startup and can be
+saved from the options screen (`o`). To set it permanently:
+
+```powershell
+[Environment]::SetEnvironmentVariable("HF_TOKEN", "hf_...", "User")
+```
+
+### Windows: long paths
+
+Deep HF repo paths can exceed the classic 260-character `MAX_PATH` limit.
+Prefer a short download root (e.g. `%USERPROFILE%\models` — the default)
+and enable Windows long-path support if you use custom locations:
+<https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation>
+
+### macOS: config moved in v2.6
+
+**Symptom**: settings seem reset after upgrading
+
+**Cause**: the config moved from `~/.config/jreb/` to
+`~/Library/Application Support/jreb/` (platform convention).
+
+**Solution**: on first run the old file is still read and migrates on the
+next save. If that did not happen (e.g. you changed defaults first), copy
+it manually:
+
+```bash
+mkdir -p ~/Library/Application\ Support/jreb
+cp ~/.config/jreb/config.toml ~/Library/Application\ Support/jreb/
+```
 
 ## Still Having Issues?
 

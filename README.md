@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.5.0
+# Rust HF Downloader v2.6.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -80,6 +80,26 @@ Every `vX.Y.Z` tag push triggers a GitHub Actions **Release build** on
 Linux, macOS (arm64), and Windows. The compiled binaries are uploaded as
 artifacts of the workflow run for that tag (repo → Actions tab → the run
 for the tag → Artifacts). Downloading artifacts requires a GitHub account.
+
+### Where your files live (per platform)
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Config | `~/.config/jreb/config.toml` | `~/Library/Application Support/jreb/config.toml` | `%APPDATA%\jreb\config.toml` |
+| Registry + default downloads | `~/models/` | `~/models/` | `%USERPROFILE%\models\` |
+
+Two mechanisms can redirect these locations:
+
+- **Env overrides**: `RUST_HF_DOWNLOADER_CONFIG_DIR` and
+  `RUST_HF_DOWNLOADER_DATA_DIR` (config root and data root respectively;
+  non-empty values only).
+- **Portable mode**: place a `config.toml` next to the executable — the
+  exe's folder becomes the config root and `<exe>/models/` the data root.
+  Useful for running from a USB stick or an arbitrary folder.
+
+On first run after upgrading on macOS, a config previously stored at
+`~/.config/jreb/config.toml` is still read; the next save migrates it to
+the new location.
 
 ### From source
 
@@ -490,6 +510,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.6.0] | 2026-09-26 | Cross-platform paths: dirs-based config/registry/download roots, env overrides, portable mode, Windows-safe path sanitization |
 | [2.5.0] | 2026-09-25 | CI: tag-triggered release builds on Linux/macOS/Windows runners |
 | [2.4.0] | 2026-09-25 | Quant detection from full recursive tree: subdirectory GGUFs, `MMPROJ` groups, `mxfp4_moe`, `OTHER` fallback; per-file/folder tree downloads (#25) |
 | [2.3.0] | 2026-09-24 | CLI: one-shot `download` + query-only `search` subcommands (JSON output, exit codes, HF_ENDPOINT); shared download engine extracted |
