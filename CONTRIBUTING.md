@@ -177,6 +177,9 @@ Include:
 5. The tag push triggers `.github/workflows/release.yml`, which builds
    release binaries on Linux, macOS (arm64), and Windows runners and uploads
    them as artifacts on the workflow run page
+6. Publish to crates.io: `cargo publish` (verify first with
+   `cargo publish --dry-run`; publishing is permanent and cannot be undone)
+   and verify the new version at <https://crates.io/crates/rust-hf-downloader>
 
 ## Code of Conduct
 
