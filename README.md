@@ -285,6 +285,9 @@ rust-hf-downloader search "mistral gguf" --min-downloads 1000 --json | jq '.[0].
 # Download a specific quantization
 rust-hf-downloader download bartowski/Qwen2.5-7B-GGUF --quant Q4_K_M
 
+# Download from a specific branch or commit (repos with an empty main)
+rust-hf-downloader download org/model --revision 2.0bpw --file model.gguf
+
 # Exact file(s), whole repo, custom destination
 rust-hf-downloader download org/model --file README.md --file config.json
 rust-hf-downloader download org/model --all -o /data/models
@@ -339,6 +342,11 @@ groups, and unrecognized GGUFs appear under `OTHER` instead of vanishing.
 `--token TOKEN` (default `$HF_TOKEN`, then config), `--no-verify`,
 `-q/--quiet`, and `HF_ENDPOINT` (base-URL override for mirrors such as
 `https://hf-mirror.com` or local testing).
+
+`--revision REV` downloads from a git branch, tag, or commit SHA instead of
+`main` (issue #28) — the file listing and all resolve URLs follow the
+revision, and registry entries record it so the TUI resumes from the right
+source. Unknown revisions exit `64` (`not_found`).
 
 Rate limiting can be controlled per-run without editing the config file:
 `--rate-limit-mbps MBPS` enables the limiter at the given rate (e.g.

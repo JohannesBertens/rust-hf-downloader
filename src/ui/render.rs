@@ -2630,6 +2630,7 @@ mod snapshot_tests {
                 downloaded_size: 1_230_465_024,
                 status: DownloadStatus::Incomplete,
                 expected_sha256: None,
+                revision: None,
             },
             DownloadMetadata {
                 model_id: "Qwen/Qwen2.5-7B".to_string(),
@@ -2642,6 +2643,7 @@ mod snapshot_tests {
                 downloaded_size: 4_250_000_000,
                 status: DownloadStatus::Incomplete,
                 expected_sha256: None,
+                revision: None,
             },
         ];
         let mut terminal = test_terminal();

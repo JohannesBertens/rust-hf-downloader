@@ -206,7 +206,14 @@ impl App {
                 // Fetch SHA256 hashes for all files
                 let token = self.options.hf_token.as_ref();
                 let sha256_map = if num_files > 1 {
-                    match fetch_multipart_sha256s(&model.id, &filenames_to_download, token).await {
+                    match fetch_multipart_sha256s(
+                        &model.id,
+                        crate::api::DEFAULT_REVISION,
+                        &filenames_to_download,
+                        token,
+                    )
+                    .await
+                    {
                         Ok(map) => map,
                         Err(e) => {
                             *self.status.write() = format!("Warning: Failed to fetch SHA256 hashes: {}. Downloads will proceed without verification.", e);
@@ -235,7 +242,8 @@ impl App {
                             }
                         };
 
-                    let url = crate::api::resolve_url(&model.id, filename);
+                    let url =
+                        crate::api::resolve_url(&model.id, filename, crate::api::DEFAULT_REVISION);
                     let local_path_str = validated_path.to_string_lossy().to_string();
 
                     // Only add if not already in registry
@@ -259,6 +267,7 @@ impl App {
                             downloaded_size: 0,
                             status: DownloadStatus::Incomplete,
                             expected_sha256,
+                            revision: None,
                         });
                     }
                 }
@@ -302,6 +311,7 @@ impl App {
                         .download_tx
                         .send((
                             model.id.clone(),
+                            crate::api::DEFAULT_REVISION.to_string(),
                             filename.clone(),
                             model_path.clone(),
                             sha256,
@@ -383,6 +393,10 @@ impl App {
 
             let _ = self.download_tx.send((
                 metadata.model_id.clone(),
+                metadata
+                    .revision
+                    .clone()
+                    .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string()),
                 metadata.filename.clone(),
                 base_path,
                 metadata.expected_sha256.clone(),
@@ -507,7 +521,8 @@ impl App {
                             }
                         };
 
-                    let url = crate::api::resolve_url(&model.id, filename);
+                    let url =
+                        crate::api::resolve_url(&model.id, filename, crate::api::DEFAULT_REVISION);
                     let local_path_str = validated_path.to_string_lossy().to_string();
 
                     // Only add if not already in registry
@@ -524,6 +539,7 @@ impl App {
                             downloaded_size: 0,
                             status: DownloadStatus::Incomplete,
                             expected_sha256,
+                            revision: None,
                         });
                     }
                 }
@@ -566,6 +582,7 @@ impl App {
                         .download_tx
                         .send((
                             model.id.clone(),
+                            crate::api::DEFAULT_REVISION.to_string(),
                             file.rfilename.clone(),
                             model_root.clone(),
                             sha256,
@@ -674,7 +691,7 @@ impl App {
                 }
             };
 
-            let url = crate::api::resolve_url(&model.id, filename);
+            let url = crate::api::resolve_url(&model.id, filename, crate::api::DEFAULT_REVISION);
             let local_path_str = validated_path.to_string_lossy().to_string();
 
             if !registry.downloads.iter().any(|d| d.url == url) {
@@ -687,6 +704,7 @@ impl App {
                     downloaded_size: 0,
                     status: DownloadStatus::Incomplete,
                     expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+                    revision: None,
                 });
             }
         }
@@ -723,6 +741,7 @@ impl App {
                 .download_tx
                 .send((
                     model.id.clone(),
+                    crate::api::DEFAULT_REVISION.to_string(),
                     file.rfilename.clone(),
                     model_root.clone(),
                     sha256,

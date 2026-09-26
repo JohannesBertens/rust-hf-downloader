@@ -232,6 +232,11 @@ pub struct DownloadArgs {
         conflicts_with = "no_rate_limit"
     )]
     pub rate_limit_mbps: Option<f64>,
+
+    /// Git revision to download from: branch, tag, or commit SHA
+    /// [default: main]
+    #[arg(long, value_name = "REV", value_parser = parse_revision)]
+    pub revision: Option<String>,
 }
 
 /// Token precedence: `--token` flag → `$HF_TOKEN` env → config file.
@@ -252,7 +257,9 @@ fn parse_rate_limit_mbps(s: &str) -> Result<f64, String> {
         .parse()
         .map_err(|_| format!("invalid MBPS value {s:?} — expected a positive number"))?;
     if !v.is_finite() || v <= 0.0 {
-        return Err(format!("rate limit must be a positive MBPS value (got {v})"));
+        return Err(format!(
+            "rate limit must be a positive MBPS value (got {v})"
+        ));
     }
     Ok(v)
 }
@@ -275,6 +282,27 @@ pub fn apply_rate_limit_overrides(
     if let Some(mbps) = rate_limit_mbps {
         options.download_rate_limit_mbps = mbps;
     }
+}
+
+/// Validate a `--revision` value (issue #28): branch names, tags, and
+/// commit SHAs. Slash-separated branch names (`release/1.0`) are allowed;
+/// empty values, `..`, and leading/trailing slashes are not (they would
+/// corrupt the resolve/tree URL paths).
+fn parse_revision(s: &str) -> Result<String, String> {
+    if s.is_empty() {
+        return Err("revision must not be empty".to_string());
+    }
+    if s == ".." || s.starts_with('/') || s.ends_with('/') || s.contains("..") {
+        return Err(format!(
+            "invalid revision {s:?} — not a branch, tag, or commit SHA"
+        ));
+    }
+    if s.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!(
+            "invalid revision {s:?} — control characters are not allowed"
+        ));
+    }
+    Ok(s.to_string())
 }
 
 /// A model ID must be exactly `author/name` with non-empty parts.
@@ -859,6 +887,10 @@ async fn run_download(args: DownloadArgs) -> i32 {
     }
 
     // --- 2. Validate usage ------------------------------------------------
+    let revision = args
+        .revision
+        .clone()
+        .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
     if !valid_model_id(&args.model_id) {
         reporter.emit(&Event::Error {
             code: "usage".to_string(),
@@ -883,22 +915,23 @@ async fn run_download(args: DownloadArgs) -> i32 {
     };
 
     // --- 3. Resolve files ---------------------------------------------------
-    let metadata = match crate::api::fetch_model_metadata(&args.model_id, token.as_ref()).await {
-        Ok(metadata) => metadata,
-        Err(e) => {
-            let not_found = e.status() == Some(reqwest::StatusCode::NOT_FOUND);
-            reporter.emit(&Event::Error {
-                code: if not_found {
-                    "not_found".to_string()
-                } else {
-                    "network".to_string()
-                },
-                message: format!("failed to fetch model info for {}: {}", args.model_id, e),
-                available: None,
-            });
-            return if not_found { EXIT_USAGE } else { EXIT_FAILURE };
-        }
-    };
+    let metadata =
+        match crate::api::fetch_model_metadata(&args.model_id, &revision, token.as_ref()).await {
+            Ok(metadata) => metadata,
+            Err(e) => {
+                let not_found = e.status() == Some(reqwest::StatusCode::NOT_FOUND);
+                reporter.emit(&Event::Error {
+                    code: if not_found {
+                        "not_found".to_string()
+                    } else {
+                        "network".to_string()
+                    },
+                    message: format!("failed to fetch model info for {}: {}", args.model_id, e),
+                    available: None,
+                });
+                return if not_found { EXIT_USAGE } else { EXIT_FAILURE };
+            }
+        };
 
     // Quantization groups derive (pure) from the recursive tree already
     // fetched with the metadata — no second API round-trip. Issue #25:
@@ -935,7 +968,9 @@ async fn run_download(args: DownloadArgs) -> i32 {
         .iter()
         .map(|f| (f.filename.clone(), f.size_bytes, f.sha256.clone()))
         .collect();
-    if let Err(message) = crate::engine::register_pending(&args.model_id, &pending, &base) {
+    if let Err(message) =
+        crate::engine::register_pending(&args.model_id, &revision, &pending, &base)
+    {
         reporter.emit(&Event::Error {
             code: "invalid_path".to_string(),
             message,
@@ -975,6 +1010,7 @@ async fn run_download(args: DownloadArgs) -> i32 {
     for file in &files {
         let _ = download_tx.send((
             args.model_id.clone(),
+            revision.clone(),
             file.filename.clone(),
             model_path.clone(),
             file.sha256.clone(),
@@ -1668,6 +1704,7 @@ mod tests {
             rate_limit: false,
             no_rate_limit: false,
             rate_limit_mbps: None,
+            revision: None,
         }
     }
 
@@ -1799,6 +1836,55 @@ mod tests {
             "--no-rate-limit",
         ])
         .is_err());
+    }
+
+    // --- --revision (issue #28) -------------------------------------------
+
+    #[test]
+    fn revision_parser_accepts_branches_tags_and_shas() {
+        assert_eq!(parse_revision("main").ok(), Some("main".to_string()));
+        assert_eq!(parse_revision("2.0bpw").ok(), Some("2.0bpw".to_string()));
+        // slash-separated branch names are legal
+        assert_eq!(
+            parse_revision("release/1.0").ok(),
+            Some("release/1.0".to_string())
+        );
+        assert_eq!(
+            parse_revision("0123456789abcdef").ok(),
+            Some("0123456789abcdef".to_string())
+        );
+
+        // rejections: empty, traversal, slashes at the edges, whitespace
+        assert!(parse_revision("").is_err());
+        assert!(parse_revision("..").is_err());
+        assert!(parse_revision("a/../b").is_err());
+        assert!(parse_revision("/main").is_err());
+        assert!(parse_revision("main/").is_err());
+        assert!(parse_revision("two words").is_err());
+        assert!(parse_revision("ta\tb").is_err());
+    }
+
+    #[test]
+    fn revision_flag_parses_into_args() {
+        let args =
+            Cli::try_parse_from(["hf-downloader", "download", "a/b", "--revision", "2.0bpw"])
+                .unwrap();
+        let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
+            panic!("expected download subcommand");
+        };
+        assert_eq!(args.revision.as_deref(), Some("2.0bpw"));
+
+        // absent → None (engine defaults to main)
+        let args = Cli::try_parse_from(["hf-downloader", "download", "a/b"]).unwrap();
+        let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
+            panic!("expected download subcommand");
+        };
+        assert_eq!(args.revision, None);
+
+        // traversal is rejected at the parser level
+        assert!(
+            Cli::try_parse_from(["hf-downloader", "download", "a/b", "--revision", "..",]).is_err()
+        );
     }
 
     #[test]

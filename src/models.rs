@@ -155,6 +155,10 @@ pub struct DownloadMetadata {
     pub status: DownloadStatus,
     #[serde(default)]
     pub expected_sha256: Option<String>,
+    /// Git revision (branch/tag/SHA) this entry was downloaded from.
+    /// Absent in registries written before v2.7.0 — treated as `main`.
+    #[serde(default)]
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

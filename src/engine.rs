@@ -31,8 +31,18 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
-/// Download message tuple: (model_id, filename, path, sha256, hf_token, total_size)
-pub type DownloadMessage = (String, String, PathBuf, Option<String>, Option<String>, u64);
+/// One queued download: (model_id, revision, filename, base_path,
+/// expected_sha256, hf_token, total_size). `revision` is a branch, tag, or
+/// commit SHA (issue #28); it flows into resolve URLs and registry entries.
+pub type DownloadMessage = (
+    String,
+    String,
+    String,
+    PathBuf,
+    Option<String>,
+    Option<String>,
+    u64,
+);
 
 /// Type alias for download receiver to reduce complexity
 pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
@@ -139,7 +149,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
             // Lock only when receiving, release immediately after. This
             // prevents deadlock by not holding download_rx while acquiring
             // other locks (see AGENTS.md lock hierarchy).
-            let (model_id, filename, base_path, sha256, hf_token, total_size) = {
+            let (model_id, revision, filename, base_path, sha256, hf_token, total_size) = {
                 let mut rx = state.download_rx.lock().await;
                 match rx.recv().await {
                     Some(msg) => msg,
@@ -162,6 +172,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
 
             let outcome = start_download(DownloadParams {
                 model_id,
+                revision,
                 filename,
                 base_path,
                 progress: state.download_progress.clone(),
@@ -198,6 +209,7 @@ pub fn spawn_verification_worker(state: EngineState) -> JoinHandle<()> {
 /// same rules as the TUI) and returns the first validation error, if any.
 pub fn register_pending(
     model_id: &str,
+    revision: &str,
     files: &[(String, u64, Option<String>)],
     base_path: &str,
 ) -> Result<(), String> {
@@ -207,7 +219,7 @@ pub fn register_pending(
         let validated_path =
             crate::download::validate_and_sanitize_path(base_path, model_id, filename)?;
 
-        let url = crate::api::resolve_url(model_id, filename);
+        let url = crate::api::resolve_url(model_id, filename, revision);
         let local_path_str = validated_path.to_string_lossy().to_string();
 
         if !registry.downloads.iter().any(|d| d.url == url) {
@@ -220,6 +232,11 @@ pub fn register_pending(
                 downloaded_size: 0,
                 status: DownloadStatus::Incomplete,
                 expected_sha256: sha256.clone(),
+                revision: if revision == crate::api::DEFAULT_REVISION {
+                    None
+                } else {
+                    Some(revision.to_string())
+                },
             });
         }
     }
@@ -300,6 +317,7 @@ mod tests {
         for name in ["f.bin", "g.bin"] {
             tx.send((
                 "a/b".to_string(),
+                crate::api::DEFAULT_REVISION.to_string(),
                 name.to_string(),
                 tmp.clone(),
                 None,

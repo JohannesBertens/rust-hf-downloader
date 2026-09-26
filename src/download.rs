@@ -15,6 +15,8 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 /// Parameters for starting a download
 pub struct DownloadParams {
     pub model_id: String,
+    /// Git revision (branch/tag/SHA) to download from (issue #28).
+    pub revision: String,
     pub filename: String,
     pub base_path: PathBuf,
     pub progress: Arc<Mutex<Option<DownloadProgress>>>,
@@ -29,6 +31,8 @@ pub struct DownloadParams {
 /// Parameters for chunked download
 struct ChunkedDownloadParams<'a> {
     url: &'a str,
+    /// Git revision the URL points at; stored on registry entries (issue #28).
+    revision: &'a str,
     incomplete_path: &'a PathBuf,
     final_path: &'a PathBuf,
     progress: &'a Arc<Mutex<Option<DownloadProgress>>>,
@@ -200,6 +204,7 @@ pub fn validate_and_sanitize_path(
 pub async fn start_download(params: DownloadParams) -> FileOutcome {
     let DownloadParams {
         model_id,
+        revision,
         filename,
         base_path,
         progress,
@@ -233,7 +238,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
         sanitized_parts.join("/")
     };
 
-    let url = crate::api::resolve_url(&model_id, &sanitized_filename);
+    let url = crate::api::resolve_url(&model_id, &sanitized_filename, &revision);
 
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&base_path).await {
@@ -383,6 +388,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
             filename: &filename,
             expected_sha256: &expected_sha256,
             hf_token: &hf_token,
+            revision: &revision,
         };
 
         match download_chunked(chunked_params, &model_id).await {
@@ -619,6 +625,7 @@ async fn download_chunked(
 > {
     let ChunkedDownloadParams {
         url,
+        revision,
         incomplete_path,
         final_path,
         progress,
@@ -644,8 +651,9 @@ async fn download_chunked(
         Ok(resp) => match resp.error_for_status() {
             Ok(r) => (r, url.to_string()),
             Err(e) if e.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
-                // Try raw endpoint as fallback
-                let raw_url = url.replace("/resolve/main/", "/raw/main/");
+                // Try raw endpoint as fallback (revision-agnostic rewrite:
+                // `/resolve/{rev}/` -> `/raw/{rev}/`)
+                let raw_url = url.replacen("/resolve/", "/raw/", 1);
                 let _ = status_tx.send(format!("404 error, trying raw endpoint for: {}", filename));
 
                 let raw_response = client
@@ -698,6 +706,11 @@ async fn download_chunked(
             downloaded_size: 0,
             status: DownloadStatus::Incomplete,
             expected_sha256: expected_sha256.clone(),
+            revision: if revision == crate::api::DEFAULT_REVISION {
+                None
+            } else {
+                Some(revision.to_string())
+            },
         });
     }
 

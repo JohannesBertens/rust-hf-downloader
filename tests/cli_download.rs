@@ -49,6 +49,11 @@ struct MockRepo {
     /// is ignored (full-text matching is the real API's job) but `limit=`
     /// from the query string is honored, mirroring the upstream contract.
     search_results: Vec<Value>,
+    /// Extra revisions (branch names, slash-free) this repo serves in
+    /// addition to `main`. When set, `main` serves an EMPTY tree — the
+    /// issue #28 layout where all files live on a branch. Unknown
+    /// revisions 404, like the real Hub.
+    branches: Vec<String>,
 }
 
 impl MockRepo {
@@ -139,14 +144,21 @@ async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
         let body = json!({ "id": repo.model_id });
         return response_json(StatusCode::OK, &body);
     }
-    if path == format!("{}/tree/main", api_prefix) {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(Body::from(repo.tree_json()))
-            .unwrap();
-    }
-    if let Some(subdir) = path.strip_prefix(&format!("{}/tree/main/", api_prefix)) {
+    if let Some(rest) = path.strip_prefix(&format!("{}/tree/", api_prefix)) {
+        // rest is "<rev>" or "<rev>/<subdir>" (mock branches are slash-free)
+        let (rev, subdir) = match rest.split_once('/') {
+            Some((rev, subdir)) => (rev, subdir),
+            None => (rest, ""),
+        };
+        let known = rev == "main" || repo.branches.iter().any(|b| b == rev);
+        // With branches configured, main is the empty branch (issue #28)
+        let empty_main = rev == "main" && !repo.branches.is_empty();
+        if !known || empty_main {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap();
+        }
         return Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
@@ -154,18 +166,29 @@ async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
             .unwrap();
     }
 
-    let resolve_prefix = format!("/{}/resolve/main/", repo.model_id);
-    let raw_prefix = format!("/{}/raw/main/", repo.model_id);
+    // main plus any configured branch revision (mock branches are slash-free)
+    let mut revisions = vec!["main".to_string()];
+    revisions.extend(repo.branches.iter().cloned());
 
-    let (file_path, is_raw) = if let Some(rest) = path.strip_prefix(&resolve_prefix) {
-        (rest.to_string(), false)
-    } else if let Some(rest) = path.strip_prefix(&raw_prefix) {
-        (rest.to_string(), true)
-    } else {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .unwrap();
+    let mut file_path: Option<(String, bool)> = None;
+    for rev in &revisions {
+        if let Some(rest) = path.strip_prefix(&format!("/{}/resolve/{}/", repo.model_id, rev)) {
+            file_path = Some((rest.to_string(), false));
+            break;
+        }
+        if let Some(rest) = path.strip_prefix(&format!("/{}/raw/{}/", repo.model_id, rev)) {
+            file_path = Some((rest.to_string(), true));
+            break;
+        }
+    }
+    let (file_path, is_raw) = match file_path {
+        Some(pair) => pair,
+        None => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap();
+        }
     };
 
     if repo.gated && !is_raw {
@@ -497,6 +520,7 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         sleep_once: None,
         per_request_delay: Duration::from_millis(10),
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -546,6 +570,7 @@ async fn human_mode_summary_on_stdout() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -577,6 +602,7 @@ async fn already_exists_skips_download_and_verifies() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -616,6 +642,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -655,6 +682,7 @@ async fn gated_repo_exits_two() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -691,6 +719,7 @@ async fn ambiguous_selector_exits_64_with_available_list() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -731,6 +760,7 @@ async fn quant_selector_downloads_only_that_quantization() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -771,6 +801,7 @@ async fn all_selector_downloads_every_file() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -803,6 +834,7 @@ async fn transient_timeout_is_retried() {
         sleep_once: Some(Duration::from_secs(3)),
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -833,6 +865,7 @@ async fn no_verify_skips_verification_events() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -877,6 +910,7 @@ async fn raw_endpoint_fallback_after_resolve_404() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -894,6 +928,126 @@ async fn raw_endpoint_fallback_after_resolve_404() {
     );
 }
 
+// --- --revision (issue #28) -----------------------------------------------
+
+/// The issue #28 layout: `main` is empty and all files live on a branch.
+/// `--revision` must switch the tree listing AND the resolve URLs.
+#[tokio::test]
+async fn revision_flag_downloads_from_branch() {
+    let content = fixture_bytes(60_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![FileEntry {
+            path: "model-2.0bpw.gguf".to_string(),
+            advertised_sha256: Some(sha256_hex(&content)),
+            content: content.clone(),
+        }],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+        branches: vec!["2.0bpw".to_string()],
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let (code, stdout, stderr) = env
+        .run(&[
+            "download",
+            "a/b",
+            "--revision",
+            "2.0bpw",
+            "--file",
+            "model-2.0bpw.gguf",
+            "--json",
+        ])
+        .await;
+    assert_exit_code(code, 0, &stdout, &stderr);
+
+    let events = json_lines(&stdout);
+    let types: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
+    assert!(types.contains(&"file_complete"), "types: {:?}", types);
+
+    // Correct bytes from the branch, in the standard layout
+    assert_file_content(&env.models_dir().join("a/b/model-2.0bpw.gguf"), &content);
+
+    // Registry bookkeeping keeps the branch URL and records the revision
+    let registry = env.registry_toml();
+    assert!(
+        registry.contains("/resolve/2.0bpw/model-2.0bpw.gguf"),
+        "registry: {}",
+        registry
+    );
+    assert!(
+        registry.contains("revision = \"2.0bpw\""),
+        "registry: {}",
+        registry
+    );
+    assert!(registry.contains("Complete"), "registry: {}", registry);
+}
+
+/// Without `--revision`, an empty `main` branch is the pre-#28 failure:
+/// nothing to download → ambiguous/no-files exit 64.
+#[tokio::test]
+async fn revision_default_main_empty_exits_64() {
+    let content = fixture_bytes(10_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![FileEntry {
+            path: "model.gguf".to_string(),
+            advertised_sha256: Some(sha256_hex(&content)),
+            content: content.clone(),
+        }],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+        branches: vec!["2.0bpw".to_string()],
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let (code, stdout, stderr) = env
+        .run(&["download", "a/b", "--file", "model.gguf", "--json"])
+        .await;
+    assert_exit_code(code, 64, &stdout, &stderr);
+    assert!(stdout.contains("error"), "stdout: {}", stdout);
+}
+
+/// An unknown revision 404s on the tree endpoint and maps to exit 64
+/// (not_found), like an unknown model.
+#[tokio::test]
+async fn revision_unknown_branch_exits_64() {
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+        branches: vec!["2.0bpw".to_string()],
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let (code, stdout, stderr) = env
+        .run(&[
+            "download",
+            "a/b",
+            "--revision",
+            "no-such-branch",
+            "--file",
+            "model.gguf",
+            "--json",
+        ])
+        .await;
+    assert_exit_code(code, 64, &stdout, &stderr);
+    assert!(stdout.contains("not_found"), "stdout: {}", stdout);
+}
+
 #[tokio::test]
 async fn usage_errors_exit_64() {
     let endpoint = spawn_mock(MockRepo {
@@ -904,6 +1058,7 @@ async fn usage_errors_exit_64() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
     let env = TestEnv::new(&endpoint);
@@ -959,6 +1114,7 @@ fn search_repo() -> MockRepo {
             model("alpha/small-model", 1_500, 10),
             model("mid/obscure-model", 50, 0),
         ],
+        branches: Vec::new(),
     }
 }
 
@@ -1126,6 +1282,7 @@ async fn nested_subdirectory_files_download_and_verify() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 
@@ -1227,6 +1384,7 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
+        branches: Vec::new(),
     })
     .await;
 

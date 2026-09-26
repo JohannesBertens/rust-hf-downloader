@@ -243,7 +243,9 @@ impl App {
                 meta // Use cached metadata
             } else {
                 // Fetch and cache metadata
-                match fetch_model_metadata(&model_id, token.as_ref()).await {
+                match fetch_model_metadata(&model_id, crate::api::DEFAULT_REVISION, token.as_ref())
+                    .await
+                {
                     Ok(meta) => {
                         let mut cache = api_cache.write();
                         cache.metadata.insert(model_id.clone(), meta.clone());
@@ -462,7 +464,12 @@ impl App {
                     meta // Use cached
                 } else {
                     // Fetch and cache metadata with double-check using Entry API
-                    let meta_to_store = match fetch_model_metadata(&model_id, token.as_ref()).await
+                    let meta_to_store = match fetch_model_metadata(
+                        &model_id,
+                        crate::api::DEFAULT_REVISION,
+                        token.as_ref(),
+                    )
+                    .await
                     {
                         Ok(meta) => {
                             let mut cache = api_cache.write();

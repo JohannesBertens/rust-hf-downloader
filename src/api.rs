@@ -19,11 +19,21 @@ pub fn api_base() -> String {
         .to_string()
 }
 
+/// The revision used when the user doesn't pick one (issue #28). A
+/// "revision" is a branch name, tag, or git commit SHA in Hub terms.
+pub const DEFAULT_REVISION: &str = "main";
+
 /// Canonical `resolve` download URL for a repo file. Used by the download
 /// engine, the registry bookkeeping in both frontends, and the CLI — keeping
 /// one builder guarantees the URLs always match.
-pub fn resolve_url(model_id: &str, filename: &str) -> String {
-    format!("{}/{}/resolve/main/{}", api_base(), model_id, filename)
+pub fn resolve_url(model_id: &str, filename: &str, revision: &str) -> String {
+    format!(
+        "{}/{}/resolve/{}/{}",
+        api_base(),
+        model_id,
+        revision,
+        filename
+    )
 }
 
 /// Fetch models with sorting and filtering parameters.
@@ -98,15 +108,19 @@ pub async fn fetch_models_filtered(
 /// Fetch detailed model metadata from /api/models/{model_id}
 pub async fn fetch_model_metadata(
     model_id: &str,
+    revision: &str,
     token: Option<&String>,
 ) -> Result<ModelMetadata, reqwest::Error> {
     let url = format!("{}/api/models/{}", api_base(), model_id);
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    // Surface HTTP errors (unknown repo, auth) as status errors so callers
+    // can distinguish not_found/auth from decode failures.
+    let response = response.error_for_status()?;
     let mut metadata: ModelMetadata = response.json().await?;
 
     // Fetch the complete file tree recursively
-    let all_files = fetch_recursive_tree(model_id, "", token).await?;
+    let all_files = fetch_recursive_tree(model_id, "", revision, token).await?;
 
     // Convert ModelFile to RepoFile with proper size information
     metadata.siblings = all_files
@@ -125,18 +139,27 @@ pub async fn fetch_model_metadata(
 fn fetch_recursive_tree<'a>(
     model_id: &'a str,
     path: &'a str,
+    revision: &'a str,
     token: Option<&'a String>,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Vec<ModelFile>, reqwest::Error>> + Send + 'a>,
 > {
     Box::pin(async move {
         let tree_url = if path.is_empty() {
-            format!("{}/api/models/{}/tree/main", api_base(), model_id)
+            format!("{}/api/models/{}/tree/{}", api_base(), model_id, revision)
         } else {
-            format!("{}/api/models/{}/tree/main/{}", api_base(), model_id, path)
+            format!(
+                "{}/api/models/{}/tree/{}/{}",
+                api_base(),
+                model_id,
+                revision,
+                path
+            )
         };
 
         let response = crate::http_client::get_with_optional_token(&tree_url, token).await?;
+        // Unknown revision → 404 → not_found for the caller (issue #28).
+        let response = response.error_for_status()?;
         let items: Vec<ModelFile> = response.json().await?;
 
         let mut all_files = Vec::new();
@@ -144,7 +167,9 @@ fn fetch_recursive_tree<'a>(
         for item in items {
             if item.file_type == "directory" {
                 // Recursively fetch contents of this directory
-                if let Ok(subdir_files) = fetch_recursive_tree(model_id, &item.path, token).await {
+                if let Ok(subdir_files) =
+                    fetch_recursive_tree(model_id, &item.path, revision, token).await
+                {
                     all_files.extend(subdir_files);
                 }
             } else {
@@ -269,12 +294,13 @@ fn sort_tree_recursive(node: &mut FileTreeNode) {
 #[allow(dead_code)]
 pub async fn fetch_model_files(
     model_id: &str,
+    revision: &str,
     token: Option<&String>,
 ) -> Result<Vec<QuantizationGroup>, reqwest::Error> {
     // Thin wrapper kept for API compatibility: classification is a pure
     // function over the full recursive tree (see `classify_quantizations`),
     // so a single metadata fetch is all we need.
-    let metadata = fetch_model_metadata(model_id, token).await?;
+    let metadata = fetch_model_metadata(model_id, revision, token).await?;
     Ok(classify_quantizations(&metadata.siblings))
 }
 
@@ -429,11 +455,12 @@ pub fn classify_quantizations(files: &[RepoFile]) -> Vec<QuantizationGroup> {
 /// Returns a HashMap mapping filename to its SHA256 hash (if available)
 pub async fn fetch_multipart_sha256s(
     model_id: &str,
+    revision: &str,
     filenames: &[String],
     token: Option<&String>,
 ) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
     // Single API call to get all files
-    let url = format!("{}/api/models/{}/tree/main", api_base(), model_id);
+    let url = format!("{}/api/models/{}/tree/{}", api_base(), model_id, revision);
 
     let response = crate::http_client::get_with_optional_token(&url, token).await?;
     let files: Vec<ModelFile> = response.json().await?;
@@ -697,6 +724,26 @@ mod tests {
     // Unit tests for pure helper functions. No network access: fixtures are
     // constructed directly and no fetch_* function is called.
     use super::*;
+
+    #[test]
+    fn resolve_url_embeds_revision() {
+        // Expectations are built from api_base() itself so the test stays
+        // correct under HF_ENDPOINT overrides (mirrors, CI).
+        let base = api_base();
+        assert_eq!(
+            resolve_url("a/b", "model.gguf", DEFAULT_REVISION),
+            format!("{base}/a/b/resolve/main/model.gguf")
+        );
+        assert_eq!(
+            resolve_url("a/b", "sub/model.gguf", "2.0bpw"),
+            format!("{base}/a/b/resolve/2.0bpw/sub/model.gguf")
+        );
+        // commit SHA revisions use the same shape
+        assert_eq!(
+            resolve_url("a/b", "m.gguf", "0123456789abcdef"),
+            format!("{base}/a/b/resolve/0123456789abcdef/m.gguf")
+        );
+    }
 
     fn repo_file(path: &str, size: u64) -> RepoFile {
         RepoFile {
