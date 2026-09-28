@@ -74,12 +74,55 @@ A Terminal User Interface (TUI) application for searching, browsing, and downloa
 
 ## Installation
 
-### Prebuilt binaries (CI artifacts)
+### One-liner (recommended)
 
-Every `vX.Y.Z` tag push triggers a GitHub Actions **Release build** on
-Linux, macOS (arm64), and Windows. The compiled binaries are uploaded as
-artifacts of the workflow run for that tag (repo → Actions tab → the run
-for the tag → Artifacts). Downloading artifacts requires a GitHub account.
+**Linux / macOS** (any POSIX shell — installs or upgrades to the newest
+release, no admin rights needed):
+```bash
+curl -fsSL https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.sh | sh
+```
+
+**Windows** (PowerShell 5.1 or later):
+```powershell
+irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1 | iex
+```
+
+Both scripts auto-detect OS and architecture, download the newest release,
+verify its SHA256 checksum against the release's `SHA256SUMS`, install to a
+user-local bin directory (`~/.local/bin` on Linux/macOS,
+`%LOCALAPPDATA%\Programs\rust-hf-downloader` on Windows), and add it to your
+`PATH` if needed. **Re-running the one-liner upgrades in place** — it is
+always safe to re-run.
+
+Useful variants:
+
+```bash
+BASE=https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.sh
+# pin a specific version
+curl -fsSL $BASE | sh -s -- --version v2.8.0
+# see what would happen without changing anything
+curl -fsSL $BASE | sh -s -- --dry-run
+# install somewhere else / remove it again
+curl -fsSL $BASE | sh -s -- --install-dir /usr/local/bin
+curl -fsSL $BASE | sh -s -- --uninstall
+```
+
+```powershell
+# Windows, with options
+& ([scriptblock]::Create((irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1))) -Version v2.8.0
+```
+
+### Prebuilt binaries (GitHub Releases)
+
+Every `vX.Y.Z` tag push publishes a **GitHub Release** with prebuilt
+binaries for Linux (x86_64, arm64), macOS (Apple Silicon, Intel), and
+Windows (x64): grab them from the
+[releases page](https://github.com/JohannesBertens/rust-hf-downloader/releases).
+Assets are named by Rust target triple (e.g.
+`rust-hf-downloader-x86_64-unknown-linux-gnu.tar.gz`); verify against the
+release's `SHA256SUMS`, extract, and put `rust-hf-downloader` on your
+`PATH`. The same files are also uploaded as workflow-run artifacts
+(Actions tab), but the release assets need no GitHub login to download.
 
 ### Where your files live (per platform)
 

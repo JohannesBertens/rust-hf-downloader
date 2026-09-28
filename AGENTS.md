@@ -53,14 +53,30 @@ dropping `download_tx` (manager join resolves) and then waiting for
 base URLs — required knowledge for integration tests and mirror users.
 Check `README.md` for more information.
 
-### CI & Release Builds (v2.5.0)
-- `.github/workflows/release.yml` fires ONLY on `v*` tag pushes: builds
-  `cargo build --release --locked` on ubuntu/windows/macos-latest and uploads
-  per-OS binaries as workflow artifacts. No PR/push CI — zero CI load between
-  releases.
+### CI & Release Builds (v2.8.0)
+- `.github/workflows/release.yml` fires ONLY on `v*` tag pushes and has two
+  phases: (1) a `build` matrix that compiles + tests every supported target
+  and packages each binary with a STABLE asset name
+  (`rust-hf-downloader-<target-triple>.tar.gz` / `.zip`); (2) a `release`
+  job that generates `SHA256SUMS` and publishes the GitHub Release via
+  `softprops/action-gh-release@v2` with the binaries, checksums, and the
+  one-liner installers (`install.sh`, `install.ps1`) attached. No PR/push
+  CI — zero CI load between releases.
+- Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (cross,
+  gcc-aarch64-linux-gnu linker), `aarch64-apple-darwin`,
+  `x86_64-apple-darwin` (cross from the arm64 runner),
+  `x86_64-pc-windows-msvc`. Tests run only on the three native runners.
+- Stable asset names are load-bearing: `releases/latest/download/<asset>` is
+  a GitHub CDN redirect with no api.github.com rate limit, which is how the
+  installers resolve "newest version" without the API (and without jq).
+  Do NOT put the version number into asset file names.
+- One-liner installers live at repo root (`install.sh`, `install.ps1`) and
+  are attached to each release by CI. They are testable offline via
+  `RHD_DOWNLOAD_BASE` (e.g. a local dir over `file://` or an http server).
 - Release flow: bump Cargo.toml (+lock) → changelog entries → merge PR → push
-  `vX.Y.Z` tag → binaries appear as artifacts on the tag's workflow run.
-- macOS artifacts are arm64 (`macos-latest`); there are no Intel-mac builds.
+  `vX.Y.Z` tag → release with binaries + installers appears.
+- macOS arm64 builds come from `macos-latest`; Intel macs are covered by a
+  cross-compiled `x86_64-apple-darwin` build on the same runner.
 - Gotcha: a tag whose workflow file exists only in the tagged commit (not on
   the default branch) may not trigger the run — tag a commit that is already
   on `main`.

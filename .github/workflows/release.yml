@@ -1,26 +1,134 @@
-# Fires once per release: pushing a vX.Y.Z tag builds release binaries on
-# all three OSes and uploads them as workflow artifacts.
-# Release flow stays as-is: bump Cargo.toml version, commit, tag, push tag.
+# One GitHub Release per vX.Y.Z tag.
+#
+# Flow per tag push:
+#   1. `build` matrix compiles + tests every supported target (native runs
+#      execute the test suite; cross runs skip it) and packages each binary
+#      with a STABLE asset name (`rust-hf-downloader-<target-triple>.ext`).
+#      Stable names matter: GitHub serves
+#      `releases/latest/download/<asset>` as a CDN redirect with no
+#      api.github.com rate limit, which is what lets the one-liner
+#      installers resolve "newest version" without the API or jq.
+#   2. `release` downloads all packaged artifacts, generates SHA256SUMS,
+#      and publishes the GitHub Release with the binaries, checksums, and
+#      the install.sh / install.ps1 one-liner installers attached.
+#
+# Release flow stays as-is: bump Cargo.toml version (+lock), changelog
+# entries, merge PR, push `vX.Y.Z` tag. The tag must point at a commit
+# already on `main` (tag-only workflow files may not trigger).
 name: Release build
 
 on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write # release job creates the GitHub Release
+
 jobs:
   build:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Native builds — the test suite runs on these runners.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            tests: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            tests: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            tests: true
+          # Cross builds — compiled on a native host for another arch,
+          # tests skipped (binary cannot run on the host).
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            tests: false
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            tests: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install aarch64-linux cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - run: cargo test --locked
-      - run: cargo build --release --locked
+        if: matrix.tests
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: tar -czf "rust-hf-downloader-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" rust-hf-downloader
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path "target\${{ matrix.target }}\release\rust-hf-downloader.exe" -DestinationPath "rust-hf-downloader-${{ matrix.target }}.zip"
       - uses: actions/upload-artifact@v4
         with:
-          name: rust-hf-downloader-${{ runner.os }}
-          path: target/release/rust-hf-downloader${{ runner.os == 'Windows' && '.exe' || '' }}
+          name: rust-hf-downloader-${{ matrix.target }}
+          path: rust-hf-downloader-*
+
+  release:
+    name: Create GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum rust-hf-downloader-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create release with binaries and installers
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Install / upgrade (one line)
+
+            **Linux / macOS** (any POSIX shell):
+            ```
+            curl -fsSL https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.sh | sh
+            ```
+
+            **Windows** (PowerShell 5.1 or later):
+            ```
+            irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1 | iex
+            ```
+
+            Both scripts auto-detect OS and architecture, download the newest
+            release for this platform, verify the SHA256 checksum, install to a
+            user-local bin directory (no admin rights required), and upgrade in
+            place when re-run — re-running is always safe. Pin a version with
+            `sh -s -- --version vX.Y.Z` / `-Version vX.Y.Z`.
+
+            ### Manual download
+
+            Binaries are named by Rust target triple. Pick yours, verify
+            against `SHA256SUMS`, extract, and put `rust-hf-downloader` on your
+            `PATH`:
+
+            | Asset triple | Platform |
+            |---|---|
+            | `x86_64-unknown-linux-gnu` | Linux x86_64 |
+            | `aarch64-unknown-linux-gnu` | Linux arm64 |
+            | `aarch64-apple-darwin` | macOS Apple Silicon |
+            | `x86_64-apple-darwin` | macOS Intel |
+            | `x86_64-pc-windows-msvc` | Windows x64 |
+          files: |
+            dist/rust-hf-downloader-*
+            dist/SHA256SUMS
+            install.sh
+            install.ps1
