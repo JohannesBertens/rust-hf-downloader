@@ -1,15 +1,16 @@
 ---
 name: hf-downloader
-description: Download HuggingFace models (specific GGUF quantizations, exact files, or whole repos) with SHA256 verification, and search the HuggingFace hub for model IDs. Use when asked to fetch, download, mirror, or verify HuggingFace models/weights, or to resolve a vague model request into a concrete repo. Requires rust-hf-downloader >= 2.3.0 (both subcommands).
+description: Download HuggingFace models (specific GGUF quantizations, exact files, or whole repos) with SHA256 verification, and search the HuggingFace hub for model IDs. Use when asked to fetch, download, mirror, or verify HuggingFace models/weights, or to resolve a vague model request into a concrete repo. Requires rust-hf-downloader >= 2.3.0 (search/download); `update` (>= 2.10.0) upgrades the binary in place.
 license: MIT
 ---
 
 # HF Downloader
 
-Non-interactive, machine-friendly HuggingFace downloads. Two subcommands:
-`search` (discover a model ID) and `download` (fetch it). Never launch the
-TUI for automation — the CLI subcommands cover the whole flow with stable
-JSON contracts and deterministic exit codes.
+Non-interactive, machine-friendly HuggingFace downloads. Three subcommands:
+`search` (discover a model ID), `download` (fetch it), and `update` (upgrade
+the rust-hf-downloader binary itself). Never launch the TUI for automation —
+the CLI subcommands cover the whole flow with stable JSON contracts and
+deterministic exit codes.
 
 ## Core loop: probe → select → download → decide
 
@@ -75,3 +76,14 @@ Read these only when needed:
 - `scripts/hf-get.sh` — ready-made probe→select→download wrapper (requires
   `jq`); also serves as a regression test of the JSON contract. Run it
   relative to this skill directory.
+
+## Keeping the tool current (>= 2.10.0)
+
+```bash
+rust-hf-downloader update --check   # exit 70 when newer exists
+rust-hf-downloader update           # verify (SHA256) + swap in place
+```
+
+Use `update --check` before long download sessions; the running binary is
+replaced only by an explicit `update` (never mid-session). Exit `71` means
+checksum mismatch — the binary was left untouched.

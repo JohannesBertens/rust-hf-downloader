@@ -9,6 +9,7 @@ mod paths;
 mod rate_limiter;
 mod registry;
 mod ui;
+mod update;
 mod utils;
 mod verification;
 

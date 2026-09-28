@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.10.0] - 2026-09-28
+
+### Version 2.10.0 (2026-09-28)
+- **Added**: `update` subcommand — built-in self-update: resolves the newest
+  release from the new `latest.json` manifest asset (rate-limit-free CDN
+  redirect), downloads the platform asset, verifies the SHA256, and swaps the
+  binary atomically (`self_replace`); `--check` exits 70, checksum mismatch
+  exits 71; `RHD_UPDATE_BASE` mirror override; NDJSON `--json` events.
+- **Added**: TUI top bar shows the running version (`vX.Y.Z`) flush-right in
+  the filter toolbar; on narrow bars the badge outranks the decorative preset
+  indicator. Future home of update notifications.
+- **Internal**: documentation audit (plans index, changelog completion,
+  module-map fixes); new update e2e suite (6 tests) + unit tests.
+  See [RELEASE_NOTES_2.10.0.md](RELEASE_NOTES_2.10.0.md).
+
+## [2.9.0] - 2026-09-28
+
+### Version 2.9.0 (2026-09-28)
+- **Added**: installer cargo-takeover — a `cargo install` copy in
+  `~/.cargo/bin` is upgraded in place (with a `cargo uninstall` handoff so
+  cargo's install records stay clean); `$CARGO_HOME/bin` becomes the default
+  install dir when on `PATH` (cargo-binstall convention); volta-style
+  post-install shadow detection warns when another copy resolves first.
+- **Fixed**: `install.ps1` no longer depends on `Get-Command` for PATH
+  resolution (cache does not refresh after runtime PATH updates) and handles
+  the Unix `PATH` vs Windows `Path` variable-name difference.
+  See [RELEASE_NOTES_2.9.0.md](RELEASE_NOTES_2.9.0.md).
+
+## [2.8.0] - 2026-09-28
+
+### Version 2.8.0 (2026-09-28)
+- **Added**: tag pushes now publish a GitHub Release with prebuilt binaries
+  for five target triples (linux x86_64/arm64, macOS Apple Silicon/Intel,
+  Windows x64), `SHA256SUMS`, and the one-liner installers attached.
+- **Added**: one-liner installer/upgrader — `curl -fsSL …/install.sh | sh`
+  (Linux/macOS) and `irm …/install.ps1 | iex` (Windows): auto platform
+  detection, newest-release resolution via the `releases/latest/download`
+  CDN redirect (no API, no jq), SHA256 verification, user-local install, and
+  in-place upgrade when re-run. Pinning, dry-run, and uninstall supported.
+  See [RELEASE_NOTES_2.8.0.md](RELEASE_NOTES_2.8.0.md).
+
 ## [2.7.0] - 2026-09-26
 
 ### Version 2.7.0 (2026-09-26)

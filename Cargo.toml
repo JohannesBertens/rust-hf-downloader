@@ -1,6 +1,6 @@
 [package]
 name = "rust-hf-downloader"
-version = "2.9.0"
+version = "2.10.0"
 description = "TUI for searching and downloading HuggingFace models"
 authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
@@ -29,6 +29,16 @@ toml = "0.8"
 sha2 = "0.10"
 hex = "0.4"
 once_cell = "1.19"
+self-replace = "1"
+
+# `update` subcommand: release-archive extraction, platform-gated so each
+# platform only pulls the codec it serves (unix=tar.gz, windows=zip).
+[target.'cfg(unix)'.dependencies]
+flate2 = "1.0"
+tar = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
 
 # Pin dependencies for Rust 1.75.0 compatibility (Ubuntu 22.04)
 url = "=2.4.1"

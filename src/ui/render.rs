@@ -2043,8 +2043,7 @@ pub fn render_filter_toolbar(
     // filter row leaves no room, the badge is skipped.
     let version_text = format!("v{}", env!("CARGO_PKG_VERSION"));
     let version_width = version_text.len() as u16;
-    let left_width =
-        |parts: &[Span]| parts.iter().map(|s| s.width() as u16).sum::<u16>();
+    let left_width = |parts: &[Span]| parts.iter().map(|s| s.width() as u16).sum::<u16>();
     if preset_added && inner.width <= left_width(&line_parts) + version_width {
         // Drop the preset spans (separator + label — the last two).
         line_parts.truncate(line_parts.len() - 2);

@@ -90,6 +90,29 @@ jobs:
           cd dist
           sha256sum rust-hf-downloader-* > SHA256SUMS
           cat SHA256SUMS
+      - name: Generate latest.json (self-update manifest)
+        run: |
+          cd dist
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSETS=$(jq -Rn 'reduce inputs as $l ({};
+            ($l | select(length > 0) | split("  ")) as [$sha, $name] |
+            ($name | sub("^rust-hf-downloader-"; "") | sub("\\.(tar\\.gz|zip)$"; "")) as $triple |
+            . + {($triple): {
+              name: $name,
+              format: (if $name | endswith("zip") then "zip" else "tar-gz" end),
+              sha256: $sha
+            }})' SHA256SUMS)
+          jq -n \
+            --arg version "$VERSION" \
+            --arg released_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg notes_url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}" \
+            --argjson assets "$ASSETS" \
+            '{version: $version, released_at: $released_at, notes_url: $notes_url, assets: $assets}' > latest.json
+          # The updater resolves assets by target triple; all 5 must be present.
+          if [ "$(jq '.assets | length' latest.json)" -ne 5 ]; then
+            echo "latest.json must list all 5 target triples; got:"; jq -r '.assets | keys[]' latest.json; exit 1
+          fi
+          jq empty latest.json && cat latest.json
       - name: Create release with binaries and installers
         uses: softprops/action-gh-release@v2
         with:
@@ -130,5 +153,6 @@ jobs:
           files: |
             dist/rust-hf-downloader-*
             dist/SHA256SUMS
+            dist/latest.json
             install.sh
             install.ps1

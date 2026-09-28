@@ -1,11 +1,12 @@
 # Plan: `rust-hf-downloader update` — in-app self-update
 
-**Status:** proposed (not implemented)
+**Status:** implemented in **v2.10.0** (CLI + CI manifest; TUI phase 2 — startup
+check + badge notification — remains future work)
 **Goal:** `rust-hf-downloader update` checks for a newer release, downloads the
 matching platform binary, verifies its SHA256, and swaps the running
 installation in place — the v2.8/v2.9 one-liner installers, expressed in Rust,
 so users never need to re-run a shell command. The TUI shows the current
-version in the top bar (shipped separately) and later flags available updates.
+version in the top bar (shipped in v2.10.0) and later flags available updates.
 
 ---
 

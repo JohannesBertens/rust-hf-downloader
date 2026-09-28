@@ -15,11 +15,12 @@ The application follows a modular architecture with clear separation of concerns
 
 ```
 src/
-├── main.rs           # Entry point (~50 lines): `download` subcommand → cli::run; no args → TUI
-├── cli.rs            # One-shot download CLI: args (clap), file resolution, human/JSON reporters
+├── main.rs           # Entry point (~60 lines): `download`/`search` subcommand → cli::run; no args → TUI
+├── cli.rs            # One-shot CLI: `download` + `search` + `update` subcommands (clap), file resolution, human/JSON reporters
 ├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, drain signals
 ├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
+├── update.rs         # Self-update (v2.10.0): latest.json manifest check, SHA256-verified asset download, self_replace swap; RHD_UPDATE_BASE override
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
 ├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
@@ -79,6 +80,10 @@ Check `README.md` for more information.
   hand), prefer `$CARGO_HOME/bin` when it is on PATH (cargo-binstall
   convention, since rustup prepends it to PATH), and run a volta-style
   post-install shadow check that warns when another copy resolves first.
+- The release job also emits `latest.json` (version + per-triple sha256,
+  generated with jq from SHA256SUMS) — the manifest the `update`
+  subcommand consumes via the same CDN redirect. All 5 triples must be
+  present or the release job fails.
 - Release flow: bump Cargo.toml (+lock) → changelog entries → merge PR → push
   `vX.Y.Z` tag → release with binaries + installers appears.
 - macOS arm64 builds come from `macos-latest`; Intel macs are covered by a

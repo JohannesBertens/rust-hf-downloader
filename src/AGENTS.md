@@ -92,6 +92,29 @@ Key modules
 9) utils.rs
 - format_number, format_size helpers for UI
 
+10) cli.rs — one-shot CLI surface (v2.3.0+)
+- `download` + `search` subcommands (clap derive); reuses engine::spawn_manager
+- Human reporter or JSON Lines (`--json`); documented exit-code table
+- `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
+
+11) engine.rs — the single shared download pipeline bootstrap (v2.9.x)
+- EngineState bundle + spawn_manager / spawn_verification_worker
+- Consumed by BOTH the TUI and cli::run_download — never duplicate this logic
+
+12) paths.rs — cross-platform path resolution (v2.6.0)
+- Precedence: env overrides > portable mode (config.toml next to exe) > dirs
+  defaults > temp fallback; never hardcode $HOME or format! paths elsewhere
+
+13) rate_limiter.rs — token-bucket limiter (v1.2.0)
+- Global VERIFICATION/DownloadConfig atomics; single consolidated state lock
+
+14) update.rs — self-update (v2.10.0)
+- `update` subcommand backend: fetch latest.json manifest (RHD_UPDATE_BASE
+  override), strict VersionTriple compare, platform asset by target triple
+- SHA256-verified streamed download to a temp dir; tar.gz (unix) / zip
+  (windows) single-member extraction; `self_replace` atomic swap
+- Own reqwest client — must NEVER send the HF token
+
 Common extension points
 - Add new filters/sorts: update models::SortField/SortDirection, ui render toolbar, events handlers, and api::fetch_models_filtered
 - New verification logic: modify verification.rs and AppOptions + config mapping and UI options

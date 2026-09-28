@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.9.0
+# Rust HF Downloader v2.10.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -175,6 +175,36 @@ automatically:
 - after installing, the installer re-resolves `rust-hf-downloader` the way
   your shell would and **warns** if a different copy (Homebrew, scoop, …)
 still shadows the new one, with removal instructions
+
+### Staying up to date (`update`)
+
+If you installed a prebuilt binary (one-liner or manual), the built-in
+updater keeps it current — the one-liner installer expressed in Rust:
+
+```bash
+rust-hf-downloader update          # check, download, verify, swap in place
+rust-hf-downloader update --check  # report only; exit code 70 when newer exists
+rust-hf-downloader update --json   # NDJSON events for scripts
+```
+
+- Resolves the newest release from the `latest.json` manifest served at
+  `releases/latest/download/latest.json` (GitHub CDN redirect — no API rate
+  limits; requires ≥ v2.10.0 releases)
+- Downloads the asset for your platform, **verifies the SHA256** from the
+  manifest, and atomically replaces the running binary (rename on Unix;
+  rename-aside on Windows)
+- Mirrors: `RHD_UPDATE_BASE` overrides the release base URL entirely (same
+  contract as the installers' `RHD_DOWNLOAD_BASE`)
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Already up to date, or update applied |
+| 1 | Network/manifest/swap failure (see the message) |
+| 70 | `--check` found a newer release (nothing was installed) |
+| 71 | Checksum mismatch (download discarded, binary untouched) |
+
+`cargo install` users should keep using cargo (or let the one-liner take
+over, see above) — `update` replaces whatever binary it runs from.
 
 ### From source
 
@@ -598,6 +628,9 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.10.0] | 2026-09-28 | `update` subcommand: self-update with SHA256 verification and atomic swap (`latest.json` manifest, `RHD_UPDATE_BASE` mirrors); TUI version badge; docs audit |
+| [2.9.0] | 2026-09-28 | Installers take over `cargo install` copies in `~/.cargo/bin` (in-place upgrade + `cargo uninstall` handoff); cargo-binstall bin convention; shadow detection |
+| [2.8.0] | 2026-09-28 | GitHub Releases with prebuilt binaries for 5 target triples + `SHA256SUMS`; one-liner installers `install.sh` / `install.ps1` (upgrades in place) |
 | [2.7.0] | 2026-09-26 | `--revision` branch/tag/SHA downloads (#28); `--rate-limit`/`--rate-limit-mbps` CLI flags (#26); 404s map to `not_found` |
 | [2.6.1] | 2026-09-26 | Fix flaky e2e temp-home collision; rename retry for transient FS locks (#37) |
 | [2.6.0] | 2026-09-26 | Cross-platform paths: dirs-based config/registry/download roots, env overrides, portable mode, Windows-safe path sanitization |
