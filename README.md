@@ -1,6 +1,20 @@
-# Rust HF Downloader v2.7.0
+# Rust HF Downloader v2.8.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
+
+## Quick Install
+
+**Linux / macOS** (installs or upgrades to the newest release — no admin rights needed):
+```bash
+curl -fsSL https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.sh | sh
+```
+
+**Windows** (PowerShell 5.1 or later):
+```powershell
+irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1 | iex
+```
+
+Both auto-detect OS/arch, verify the SHA256 checksum, install to a user-local bin dir on your `PATH` — and **re-running either one-liner upgrades in place**, so it's always safe to re-run. Pin a version with `sh -s -- --version vX.Y.Z` / `-Version vX.Y.Z`, or see [Installation](#installation) for all options.
 
 ## Demo
 
