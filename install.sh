@@ -20,9 +20,20 @@
 #   API rate limit, so "newest version" resolution needs no api.github.com
 #   call and no jq.
 # - Verifies the SHA256 checksum from the same release's SHA256SUMS.
+# - Cargo-takeover: if a `cargo install rust-hf-downloader` copy exists in
+#   $CARGO_HOME/bin (~/.cargo/bin), the installer upgrades it IN PLACE (same
+#   location cargo put it), handing `cargo uninstall` over first so cargo's
+#   install records stay clean (the Cargo Book forbids editing
+#   .crates.toml/.crates2.json by hand). Otherwise, if ~/.cargo/bin exists
+#   and is on PATH it is preferred (cargo-binstall convention: the canonical
+#   bin dir for Rust CLI tools, typically at the FRONT of PATH because rustup
+#   prepends it) — this prevents cargo copies from shadowing release copies.
 # - No sudo: installs to ~/.local/bin by default (override with
 #   --install-dir). The install is an atomic same-directory rename, so an
 #   upgrade never leaves a truncated binary behind.
+# - After installing, re-resolves `rust-hf-downloader` the way the shell
+#   would (first PATH match) and warns if a different copy shadows the new
+#   one (volta-style check).
 set -eu
 
 REPO="JohannesBertens/rust-hf-downloader"
@@ -35,7 +46,12 @@ UNINSTALL=0
 BASE_OVERRIDE="${RHD_DOWNLOAD_BASE:-}"
 
 say() { printf '%s\n' "$*"; }
+warn() { printf 'install.sh: warning: %s\n' "$*" >&2; }
 err() { printf 'install.sh: error: %s\n' "$*" >&2; exit 1; }
+
+on_path() { # on_path <dir> — is <dir> an entry of $PATH?
+  case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac
+}
 
 usage() {
   cat <<'EOF'
@@ -79,7 +95,23 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "${HOME:-}" ] || err 'HOME is not set; cannot determine default install dir'
-[ -z "$INSTALL_DIR" ] && INSTALL_DIR="$HOME/.local/bin"
+
+# --- Default install dir: cargo takeover / cargo-binstall convention --------
+CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+TAKEOVER_CARGO=0
+if [ -z "$INSTALL_DIR" ]; then
+  if [ -x "$CARGO_BIN/$BIN_NAME" ]; then
+    # A `cargo install rust-hf-downloader` copy lives here: upgrade it in
+    # place so there stays exactly one binary, where PATH already points.
+    INSTALL_DIR="$CARGO_BIN"
+    TAKEOVER_CARGO=1
+  elif [ -d "$CARGO_BIN" ] && on_path "$CARGO_BIN"; then
+    # cargo-binstall convention: Rust CLI binaries live in $CARGO_HOME/bin.
+    INSTALL_DIR="$CARGO_BIN"
+  else
+    INSTALL_DIR="$HOME/.local/bin"
+  fi
+fi
 DEST="$INSTALL_DIR/$BIN_NAME"
 
 # --- Platform detection ------------------------------------------------------
@@ -127,6 +159,7 @@ fi
 say "plan: install $BIN_NAME ($TRIPLE)"
 say "  from: $BASE"
 say "  to:   $DEST"
+[ "$TAKEOVER_CARGO" = 1 ] && say "  note: taking over the cargo-installed copy in $CARGO_BIN (in-place upgrade)"
 if [ "$DRY_RUN" = 1 ]; then
   say "dry-run: stopping before any download"
   exit 0
@@ -187,6 +220,18 @@ if [ -f "$DEST" ]; then
 fi
 
 # --- Install (atomic rename within the destination directory) ----------------------
+if [ "$TAKEOVER_CARGO" = 1 ]; then
+  # Let cargo forget its install record via the sanctioned path (the Cargo
+  # Book forbids editing .crates.toml/.crates2.json by hand). Best effort:
+  # without cargo on PATH we simply overwrite the binary.
+  if command -v cargo >/dev/null 2>&1; then
+    say "running 'cargo uninstall rust-hf-downloader' to release cargo's install record"
+    cargo uninstall rust-hf-downloader >/dev/null 2>&1 || true
+  else
+    warn "cargo not found on PATH — replacing the binary without cleaning cargo's install record"
+  fi
+fi
+
 if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
   err "cannot create $INSTALL_DIR — set INSTALL_DIR to a writable directory
   (for a system-wide install, put the binary there yourself with appropriate
@@ -197,14 +242,24 @@ fi
 cp "$TMP/$BIN_NAME" "$DEST.new"
 mv -f "$DEST.new" "$DEST"
 
-case ":$PATH:" in
-  *":$INSTALL_DIR:"*) ;;
-  *)
-    say "NOTE: $INSTALL_DIR is not on your PATH. Add it to your shell profile:"
-    say "  export PATH=\"\$PATH:$INSTALL_DIR\""
-    ;;
-esac
-
 say "installed: $DEST"
 [ -n "$NEW_VER" ] && "$DEST" --version
-say "done — run 'rust-hf-downloader' to start (re-run this one-liner any time to upgrade)"
+
+# --- Volta-style shadow check: what will the shell actually resolve? ---------------
+RESOLVED="$(command -v "$BIN_NAME" 2>/dev/null || true)"
+if [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$DEST" ]; then
+  warn "another $BIN_NAME is earlier on your PATH:
+  $RESOLVED
+  shadows the newly installed $DEST — typing '$BIN_NAME' will run the OTHER one.
+  Remove the old copy (e.g. 'cargo uninstall $BIN_NAME', 'brew uninstall ...',
+  or delete the file) or reorder your PATH so $INSTALL_DIR comes first."
+elif [ -z "$RESOLVED" ]; then
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *)
+      say "NOTE: $INSTALL_DIR is not on your PATH. Add it to your shell profile:"
+      say "  export PATH=\"\$PATH:$INSTALL_DIR\""
+      ;;
+  esac
+fi
+say "done — run '$BIN_NAME' to start (re-run this one-liner any time to upgrade)"

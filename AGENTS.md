@@ -73,6 +73,12 @@ Check `README.md` for more information.
 - One-liner installers live at repo root (`install.sh`, `install.ps1`) and
   are attached to each release by CI. They are testable offline via
   `RHD_DOWNLOAD_BASE` (e.g. a local dir over `file://` or an http server).
+  v2.9.0 behavior: they take over an existing `cargo install` copy in
+  `$CARGO_HOME/bin` (in-place upgrade + `cargo uninstall` handoff so cargo's
+  install records stay clean — never edit .crates.toml/.crates2.json by
+  hand), prefer `$CARGO_HOME/bin` when it is on PATH (cargo-binstall
+  convention, since rustup prepends it to PATH), and run a volta-style
+  post-install shadow check that warns when another copy resolves first.
 - Release flow: bump Cargo.toml (+lock) → changelog entries → merge PR → push
   `vX.Y.Z` tag → release with binaries + installers appears.
 - macOS arm64 builds come from `macos-latest`; Intel macs are covered by a

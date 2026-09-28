@@ -14,10 +14,17 @@
 # - Uses stable asset names published by CI; releases/latest/download/<asset>
 #   is a GitHub CDN redirect, so no api.github.com call and no rate limit.
 # - Verifies the SHA256 checksum from the same release's SHA256SUMS.
-# - No admin rights: installs to %LOCALAPPDATA%\Programs\rust-hf-downloader
-#   and updates the per-user PATH.
+# - Cargo-takeover: if a 'cargo install rust-hf-downloader' copy exists in
+#   $CARGO_HOME\bin (%USERPROFILE%\.cargo\bin), the installer upgrades it IN
+#   PLACE, handing 'cargo uninstall' over first so cargo's install records
+#   stay clean. Otherwise, if that dir exists and is on PATH it is preferred
+#   (cargo-binstall convention) so cargo copies cannot shadow release copies.
+# - No admin rights by default: installs to
+#   %LOCALAPPDATA%\Programs\rust-hf-downloader and updates the per-user PATH.
 # - Upgrades handle a running binary: the old exe is renamed aside before the
 #   new one is moved in (Windows locks running executables).
+# - After installing, re-resolves the command the way the shell would (first
+#   PATH match) and warns if a different copy shadows the new one.
 [CmdletBinding()]
 param(
     [string]$Version = $env:RHD_VERSION,
@@ -82,11 +89,32 @@ if ($env:RHD_DOWNLOAD_BASE) {
     $Base = "https://github.com/$Repo/releases/latest/download"
 }
 
+# --- Default install dir: cargo takeover / cargo-binstall convention --------------
+# Env vars are case-sensitive on Unix: the process PATH variable is 'PATH'
+# there and 'Path' on Windows. Resolve once, use everywhere.
+$ProcPathVar = if ([Environment]::GetEnvironmentVariable('Path', 'Process')) { 'Path' } else { 'PATH' }
+function Get-ProcPath { [Environment]::GetEnvironmentVariable($Script:ProcPathVar, 'Process') }
+$CargoHomeBase = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($env:HOME) { $env:HOME } else { $null }
+$CargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME 'bin' } elseif ($CargoHomeBase) { Join-Path $CargoHomeBase '.cargo\bin' } else { $null }
+$CargoBinTrimmed = if ($CargoBin) { $CargoBin.TrimEnd('\') } else { $null }
+$ProcPathSep = [IO.Path]::PathSeparator
+$CargoBinOnPath = $CargoBinTrimmed -and (@((Get-ProcPath) -split $ProcPathSep | ForEach-Object { $_.Trim().TrimEnd('\') } | Where-Object { $_ }) -contains $CargoBinTrimmed)
+$TakeoverCargo = $false
 if (-not $InstallDir) {
-    # LOCALAPPDATA is always set on Windows; fall back for non-Windows pwsh
-    # (test/mirror environments).
-    $AppBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:HOME) { $env:HOME } else { '.' }
-    $InstallDir = Join-Path $AppBase 'Programs\rust-hf-downloader'
+    if ($CargoBinTrimmed -and (Test-Path -LiteralPath (Join-Path $CargoBin $BinName))) {
+        # A 'cargo install rust-hf-downloader' copy lives here: upgrade it in
+        # place so there stays exactly one binary, where PATH already points.
+        $InstallDir = $CargoBin
+        $TakeoverCargo = $true
+    } elseif ($CargoBinTrimmed -and (Test-Path -LiteralPath $CargoBin) -and $CargoBinOnPath) {
+        # cargo-binstall convention: Rust CLI binaries live in $CARGO_HOME\bin.
+        $InstallDir = $CargoBin
+    } else {
+        # LOCALAPPDATA is always set on Windows; fall back for non-Windows pwsh
+        # (test/mirror environments).
+        $AppBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:HOME) { $env:HOME } else { '.' }
+        $InstallDir = Join-Path $AppBase 'Programs\rust-hf-downloader'
+    }
 }
 $Dest = Join-Path $InstallDir $BinName
 
@@ -123,7 +151,7 @@ if ($Uninstall) {
 Write-Host "plan: install $BinName ($Triple)"
 Write-Host "  from: $Base"
 Write-Host "  to:   $Dest"
-if ($DryRun) { Write-Host 'dry-run: stopping before any download'; return }
+if ($TakeoverCargo) { Write-Host "  note: taking over the cargo-installed copy in $CargoBin (in-place upgrade)" }if ($DryRun) { Write-Host 'dry-run: stopping before any download'; return }
 
 # --- Download + verify ------------------------------------------------------------------
 $Tmp = Join-Path ([IO.Path]::GetTempPath()) ("rhd-install-" + [IO.Path]::GetRandomFileName())
@@ -163,6 +191,22 @@ try {
 
     # --- Install --------------------------------------------------------------------------
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    if ($TakeoverCargo) {
+        # Let cargo forget its install record via the sanctioned path. Best
+        # effort: if cargo is missing or the exe is locked by a running
+        # process, we simply replace the file below anyway.
+        if (Get-Command cargo -ErrorAction SilentlyContinue) {
+            Write-Host "running 'cargo uninstall rust-hf-downloader' to release cargo's install record"
+            # Relax EAP around the native call: on PS 5.1, redirected stderr
+            # + Stop would turn cargo's progress chatter into an exception.
+            $PrevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try { & cargo uninstall rust-hf-downloader 2>$null | Out-Null } catch { }
+            $ErrorActionPreference = $PrevEap
+        } else {
+            Write-Warning 'cargo not found on PATH - replacing the binary without cleaning cargo''s install record'
+        }
+    }
     # Windows locks a running exe: rename the old one aside, then move the new
     # one in. If the old exe is still locked, the rename fails with a clear
     # error instead of a half-written binary.
@@ -183,12 +227,33 @@ try {
             Write-Warning "could not update user PATH: $_"
         }
     }
-    if (($env:Path -split ';' | ForEach-Object { $_.TrimEnd('\') }) -notcontains $TrimmedDir) {
-        $env:Path += ";$TrimmedDir" # make it usable in this session too
+    if ((@((Get-ProcPath) -split $ProcPathSep | ForEach-Object { $_.TrimEnd('\') })) -notcontains $TrimmedDir) {
+        [Environment]::SetEnvironmentVariable($Script:ProcPathVar, "$(Get-ProcPath)$ProcPathSep$TrimmedDir", 'Process') # usable in this session too
     }
 
     Write-Host "installed: $Dest"
     & $Dest --version
+
+    # --- Volta-style shadow check: what will the shell actually resolve? ----------------
+    # Manual first-match scan of PATH (don't rely on Get-Command: its PATH
+    # cache does not reliably refresh after runtime PATH updates).
+    $Resolved = $null
+    foreach ($dir in (@((Get-ProcPath) -split $ProcPathSep | ForEach-Object { $_.Trim() } | Where-Object { $_ }))) {
+        $Candidate = Join-Path $dir $BinName
+        if (Test-Path -LiteralPath $Candidate) { $Resolved = $Candidate; break }
+    }
+    if ($Resolved -and ($Resolved -ine $Dest)) {
+        Write-Warning @"
+another $BinName is earlier on your PATH:
+  $Resolved
+shadows the newly installed $Dest - typing '$BinName' will run the OTHER one.
+Remove the old copy (e.g. 'cargo uninstall rust-hf-downloader',
+'scoop uninstall ...', 'winget uninstall ...') or reorder your PATH so
+$InstallDir comes first.
+"@
+    } elseif (-not $Resolved) {
+        Write-Host "NOTE: $InstallDir is not on your PATH; add it (System Settings > Environment Variables)"
+    }
     Write-Host "done - run 'rust-hf-downloader' to start (re-run this one-liner any time to upgrade)"
 } finally {
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue

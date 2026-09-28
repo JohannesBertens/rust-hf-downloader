@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.8.0
+# Rust HF Downloader v2.9.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -14,7 +14,7 @@ curl -fsSL https://github.com/JohannesBertens/rust-hf-downloader/releases/latest
 irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1 | iex
 ```
 
-Both auto-detect OS/arch, verify the SHA256 checksum, install to a user-local bin dir on your `PATH` — and **re-running either one-liner upgrades in place**, so it's always safe to re-run. Pin a version with `sh -s -- --version vX.Y.Z` / `-Version vX.Y.Z`, or see [Installation](#installation) for all options.
+Both auto-detect OS/arch, verify the SHA256 checksum, install to a user-local bin dir on your `PATH` — and **re-running either one-liner upgrades in place**, so it's always safe to re-run. Previously installed via `cargo install`? The installer detects the copy in `~/.cargo/bin` and upgrades it right there (letting `cargo uninstall` clean up its records first), so you never end up with two competing binaries. Pin a version with `sh -s -- --version vX.Y.Z` / `-Version vX.Y.Z`, or see [Installation](#installation) for all options.
 
 ## Demo
 
@@ -157,6 +157,24 @@ Two mechanisms can redirect these locations:
 On first run after upgrading on macOS, a config previously stored at
 `~/.config/jreb/config.toml` is still read; the next save migrates it to
 the new location.
+
+### Upgrading from a `cargo install`
+
+If you originally installed via `cargo install rust-hf-downloader`, its
+binary lives in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows) —
+and because rustup *prepends* that directory to `PATH`, it would shadow a
+release copy installed elsewhere. The one-liner installers handle this
+automatically:
+
+- a copy found in `~/.cargo/bin` is **upgraded in place** (same location,
+  new version) after handing `cargo uninstall rust-hf-downloader` the old
+  records, so `cargo install --list` stays clean
+- if you have no cargo copy but `~/.cargo/bin` exists and is on `PATH`, the
+  installer uses it (the cargo-binstall convention for Rust CLI tools);
+  otherwise it falls back to `~/.local/bin` / `%LOCALAPPDATA%\Programs\...`
+- after installing, the installer re-resolves `rust-hf-downloader` the way
+  your shell would and **warns** if a different copy (Homebrew, scoop, …)
+still shadows the new one, with removal instructions
 
 ### From source
 
