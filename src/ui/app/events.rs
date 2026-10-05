@@ -1,5 +1,6 @@
 use super::state::App;
 use crate::models::*;
+use crate::ui::render::{OptionsFieldId, OPTIONS_FIELDS};
 use crate::ui::tree::toggle_node_expansion;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
@@ -340,7 +341,10 @@ impl App {
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    if self.options.selected_field < 15 {
+                    // Bound derives from the field table (W4.7): 16
+                    // entries → last index 15 — the exact historical
+                    // `< 15` clamp.
+                    if self.options.selected_field < OPTIONS_FIELDS.len() - 1 {
                         self.options.selected_field += 1;
                     }
                 }
@@ -351,15 +355,23 @@ impl App {
                     self.modify_option(-1);
                 }
                 KeyCode::Enter => {
-                    // Enter edit mode for directory or token field
-                    if self.options.selected_field == 0 {
-                        self.options.editing_directory = true;
-                        self.options_directory_input = tui_input::Input::default()
-                            .with_value(self.options.default_directory.clone());
-                    } else if self.options.selected_field == 1 {
-                        self.options.editing_token = true;
-                        self.options_token_input = tui_input::Input::default()
-                            .with_value(self.options.hf_token.as_deref().unwrap_or("").to_string());
+                    // Enter edit mode for the two text fields (ids from the
+                    // table — W4.7; the other 14 fields ignore Enter)
+                    if let Some(spec) = OPTIONS_FIELDS.get(self.options.selected_field) {
+                        match spec.id {
+                            OptionsFieldId::DefaultDirectory => {
+                                self.options.editing_directory = true;
+                                self.options_directory_input = tui_input::Input::default()
+                                    .with_value(self.options.default_directory.clone());
+                            }
+                            OptionsFieldId::HfToken => {
+                                self.options.editing_token = true;
+                                self.options_token_input = tui_input::Input::default().with_value(
+                                    self.options.hf_token.as_deref().unwrap_or("").to_string(),
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 _ => {}
@@ -664,91 +676,99 @@ impl App {
     }
 
     /// Modify option value based on selected field and delta
+    ///
+    /// Field identity comes from the [`OPTIONS_FIELDS`] table (W4.7); the
+    /// per-field step/clamp/toggle bodies below are the historical ones,
+    /// kept arm-by-arm because they differ per field. A `selected_field`
+    /// past the table (not reachable via the cursor bound) keeps the
+    /// historical catch-all no-op.
     pub fn modify_option(&mut self, delta: i32) {
-        match self.options.selected_field {
-            0 => {} // default_directory - use Enter to edit
-            1 => {} // hf_token - use Enter to edit
-            2 => {
+        let field = OPTIONS_FIELDS
+            .get(self.options.selected_field)
+            .map(|f| f.id);
+        match field {
+            None | Some(OptionsFieldId::DefaultDirectory) => {} // use Enter to edit
+            Some(OptionsFieldId::HfToken) => {}                 // use Enter to edit
+            Some(OptionsFieldId::ConcurrentThreads) => {
                 // concurrent_threads (1-32)
                 let new = (self.options.concurrent_threads as i32 + delta).clamp(1, 32) as usize;
                 self.options.concurrent_threads = new;
             }
-            3 => {
+            Some(OptionsFieldId::NumChunks) => {
                 // num_chunks (10-100)
                 let new = (self.options.num_chunks as i32 + delta).clamp(10, 100) as usize;
                 self.options.num_chunks = new;
             }
-            4 => {
+            Some(OptionsFieldId::MinChunkSize) => {
                 // min_chunk_size (1MB-50MB)
                 let step = 1024 * 1024; // 1MB
                 let new = (self.options.min_chunk_size as i64 + delta as i64 * step)
                     .clamp(1024 * 1024, 50 * 1024 * 1024) as u64;
                 self.options.min_chunk_size = new;
             }
-            5 => {
+            Some(OptionsFieldId::MaxChunkSize) => {
                 // max_chunk_size (10MB-500MB)
                 let step = 10 * 1024 * 1024; // 10MB
                 let new = (self.options.max_chunk_size as i64 + delta as i64 * step)
                     .clamp(10 * 1024 * 1024, 500 * 1024 * 1024) as u64;
                 self.options.max_chunk_size = new;
             }
-            6 => {
+            Some(OptionsFieldId::MaxRetries) => {
                 // max_retries (0-10, step 1)
                 let new = (self.options.max_retries as i32 + delta).clamp(0, 10) as u32;
                 self.options.max_retries = new;
             }
-            7 => {
+            Some(OptionsFieldId::DownloadTimeoutSecs) => {
                 // download_timeout_secs (60-600, step 30)
                 let new = (self.options.download_timeout_secs as i64 + delta as i64 * 30)
                     .clamp(60, 600) as u64;
                 self.options.download_timeout_secs = new;
             }
-            8 => {
+            Some(OptionsFieldId::RetryDelaySecs) => {
                 // retry_delay_secs (1-10, step 1)
                 let new = (self.options.retry_delay_secs as i64 + delta as i64).clamp(1, 10) as u64;
                 self.options.retry_delay_secs = new;
             }
-            9 => {
+            Some(OptionsFieldId::ProgressUpdateIntervalMs) => {
                 // progress_update_interval_ms (100-1000, step 50)
                 let new = (self.options.progress_update_interval_ms as i64 + delta as i64 * 50)
                     .clamp(100, 1000) as u64;
                 self.options.progress_update_interval_ms = new;
             }
-            10 => {
+            Some(OptionsFieldId::RateLimitEnabled) => {
                 // download_rate_limit_enabled - toggle with +/-
                 self.options.download_rate_limit_enabled =
                     !self.options.download_rate_limit_enabled;
             }
-            11 => {
+            Some(OptionsFieldId::RateLimitMbps) => {
                 // download_rate_limit_mbps (0.1-1000.0, step 0.5)
                 let new =
                     (self.options.download_rate_limit_mbps + delta as f64 * 0.5).clamp(0.1, 1000.0);
                 self.options.download_rate_limit_mbps = new;
             }
-            12 => {
+            Some(OptionsFieldId::VerificationEnabled) => {
                 // verification_on_completion - toggle with +/-
                 self.options.verification_on_completion = !self.options.verification_on_completion;
             }
-            13 => {
+            Some(OptionsFieldId::ConcurrentVerifications) => {
                 // concurrent_verifications (1-8, step 1)
                 let new =
                     (self.options.concurrent_verifications as i32 + delta).clamp(1, 8) as usize;
                 self.options.concurrent_verifications = new;
             }
-            14 => {
+            Some(OptionsFieldId::VerificationBufferSize) => {
                 // verification_buffer_size (64KB-512KB, step 64KB)
                 let step = 64 * 1024;
                 let new = (self.options.verification_buffer_size as i64 + delta as i64 * step)
                     .clamp(64 * 1024, 512 * 1024) as usize;
                 self.options.verification_buffer_size = new;
             }
-            15 => {
+            Some(OptionsFieldId::VerificationUpdateInterval) => {
                 // verification_update_interval (50-500, step 50)
                 let new = (self.options.verification_update_interval as i32 + delta * 50)
                     .clamp(50, 500) as usize;
                 self.options.verification_update_interval = new;
             }
-            _ => {}
         }
 
         // Sync changes to global config immediately

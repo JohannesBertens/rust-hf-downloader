@@ -50,6 +50,7 @@ Where to add UI features
 - New pane/section → add a pure renderer in the owning render/<panel>.rs (new panel = new submodule) and pass data via RenderParams
 - New status or badges → augment spans in list or right panels
 - New popup → add render_* in render/popups.rs (options dialog: render/options_popup.rs) and event handler in events.rs and popup state in models.rs
+- New options field → append an OptionsFieldSpec to OPTIONS_FIELDS (render/options_popup.rs) plus a modify_option arm keyed by its OptionsFieldId; the cursor bound and rendering follow the table automatically
 
 Quality
 - Keep draws quick; long ops go to spawned tasks with progress tracked in shared state

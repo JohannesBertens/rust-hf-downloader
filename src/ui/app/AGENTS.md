@@ -31,6 +31,7 @@ Files and roles
     - Tab toggles pane focus; Left/Right switches quant subfocus
     - Enter: show details or toggle depending on pane (incl. file tree expansion)
   • Popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError
+  • Options dialog dispatch is id-keyed (W4.7): the cursor bound derives from the OPTIONS_FIELDS table length (16 rows → last index 15), Enter-edit matches OptionsFieldId::DefaultDirectory/HfToken, and modify_option matches the field ids with the per-field step/clamp/toggle bodies kept arm-by-arm (they differ per field); selected_field is serde-skipped so it can never exceed the table via stale config
   • Navigation: models keep next/previous; the quantization-group, quantization-file and file-tree cursors share one free fn advance(state, len, forward) (W4.6) — wrap-around both ends, unselected lists pick index 0 in both directions, len 0 no-op; the len×selection×direction tables in mod tests pin the contract
   • Filter preset application and persistence (Ctrl+S saves as defaults)
   • Filter VALUE mutations only route through App.filters (ui/app/filters.rs); events.rs owns key dispatch, status wording, and write order
