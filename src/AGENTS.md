@@ -51,12 +51,13 @@ Key modules
     unrecognized GGUFs land in OTHER (sorted last) instead of being dropped;
     groups sorted by total_size desc
   • One predicate everywhere: looks_like_quant_type (Q/IQ/TQ/MXFP + BF16/F16/FP16/FP32)
-- fetch_model_files(model_id, token) -> Vec<QuantizationGroup>
-  • Compat wrapper: fetch_model_metadata + classify_quantizations; frontends
-    holding metadata call classify_quantizations directly (no second fetch)
+  (v2.4's `fetch_model_files` compat wrapper was deleted: no callers remained;
+   call fetch_model_metadata + classify_quantizations directly)
 - resolve_revision_sha(model_id, revision, token) -> Result<String> (revision commit SHA; unknown revision → 404)
 - fetch_multipart_sha256s(model_id, filenames[], token) -> map filename -> Option<sha256>
-- Helpers: extract_quantization_type, is_quantization_directory, parse_multipart_filename, get_multipart_base_name
+- Helpers: extract_quantization_type, get_multipart_base_name, looks_like_quant_type
+  • Test-only (`#[cfg(test)]`): has_gguf_files, is_quantization_directory,
+    extract_quantization_type_from_dirname, parse_multipart_filename
 
 4) config.rs
 - load_config() -> AppOptions (reads crate::paths::read_config_path(); defaults on missing/unparseable file; env HF_TOKEN override lives in AppOptions::default)
@@ -135,7 +136,7 @@ Conventions & gotchas
 
 Quick map
 - Search: ui/app/models.rs::search_models -> api::fetch_models_filtered
-- Select model: ui/app/models.rs::spawn_load_quantizations -> api::{fetch_model_metadata, fetch_model_files, build_file_tree}
+- Select model: ui/app/models.rs::spawn_load_quantizations -> api::{fetch_model_metadata, classify_quantizations, build_file_tree}
 - Download: ui/app/downloads.rs::{trigger_download, confirm_download, confirm_repository_download} -> download::start_download
 - Verify: verification::verification_worker auto-runs; queue via download completion
 

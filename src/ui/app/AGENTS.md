@@ -37,7 +37,7 @@ Files and roles
   • search_models: cache-first on ApiCache.searches; calls api::fetch_models_filtered; sets loading/status
   • show_model/quant/file_details: updates status/selection info lines
   • spawn_load_quantizations: loads metadata (cache-first); chooses mode:
-      - GGUF → fetch_model_files grouped by quant type; clear Standard state
+      - GGUF → classify_quantizations(metadata.siblings) grouped by quant type; clear Standard state
       - Standard → build_file_tree from metadata.siblings; clear GGUF state
     Sets loading flags; uses display_mode to inform rendering; prefetch_adjacent_models debounced
   • clear_search_results/clear_model_details give immediate UI feedback

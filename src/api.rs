@@ -233,8 +233,11 @@ fn fetch_recursive_tree<'a>(
     })
 }
 
-/// Check if model has GGUF files
-#[cfg_attr(not(test), allow(dead_code))]
+/// Check if model has GGUF files.
+///
+/// Test-only since v2.4: GGUF classification replaced its call sites, so the
+/// helper survives solely as documentation of the historical predicate.
+#[cfg(test)]
 pub fn has_gguf_files(metadata: &ModelMetadata) -> bool {
     metadata
         .siblings
@@ -335,24 +338,6 @@ fn sort_tree_recursive(node: &mut FileTreeNode) {
     for child in &mut node.children {
         sort_tree_recursive(child);
     }
-}
-
-/// Fetch and classify a model's GGUF files into quantization groups.
-///
-/// Compat wrapper: frontends that already hold `ModelMetadata` should call
-/// [`classify_quantizations`] directly over `metadata.siblings` to avoid the
-/// extra API round-trip.
-#[allow(dead_code)]
-pub async fn fetch_model_files(
-    model_id: &str,
-    revision: &str,
-    token: Option<&String>,
-) -> Result<Vec<QuantizationGroup>, reqwest::Error> {
-    // Thin wrapper kept for API compatibility: classification is a pure
-    // function over the full recursive tree (see `classify_quantizations`),
-    // so a single metadata fetch is all we need.
-    let metadata = fetch_model_metadata(model_id, revision, token).await?;
-    Ok(classify_quantizations(&metadata.siblings))
 }
 
 /// Quantization group for GGUF files whose layout we don't recognize.
@@ -657,7 +642,7 @@ pub fn is_quantization_directory(dirname: &str) -> bool {
     quant_type_from_dirname_strict(dirname).is_some()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn extract_quantization_type_from_dirname(dirname: &str) -> String {
     // Extract just the quantization type from a directory name
     // Examples:
@@ -801,7 +786,7 @@ pub fn looks_like_quant_type(s: &str) -> bool {
     false
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
     // Parse filenames like:
     // "Q2_K/MiniMax-M2-Q2_K-00001-of-00002.gguf" (5-digit format)
