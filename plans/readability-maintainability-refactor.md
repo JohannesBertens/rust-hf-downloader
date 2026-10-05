@@ -67,7 +67,7 @@ Source tags: **[A]** architecture, **[P]** pipeline, **[U]** UI, **[C]** CLI/sty
 | W0.6 | Drop the 8 `#[cfg(test)]` use-walls in `cli/mod.rs:42-65`; `tests.rs` imports `super::args::…` directly. | [C] | None |
 | W0.7 | Visibility standardization (bin-only crate — verified no lib/tests consumers); remove `get_config_path`/`get_registry_path` pass-throughs. | [C] | Low |
 | W0.8 | Remove **18** `futures::executor::block_on` wrappers around parking_lot RwLock reads (`models.rs` ×4, `events.rs` ×11, `downloads.rs` ×3 — all verified `futures::executor`, no tokio flavor). **Rule: clone-in-one-expression, no bound guards** — `block_on(async { x.read().clone() })` drops the guard at expression end; a `let g = …` rewrite would extend hold time and touch the lock hierarchy. | [U] verified | Low |
-| W0.9 | Hoist `purge_staging_registry_entries()` out of the per-item publish loop (`hf_cache_cmd.rs:731`), **guarded**: `if !items.is_empty()`, placed before iteration 1, with a stated proof obligation that the publish loop adds no staging entries; N=0 must not introduce a registry write that doesn't happen today. | [C] | Low |
+| W0.9 | Hoist `purge_staging_registry_entries()` out of the per-item publish loop (`hf_cache_cmd.rs`). **Executed in amended form (worker guard caught a plan error: no post-run sweep exists; the first in-loop purge is load-bearing)**: single guarded call immediately before the publish loop (post-drain sweep point preserved), comment documents the sweep semantics; see §10. | [C] amended | Low |
 | H1–H8 | Harness hardening (§2.1). | plan audits | n/a |
 
 ### Phase 1 — Shared foundations (PR2)
@@ -192,3 +192,12 @@ Independently found by ≥2 of 4 code reviews: enqueue/bootstrap duplication (A,
 - [ ] Docs blast radius: all four AGENTS.md (root, `src/`, `src/ui/`, `src/ui/app/`) + `README.md:715-742` + `CONTRIBUTING.md:130,143-144` updated **in the same commits** as the moves/renames they describe; lock-ordering contract relocates with the Runner; §1's declared deltas stay accurate.
 - [ ] Every item traces to a cited review finding; clean areas (§7) untouched.
 - [ ] W5.5 live-option-effect smoke (change rate limit mid-download) green after 5.5a.
+
+## 10. Execution log
+
+All work lands as sequential commits on `refactor/readability-maintainability-review` (no PRs; single-branch diff for final review). Validation gate per slice: full `cargo test` (baseline 266/0), clippy clean, fmt clean.
+
+| Commit | Items | Notes |
+|---|---|---|
+| 5e4b061 | W0.1, W0.6 | 4 stale attrs + api.rs:561 gate (`#[cfg(test)]`), 8 cli test use-walls removed |
+| 8f875f4 | W0.9 (amended), W0.2, W0.4, W0.8 | W0.9 guard deviation: `if !plan.fetch.is_empty()` (no `items` binding in scope); 18/18 block_on sites were parking_lot, 1 tokio site left for W4.11; clippy zero warnings after tree_json removal |
