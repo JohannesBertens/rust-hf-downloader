@@ -16,10 +16,12 @@ The application follows a modular architecture with clear separation of concerns
 ```
 src/
 ├── main.rs           # Entry point (~60 lines): `download`/`search` subcommand → cli::run; no args → TUI
-├── cli.rs            # One-shot CLI: `download` + `search` + `update` subcommands (clap), file resolution, human/JSON reporters
+├── cli.rs            # One-shot CLI: `download` + `search` + `update` + `hf-cache` subcommands (clap), file resolution, human/JSON reporters
 ├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, drain signals
 ├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
+├── hf_cache.rs       # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock
+├── patterns.rs       # Python-fnmatch parity glob matcher (`--include`/`--exclude`, `--for vllm` preset table)
 ├── update.rs         # Self-update (v2.10.0): latest.json manifest check, SHA256-verified asset download, self_replace swap; RHD_UPDATE_BASE override
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
 ├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT

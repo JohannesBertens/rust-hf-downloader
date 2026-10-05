@@ -1,0 +1,134 @@
+# =============================================================================
+# Pattern B — "baked image": freeze a model into a vLLM serving image
+# =============================================================================
+#
+# Use this when you want immutable, reproducible deployments: the weights are
+# synced at BUILD time and shipped inside the image, so runtime pulls are zero
+# (air-gapped clusters, autoscaling fleets that must not thundering-herd the
+# hub on scale-up, or audit requirements that pin an image digest to exact
+# weights).
+#
+# For the shared-volume variant (sync at deploy time via an init container),
+# see ../k8s/vllm-prefetch.yaml.
+#
+# -----------------------------------------------------------------------------
+# Prerequisites
+# -----------------------------------------------------------------------------
+#   1. A release binary built for the TARGET PLATFORM of the vLLM image:
+#
+#        cargo build --release
+#        # → target/release/rust-hf-downloader  (x86_64-unknown-linux-gnu)
+#
+#      Both stages run on the same architecture — if you bake an arm64 image,
+#      build the binary for aarch64 too (the release workflow ships both).
+#
+#   2. BuildKit (default in current Docker; older: DOCKER_BUILDKIT=1) for the
+#      secret mount below.
+#
+# -----------------------------------------------------------------------------
+# Build
+# -----------------------------------------------------------------------------
+#   # public model:
+#   docker build -f examples/docker/Dockerfile.baked \
+#     --build-arg MODEL=Qwen/Qwen2.5-7B-Instruct \
+#     --build-arg REVISION=<40-hex-commit-sha> \
+#     -t vllm-baked:qwen2.5-7b .
+#
+#   # gated model (Llama, …): pass the token as a BuildKit secret — it is
+#   # mounted into the build step only, never stored in any image layer:
+#   docker build -f examples/docker/Dockerfile.baked \
+#     --secret id=hf_token,src=./hf-token.txt \
+#     --build-arg MODEL=meta-llama/Llama-3.1-8B-Instruct \
+#     --build-arg REVISION=<40-hex-commit-sha> \
+#     -t vllm-baked:llama3.1-8b .
+#
+# -----------------------------------------------------------------------------
+# Run
+# -----------------------------------------------------------------------------
+#   docker run --gpus all -p 8000:8000 vllm-baked:qwen2.5-7b \
+#     --model Qwen/Qwen2.5-7B-Instruct --served-model-name qwen2.5-7b
+#
+#   (The vLLM image entrypoint is the OpenAI API server and takes the model
+#   id as an argument — same id you baked, resolved from /opt/hf with zero
+#   network calls. Override offline behavior per-run with
+#   `-e HF_HUB_OFFLINE=0` if you ever want it to fetch something new.)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Stage 0 — prefetch the model into a hub-format cache at /opt/hf
+# -----------------------------------------------------------------------------
+# A slim glibc base is enough: the binary is statically self-contained
+# (rustls — no system TLS libs), it only needs CA certificates for HTTPS.
+FROM debian:bookworm-slim AS prefetch
+
+# Model to bake. Keep this pin EXACT for reproducible images: two builds of
+# the same digest must contain the same bytes.
+ARG MODEL=Qwen/Qwen2.5-7B-Instruct
+
+# Pin the exact commit SHA (find it on the model page → "Files and
+# versions" — the 40-hex hash next to each commit). Leaving this empty syncs
+# the moving branch tip — convenient for experiments, wrong for anything
+# you want to reproduce later.
+ARG REVISION=
+
+# Path to the locally built binary, relative to the build context (repo
+# root). Point this at an extracted release tarball binary if you prefer.
+ARG BINARY=target/release/rust-hf-downloader
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY "${BINARY}" /usr/local/bin/rust-hf-downloader
+
+# The hub cache this stage produces. Stage 2 copies this exact tree; the
+# layout is byte-compatible with `hf download` output (blobs content-
+# addressed by sha256/git-sha1, snapshots as RELATIVE symlinks — which is
+# why the cache survives the COPY into a different image root).
+#
+# --for vllm          fetch only what vLLM reads: sharded safetensors (in any
+#                     subfolder), configs, tokenizer/vocab/merges/chat
+#                     templates; skips original/**, *.bin/*.pt/*.gguf/*.onnx…
+# --no-verify? NO —   verification stays ON: a sha256 mismatch fails the
+#                     build instead of baking corrupted weights.
+#
+# The BuildKit secret is optional (only needed for gated repos). The token
+# never lands in a layer, the build cache, or the final image; unset it and
+# the sync runs anonymously.
+RUN --mount=type=secret,id=hf_token \
+    set -eux; \
+    rev_args=""; \
+    if [ -n "${REVISION}" ]; then rev_args="--revision ${REVISION}"; fi; \
+    if [ -f /run/secrets/hf_token ]; then \
+      export HF_TOKEN="$(cat /run/secrets/hf_token)"; \
+    fi; \
+    rust-hf-downloader hf-cache sync "${MODEL}" --for vllm ${rev_args} \
+      --cache-dir /opt/hf
+
+# -----------------------------------------------------------------------------
+# Stage 1 — vLLM OpenAI server with the cache baked in
+# -----------------------------------------------------------------------------
+FROM vllm/vllm-openai:latest
+
+# Re-declare (ARGs don't cross stage boundaries) for the traceability label.
+ARG MODEL=Qwen/Qwen2.5-7B-Instruct
+LABEL org.opencontainers.image.description="vLLM OpenAI server with ${MODEL} pre-synced into the HF hub cache (offline)"
+
+# Copy ONLY the hub cache from stage 0 — not the downloader binary, not apt
+# state. Files arrive root-owned and world-readable, which the non-root vLLM
+# user can read fine; add `--chown=<uid>:0` here if your runtime needs it.
+COPY --from=prefetch /opt/hf /opt/hf
+
+# BOTH cache variables must be overridden together. vLLM, transformers, and
+# huggingface_hub consult different variables per version — if you set only
+# HF_HOME, the hub client resolves a *different* (empty) cache dir and your
+# baked weights are silently ignored.
+ENV HF_HOME=/opt/hf \
+    HF_HUB_CACHE=/opt/hf \
+    HF_HUB_OFFLINE=1
+
+# HF_HUB_OFFLINE=1 is baked in on purpose: serving must never silently fall
+# back to the network — a missing file becomes a loud error instead of an
+# unplanned multi-GB download mid-deployment.
+
+EXPOSE 8000

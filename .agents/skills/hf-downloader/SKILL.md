@@ -1,14 +1,15 @@
 ---
 name: hf-downloader
-description: Download HuggingFace models (specific GGUF quantizations, exact files, or whole repos) with SHA256 verification, and search the HuggingFace hub for model IDs. Use when asked to fetch, download, mirror, or verify HuggingFace models/weights, or to resolve a vague model request into a concrete repo. Requires rust-hf-downloader >= 2.3.0 (search/download); `update` (>= 2.10.0) upgrades the binary in place.
+description: Download HuggingFace models (specific GGUF quantizations, exact files, or whole repos) with SHA256 verification, and search the HuggingFace hub for model IDs. Use when asked to fetch, download, mirror, or verify HuggingFace models/weights, to resolve a vague model request into a concrete repo, or to prepare a model for serving (populate the hub cache so vLLM/transformers run offline). Requires rust-hf-downloader >= 2.3.0 (search/download); `hf-cache` (>= 2.11.0) writes hub-compatible snapshots; `update` (>= 2.10.0) upgrades the binary in place.
 license: MIT
 ---
 
 # HF Downloader
 
-Non-interactive, machine-friendly HuggingFace downloads. Three subcommands:
-`search` (discover a model ID), `download` (fetch it), and `update` (upgrade
-the rust-hf-downloader binary itself). Never launch the TUI for automation —
+Non-interactive, machine-friendly HuggingFace downloads. Four subcommands:
+`search` (discover a model ID), `download` (fetch it), `hf-cache` (fill the
+real hub cache for offline serving), and `update` (upgrade the
+rust-hf-downloader binary itself). Never launch the TUI for automation —
 the CLI subcommands cover the whole flow with stable JSON contracts and
 deterministic exit codes.
 
@@ -66,6 +67,41 @@ deterministic exit codes.
   `https://hf-mirror.com`, or local test servers).
 - Files land in `<output>/<author>/<model-name>/…` (default `~/models`) and
   are tracked in the registry the TUI shares (`~/models/hf-downloads.toml`).
+
+## Model serving: populate the hub cache (`hf-cache`, >= 2.11.0)
+
+When the target is an inference server (vLLM, TGI, transformers) rather
+than loose files, write the **real HuggingFace hub cache** instead of the
+flat download layout — the server then starts fully offline:
+
+```bash
+# Fetch only what vLLM reads, pinned to a commit (deterministic serving)
+rust-hf-downloader hf-cache sync Qwen/Qwen2.5-7B-Instruct --for vllm \
+  --revision <40-hex-sha>
+
+HF_HUB_OFFLINE=1 vllm serve Qwen/Qwen2.5-7B-Instruct   # zero hub calls
+
+# Pure path math (no network) — where the snapshot lives:
+rust-hf-downloader hf-cache path Qwen/Qwen2.5-7B-Instruct
+```
+
+`hf-cache` invariants:
+
+- Output is byte-compatible with `hf download`: `vllm serve`, transformers,
+  and the `hf` CLI resolve it natively. The **last stdout line** on success
+  is the snapshot path — use `$(…)` to hand it to other tools.
+- Selection: positional files → `--include`/`--exclude` fnmatch globs →
+  `--for vllm` preset → whole repo. For serving, always pass `--for vllm`;
+  whole-repo syncs waste disk on formats vLLM never reads.
+- Pin `--revision` to a commit SHA for reproducible serving (branch names
+  move). Unknown revisions exit `64`, like other usage errors.
+- Idempotent and atomic: re-running the same sync is a cheap no-op (exit
+  `0`); files publish only after SHA256 verification. Safe in init
+  containers and CronJobs.
+- Containers: set BOTH `HF_HOME` and `HF_HUB_CACHE` when overriding the
+  location; exactly one writer per cache volume; readers mount read-only
+  with `HF_HUB_OFFLINE=1`. Ready-made recipes live in the repo's
+  `examples/docker/Dockerfile.baked` and `examples/k8s/vllm-prefetch.yaml`.
 
 ## Deep reference
 

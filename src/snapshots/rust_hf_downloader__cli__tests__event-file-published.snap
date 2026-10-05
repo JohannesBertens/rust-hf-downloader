@@ -1,0 +1,9 @@
+---
+source: src/cli.rs
+expression: json
+---
+{
+  "type": "file_published",
+  "path": "model-00001-of-00002.safetensors",
+  "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
