@@ -677,12 +677,14 @@ async fn download_chunked(
     // violation / access denied), which would otherwise fail an otherwise
     // complete download (incident #37 symptom B). Policy: 1 initial try +
     // 4 retries, 100ms base delay with linear backoff (100/200/300/400ms).
-    crate::utils::atomic_rename_with_retry(
+    // Async twin: retries sleep via tokio so the worker thread never blocks.
+    crate::utils::atomic_rename_with_retry_async(
         incomplete_path,
         final_path,
         4,
         std::time::Duration::from_millis(100),
-    )?;
+    )
+    .await?;
 
     // Prepare verification data if hash is available
     let verification_item = expected_sha256

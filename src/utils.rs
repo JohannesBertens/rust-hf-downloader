@@ -119,6 +119,33 @@ fn is_transient_fs_lock(e: &std::io::Error) -> bool {
     matches!(e.kind(), std::io::ErrorKind::PermissionDenied) || e.raw_os_error() == Some(32)
 }
 
+/// Async twin of [`atomic_rename_with_retry`]: identical retry policy
+/// (same attempt semantics, same transient-lock predicate, same linear
+/// backoff), but the rename runs via `tokio::fs::rename` on the blocking
+/// pool and the backoff sleeps are `tokio::time::sleep` — so an async
+/// caller (the download transport) never blocks its Tokio worker thread
+/// during Windows AV/indexer lock contention (regression review P1: the
+/// sync twin did, stalling cooperative tasks for up to ~1s).
+/// Sync-context callers (the hf-cache layout writer, whose legacy path
+/// always used `std::fs::rename`) keep the sync twin.
+pub async fn atomic_rename_with_retry_async(
+    src: &Path,
+    dst: &Path,
+    retries: u32,
+    delay: Duration,
+) -> std::io::Result<()> {
+    for attempt in 0..=retries {
+        match tokio::fs::rename(src, dst).await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < retries && is_transient_fs_lock(&e) => {
+                tokio::time::sleep(delay * (attempt + 1)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("retry loop always returns")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +317,40 @@ mod tests {
         );
         assert_eq!(hex::encode(hasher.finalize()), sha256_one_shot(&payload));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod async_rename_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn async_rename_succeeds_first_try_and_moves_the_file() {
+        let dir = std::env::temp_dir().join(format!("rhd-utils-aren-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let src = dir.join("src.bin");
+        let dst = dir.join("dst.bin");
+        std::fs::write(&src, b"payload").expect("write");
+        atomic_rename_with_retry_async(&src, &dst, 4, Duration::from_millis(1))
+            .await
+            .expect("rename");
+        assert!(dst.exists() && !src.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn async_rename_propagates_non_transient_errors_without_retry() {
+        // Renaming a nonexistent source is NotFound (not a transient lock):
+        // must fail fast with the raw error.
+        let err = atomic_rename_with_retry_async(
+            std::path::Path::new("/nonexistent/rhd-src"),
+            std::path::Path::new("/nonexistent/rhd-dst"),
+            4,
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }
