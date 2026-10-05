@@ -244,6 +244,272 @@ fn token_precedence_flag_env_then_file() {
     );
 }
 
+// --- Token-precedence matrix (Runner gate: W3.7+W4.2) ---------------------
+//
+// The token precedence `--token` flag > `$HF_TOKEN` env > config file is
+// duplicated across four subcommand bootstrap sites:
+//
+// | site                                | composition (transcribed below)             |
+// |-------------------------------------|----------------------------------------------|
+// | `run_download` (download_cmd.rs ~60)| load_config → output override → rate-limit   |
+// |                                     | overrides → merge_token → writeback →        |
+// |                                     | apply_options → no-verify store              |
+// | `run_hf_cache_sync` (hf_cache_cmd   | same minus the output-dir override           |
+// | ~363)                               |                                              |
+// | `run_hf_cache_path` (~914)          | load_config → merge_token (partial variant)  |
+// | `run_search` (search_cmd.rs ~77)    | load_config → merge_token (partial variant)  |
+//
+// Each `*_site_token` fn below is a verbatim transcription of its site's
+// composition, reduced to the token-relevant statements: the output-dir
+// override touches `default_directory` only, `apply_rate_limit_overrides`
+// touches rate-limit fields only, and `apply_options`/the no-verify store
+// mutate engine atomics AFTER the merge without reading or writing the
+// token (those two steps are the documented elision — they need a tokio
+// runtime and pollute the global engine atomics). The four tests assert
+// the FULL matrix {flag set/empty/unset} × {env set/empty/unset} ×
+// {config file with token / file without token / no file}; the cross-site
+// test then proves all four compositions resolve IDENTICALLY on every
+// cell (the divergence detector the extraction gate needs).
+//
+// §8.8 subtlety this matrix pins: `AppOptions::default()` itself reads
+// `HF_TOKEN`, so the "no config file" column carries the env token in
+// `options.hf_token` BEFORE `merge_token` runs. That dual read is
+// unobservable through the resolved token (the env axis wins over the
+// file axis either way), which is exactly why it is declared safe to keep
+// (removing it is a behavior change requiring sign-off, not this refactor).
+
+/// Restore one env var on drop (matrix cells mutate the ambient env; tests
+/// that do so share `paths::ENV_MUTEX`).
+struct VarGuard {
+    key: &'static str,
+    saved: Option<std::ffi::OsString>,
+}
+
+impl VarGuard {
+    fn set(key: &'static str, value: Option<&str>) -> Self {
+        let saved = std::env::var_os(key);
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        Self { key, saved }
+    }
+}
+
+impl Drop for VarGuard {
+    fn drop(&mut self) {
+        match self.saved.take() {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
+
+/// The config-file axis of the matrix.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ConfigFile {
+    /// config.toml exists and carries `hf_token = "cfg"`.
+    WithToken,
+    /// config.toml exists without an `hf_token` key (serde → None).
+    WithoutToken,
+    /// No config.toml at all → `AppOptions::default()` (the §8.8 env read).
+    NoFile,
+}
+
+/// Expected resolved token for one matrix cell. Pure function of the
+/// documented precedence: first non-empty of flag > env > file, where the
+/// file axis is "cfg" / None / non-empty-env respectively (§8.8 default
+/// read), and empty strings count as absent at every level.
+fn nonempty_token(v: Option<&str>) -> Option<&str> {
+    v.filter(|s| !s.is_empty())
+}
+
+fn expected_token(flag: Option<&str>, env: Option<&str>, config: ConfigFile) -> Option<String> {
+    let file = match config {
+        ConfigFile::WithToken => Some("cfg"),
+        ConfigFile::WithoutToken => None,
+        ConfigFile::NoFile => nonempty_token(env),
+    };
+    nonempty_token(flag)
+        .or(nonempty_token(env))
+        .or(file)
+        .map(|s| s.to_string())
+}
+
+/// Install one matrix cell's ambient state: the temp config dir override,
+/// `HF_TOKEN`, and (unless `NoFile`) a config fixture inside it. Order
+/// matters: `save_config` resolves through the ambient env, so the
+/// override must be in place BEFORE the fixture write. The returned
+/// guards restore the env when dropped; the caller cleans up the temp dir.
+fn install_matrix_cell(
+    env: Option<&str>,
+    config: ConfigFile,
+    tag: &str,
+) -> (std::path::PathBuf, VarGuard, VarGuard) {
+    let tmp = std::env::temp_dir().join(format!(
+        "rhd-token-{tag}-{}-{env:?}-{config:?}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create temp config dir");
+    let g1 = VarGuard::set(crate::paths::ENV_CONFIG_DIR, Some(tmp.to_str().unwrap()));
+    let g2 = VarGuard::set("HF_TOKEN", env);
+    if config != ConfigFile::NoFile {
+        let options = crate::models::AppOptions {
+            hf_token: match config {
+                ConfigFile::WithToken => Some("cfg".to_string()),
+                _ => None,
+            },
+            ..Default::default()
+        };
+        crate::config::save_config(&options).expect("write config fixture");
+    }
+    (tmp, g1, g2)
+}
+
+/// Run one matrix cell: install the ambient state, resolve the token
+/// through `site`, and assert the expected value.
+fn assert_matrix_cell(
+    site: fn(Option<String>) -> Option<String>,
+    flag: Option<&str>,
+    env: Option<&str>,
+    config: ConfigFile,
+) {
+    let _env_lock = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (tmp, _g1, _g2) = install_matrix_cell(env, config, "matrix");
+
+    let got = site(flag.map(|s| s.to_string()));
+    let want = expected_token(flag, env, config);
+    assert_eq!(
+        got, want,
+        "cell (flag={flag:?}, env={env:?}, config={config:?})"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The full 27-cell matrix through one site composition.
+fn assert_token_matrix(site: fn(Option<String>) -> Option<String>) {
+    for flag in [Some("flag"), Some(""), None] {
+        for env in [Some("env"), Some(""), None] {
+            for config in [
+                ConfigFile::WithToken,
+                ConfigFile::WithoutToken,
+                ConfigFile::NoFile,
+            ] {
+                assert_matrix_cell(site, flag, env, config);
+            }
+        }
+    }
+}
+
+/// `run_download`'s config bootstrap (download_cmd.rs step 1), verbatim
+/// transcription reduced to the token-relevant statements (see the section
+/// comment for the elisions). Non-token flag args take their no-flag
+/// defaults; the token axis is the matrix variable.
+fn download_site_token(flag: Option<String>) -> Option<String> {
+    let mut options = crate::config::load_config();
+    if let Some(dir) = None::<&String> {
+        options.default_directory = dir.clone(); // site: `if let Some(dir) = &args.output`
+    }
+    apply_rate_limit_overrides(&mut options, false, false, None);
+    merge_token(
+        flag,
+        std::env::var("HF_TOKEN").ok(),
+        options.hf_token.clone(),
+    )
+}
+
+/// `run_hf_cache_sync`'s config bootstrap (hf_cache_cmd.rs step 1) — the
+/// download composition minus the output-dir override.
+fn hf_cache_sync_site_token(flag: Option<String>) -> Option<String> {
+    let mut options = crate::config::load_config();
+    apply_rate_limit_overrides(&mut options, false, false, None);
+    merge_token(
+        flag,
+        std::env::var("HF_TOKEN").ok(),
+        options.hf_token.clone(),
+    )
+}
+
+/// `run_hf_cache_path`'s partial bootstrap (hf_cache_cmd.rs, online
+/// fallback): load + merge only — no rate-limit flags, no `apply_options`.
+fn hf_cache_path_site_token(flag: Option<String>) -> Option<String> {
+    let options = crate::config::load_config();
+    merge_token(
+        flag,
+        std::env::var("HF_TOKEN").ok(),
+        options.hf_token.clone(),
+    )
+}
+
+/// `run_search`'s partial bootstrap (search_cmd.rs) — same shape as the
+/// hf-cache path variant.
+fn search_site_token(flag: Option<String>) -> Option<String> {
+    let options = crate::config::load_config();
+    merge_token(
+        flag,
+        std::env::var("HF_TOKEN").ok(),
+        options.hf_token.clone(),
+    )
+}
+
+#[test]
+fn token_matrix_download_flag_env_config() {
+    assert_token_matrix(download_site_token);
+}
+
+#[test]
+fn token_matrix_hf_cache_sync_flag_env_config() {
+    assert_token_matrix(hf_cache_sync_site_token);
+}
+
+#[test]
+fn token_matrix_hf_cache_path_flag_env_config() {
+    assert_token_matrix(hf_cache_path_site_token);
+}
+
+#[test]
+fn token_matrix_search_flag_env_config() {
+    assert_token_matrix(search_site_token);
+}
+
+#[test]
+fn token_matrix_all_four_sites_agree_on_every_cell() {
+    // The extraction gate's divergence detector: if any site's composition
+    // resolved a different token for any cell, unifying them would change
+    // behavior. All four must agree cell-by-cell (and each already matches
+    // the expected-value table above).
+    for flag in [Some("flag"), Some(""), None] {
+        for env in [Some("env"), Some(""), None] {
+            for config in [
+                ConfigFile::WithToken,
+                ConfigFile::WithoutToken,
+                ConfigFile::NoFile,
+            ] {
+                let _env_lock = crate::paths::ENV_MUTEX
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let (tmp, _g1, _g2) = install_matrix_cell(env, config, "xsite");
+                let flag_owned = flag.map(|s| s.to_string());
+                let results = [
+                    download_site_token(flag_owned.clone()),
+                    hf_cache_sync_site_token(flag_owned.clone()),
+                    hf_cache_path_site_token(flag_owned.clone()),
+                    search_site_token(flag_owned),
+                ];
+                let _ = std::fs::remove_dir_all(&tmp);
+                assert!(
+                    results.windows(2).all(|w| w[0] == w[1]),
+                    "site divergence at (flag={flag:?}, env={env:?}, config={config:?}): {results:?}"
+                );
+            }
+        }
+    }
+}
+
 // --- CLI parsing --------------------------------------------------------
 
 // --- Rate-limit overrides (issue #26) ---------------------------------
@@ -275,6 +541,57 @@ fn rate_limit_overrides() {
     apply_rate_limit_overrides(&mut options, true, false, None);
     assert!(options.download_rate_limit_enabled);
     assert_eq!(options.download_rate_limit_mbps, 42.0);
+}
+
+#[test]
+fn rate_limit_override_matrix_full_cross_product() {
+    // Full precedence matrix for the two engine-driving sites that share
+    // this helper (`run_download` and `run_hf_cache_sync` both call
+    // `apply_rate_limit_overrides(&mut options, args.rate_limit,
+    // args.no_rate_limit, args.rate_limit_mbps)` with identical argument
+    // order — verified by reading both sites; `hf-cache path` and `search`
+    // expose no rate-limit flags and never call it).
+    //
+    // Precedence, as one rule: `--no-rate-limit` forces disable; otherwise
+    // `--rate-limit` OR `--rate-limit-mbps` forces enable; otherwise the
+    // config-file value survives. The mbps assignment is a SEPARATE
+    // unconditional step: `--rate-limit-mbps` always stores the rate, even
+    // alongside `--no-rate-limit` (disable wins for `enabled`; the stored
+    // rate is dead while disabled).
+    //
+    // Note: clap's `conflicts_with` makes the {no_rate_limit: true,
+    // rate_limit: true / mbps: Some} combinations unreachable from the CLI;
+    // they are still pinned here because the helper is shared and its
+    // behavior on those cells must not drift.
+    for config_enabled in [false, true] {
+        for config_mbps in [42.0, 50.0] {
+            for rate_limit in [false, true] {
+                for no_rate_limit in [false, true] {
+                    for mbps in [None, Some(12.5)] {
+                        let mut options = crate::models::AppOptions {
+                            download_rate_limit_enabled: config_enabled,
+                            download_rate_limit_mbps: config_mbps,
+                            ..Default::default()
+                        };
+                        apply_rate_limit_overrides(&mut options, rate_limit, no_rate_limit, mbps);
+                        let want_enabled =
+                            !no_rate_limit && (rate_limit || mbps.is_some() || config_enabled);
+                        assert_eq!(
+                            options.download_rate_limit_enabled, want_enabled,
+                            "enabled: config={config_enabled} rate_limit={rate_limit} \
+                             no_rate_limit={no_rate_limit} mbps={mbps:?}"
+                        );
+                        let want_mbps = if mbps.is_some() { 12.5 } else { config_mbps };
+                        assert_eq!(
+                            options.download_rate_limit_mbps, want_mbps,
+                            "mbps: config={config_mbps} rate_limit={rate_limit} \
+                             no_rate_limit={no_rate_limit} mbps={mbps:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
