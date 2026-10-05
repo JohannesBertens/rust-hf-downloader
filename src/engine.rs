@@ -13,7 +13,8 @@
 //! - [`EngineState::enqueue`] is the single home of the enqueue transaction
 //!   (registry bookkeeping → queue accounting → HUD mirror → channel sends
 //!   → failed-send rollback) that four TUI flows and two CLI flows used to
-//!   inline; every per-site divergence is an explicit [`EnqueuePolicy`] knob.
+//!   inline; every per-site divergence is an explicit, constructor-sealed
+//!   [`EnqueuePolicy`] knob.
 //! - [`bootstrap`] is the full startup sequence the CLI frontends use
 //!   (fresh state → registry-mirror seed → both spawns); [`seed_registry_mirror`]
 //!   is the shared mirror-seed step inside it, also reused by the TUI's
@@ -166,7 +167,13 @@ impl EngineState {
         // --- 1. Registry bookkeeping, before any queue work (the order of
         //         every legacy site) ---------------------------------------
         let (invalid, aborted) = match &policy.registry {
-            RegistryMode::None => (Vec::new(), None),
+            // The two no-write flavors share one arm (`on_invalid` =
+            // SkipValidation): neither validates paths at enqueue time
+            // — resume re-queues entries that were validated when first
+            // recorded, hf-cache mirrors the local cache layout, and
+            // `start_download` sanitizes every filename component before
+            // writing regardless.
+            RegistryMode::AlreadyRecorded | RegistryMode::StagingSweep => (Vec::new(), None),
             RegistryMode::Mirror { base, entry_size } => {
                 // TUI confirm flows: mirror clone → per-file validate (an
                 // invalid file is skipped from the registry and reported,
@@ -184,38 +191,49 @@ impl EngineState {
                         &file.model_id,
                         &file.filename,
                     ) {
-                        Ok(path) => path,
+                        Ok(path) => Some(path),
                         Err(e) => {
-                            skipped.push((file.filename.clone(), e));
-                            continue;
+                            // on_invalid = ReportAndQueue: report the
+                            // file and keep it out of the registry —
+                            // the queue work below still queues it.
+                            // (No constructor pairs a mirror write
+                            // with the other flavors; if one ever
+                            // does, its invalid files stay out of the
+                            // registry too.)
+                            if policy.on_invalid == InvalidPolicy::ReportAndQueue {
+                                skipped.push((file.filename.clone(), e));
+                            }
+                            None
                         }
                     };
-                    let url =
-                        crate::api::resolve_url(&file.model_id, &file.filename, &file.revision);
-                    if !registry.downloads.iter().any(|d| d.url == url) {
-                        registry.downloads.push(DownloadMetadata {
-                            model_id: file.model_id.clone(),
-                            filename: file.filename.clone(),
-                            url,
-                            local_path: validated.to_string_lossy().to_string(),
-                            total_size: match entry_size {
-                                RegistryEntrySize::Zero => 0,
-                                RegistryEntrySize::FromQueued => file.total_size,
-                            },
-                            downloaded_size: 0,
-                            status: DownloadStatus::Incomplete,
-                            expected_sha256: file.expected_sha256.clone(),
-                            // One rule reproduces both legacy flavors: the
-                            // TUI always queues the default revision (→
-                            // `None`, as its inline code hardcoded) and the
-                            // CLI records the revision only when it differs
-                            // from the default.
-                            revision: if file.revision == crate::api::DEFAULT_REVISION {
-                                None
-                            } else {
-                                Some(file.revision.clone())
-                            },
-                        });
+                    if let Some(validated) = validated {
+                        let url =
+                            crate::api::resolve_url(&file.model_id, &file.filename, &file.revision);
+                        if !registry.downloads.iter().any(|d| d.url == url) {
+                            registry.downloads.push(DownloadMetadata {
+                                model_id: file.model_id.clone(),
+                                filename: file.filename.clone(),
+                                url,
+                                local_path: validated.to_string_lossy().to_string(),
+                                total_size: match entry_size {
+                                    RegistryEntrySize::Zero => 0,
+                                    RegistryEntrySize::FromQueued => file.total_size,
+                                },
+                                downloaded_size: 0,
+                                status: DownloadStatus::Incomplete,
+                                expected_sha256: file.expected_sha256.clone(),
+                                // One rule reproduces both legacy flavors: the
+                                // TUI always queues the default revision (→
+                                // `None`, as its inline code hardcoded) and the
+                                // CLI records the revision only when it differs
+                                // from the default.
+                                revision: if file.revision == crate::api::DEFAULT_REVISION {
+                                    None
+                                } else {
+                                    Some(file.revision.clone())
+                                },
+                            });
+                        }
                     }
                 }
                 crate::registry::save_registry(&registry);
@@ -223,11 +241,12 @@ impl EngineState {
                 (skipped, None)
             }
             RegistryMode::Disk { base } => {
-                // CLI download flow: validate every file first — the first
-                // invalid filename aborts the whole enqueue (nothing is
-                // queued or sent) — then upsert the entries on DISK. This
-                // is exactly `register_pending`, whose byte-level behavior
-                // the registry golden tests pin. A single-model batch is
+                // CLI download flow (on_invalid = AbortAll): validate
+                // every file first — the first invalid filename aborts
+                // the whole enqueue (nothing is queued or sent) — then
+                // upsert the entries on DISK. This is exactly
+                // `register_pending`, whose byte-level behavior the
+                // registry golden tests pin. A single-model batch is
                 // assumed (the CLI flavor's shape), so the first file's
                 // model id and revision stand for the whole batch, exactly
                 // like the one-`model_id`-one-`revision` call it replaces.
@@ -258,19 +277,40 @@ impl EngineState {
             };
         }
 
-        // --- 2. Queue accounting, before the sends for every flavor but
-        //         resume -----------------------------------------------------
-        if policy.queue == QueueTiming::BeforeSends {
+        // --- 2. Queue accounting, before the sends for every discipline
+        //         but resume --------------------------------------------------
+        if policy.discipline != SendDiscipline::Resume {
             self.download_queue
                 .lock()
                 .await
                 .add(files.len(), total_bytes);
         }
 
-        // --- 3. HUD mirror + sends, in the per-flavor shape ----------------
+        // --- 3. HUD mirror + sends, in the discipline's shape ----------------
         let mut sent = 0;
-        match policy.items {
-            ItemsMirror::AllUpfront => {
+        match policy.discipline {
+            SendDiscipline::Interactive => {
+                // TUI confirm flavors: a summary lands only for files that
+                // made it onto the channel.
+                for file in files {
+                    if tx.send(file.clone()).is_ok() {
+                        sent += 1;
+                        let mut items = self.download_queue_items.lock().await;
+                        items.push(queue_item_summary(file));
+                    }
+                }
+            }
+            SendDiscipline::Resume => {
+                // Resume flavor: a summary per file regardless of send result.
+                for file in files {
+                    if tx.send(file.clone()).is_ok() {
+                        sent += 1;
+                    }
+                    let mut items = self.download_queue_items.lock().await;
+                    items.push(queue_item_summary(file));
+                }
+            }
+            SendDiscipline::Batch => {
                 // CLI flavors: every summary first (one lock), then sends.
                 {
                     let mut items = self.download_queue_items.lock().await;
@@ -284,45 +324,25 @@ impl EngineState {
                     }
                 }
             }
-            ItemsMirror::PerSuccessfulSend => {
-                // TUI confirm flavors: a summary lands only for files that
-                // made it onto the channel.
-                for file in files {
-                    if tx.send(file.clone()).is_ok() {
-                        sent += 1;
-                        let mut items = self.download_queue_items.lock().await;
-                        items.push(queue_item_summary(file));
-                    }
-                }
-            }
-            ItemsMirror::PerSendUnconditional => {
-                // Resume flavor: a summary per file regardless of send result.
-                for file in files {
-                    if tx.send(file.clone()).is_ok() {
-                        sent += 1;
-                    }
-                    let mut items = self.download_queue_items.lock().await;
-                    items.push(queue_item_summary(file));
-                }
-            }
         }
 
-        // --- 4. Resume flavor accounts the queue once, after the sends ---
-        if policy.queue == QueueTiming::AfterSends {
+        // --- 4. Resume discipline accounts the queue once, after the
+        //         sends -------------------------------------------------------
+        if policy.discipline == SendDiscipline::Resume {
             self.download_queue
                 .lock()
                 .await
                 .add(files.len(), total_bytes);
         }
 
-        // --- 5. Failed-send rollback (TUI confirm flavors): remove the
+        // --- 5. Failed-send rollback (Interactive only): remove the
         //         failed tail from the queue accounting — today's
         //         arithmetic, which charges the bytes of the files after
         //         the first `sent` ones (exact while failures are
         //         tail-contiguous, as they are for a closed channel). The
-        //         HUD mirror needs no rollback: `PerSuccessfulSend` only
-        //         ever pushed for successful sends.
-        if policy.failed_send_rollback && sent < files.len() {
+        //         HUD mirror needs no rollback: Interactive only ever
+        //         pushed for successful sends.
+        if policy.discipline == SendDiscipline::Interactive && sent < files.len() {
             let failed_bytes: u64 = files.iter().skip(sent).map(|f| f.total_size).sum();
             self.download_queue
                 .lock()
@@ -368,13 +388,17 @@ pub fn parse_auth_status(status: &str) -> Option<&str> {
 /// knob 1 of the W2.1 table; see [`EngineState::enqueue`]).
 #[derive(Debug, Clone)]
 pub enum RegistryMode {
-    /// Register nothing. Two deliberate flavors share this mode: the TUI
-    /// resume flow re-queues entries that already exist in the registry,
-    /// and `hf-cache sync` registers no pending entries at all — the named
-    /// staging-sweep policy (the engine writes staging-path entries during
-    /// the run; the sweeps at publish time and next bootstrap remove them,
-    /// keeping the TUI's resume view clean).
-    None,
+    /// TUI resume: the entries already exist on disk (recorded when the
+    /// files were first queued) — re-queueing must not touch them.
+    AlreadyRecorded,
+    /// `hf-cache sync`: registers NOTHING pending — the named
+    /// staging-sweep decision (the download path writes staging-path
+    /// entries during the run; the sweeps at publish time and next
+    /// bootstrap remove them, keeping the TUI's resume view clean; see
+    /// `cli/hf_cache/sync.rs`). The former `None` variant was split into
+    /// these two names because it conflated both intents (and collided
+    /// with `Option::None` under glob imports).
+    StagingSweep,
     /// TUI confirm flows: read the engine's registry MIRROR, append an
     /// `Incomplete` entry for every file whose path validates and whose
     /// url is not recorded yet (invalid files are skipped and reported —
@@ -409,60 +433,82 @@ pub enum RegistryEntrySize {
     FromQueued,
 }
 
-/// When `download_queue.add` runs (divergence knob 2): every flavor
-/// accounts the queue BEFORE sending, except the resume flow, which sends
-/// everything first and accounts once afterwards.
+/// How the channel sends interact with the queue accounting and the HUD
+/// mirror (divergence knob 2 of the W2.1 table; see
+/// [`EngineState::enqueue`]). One enum replaces the three independently
+/// combinable knobs it used to be (`QueueTiming` + `ItemsMirror` +
+/// `failed_send_rollback`): the six legacy inline sites used exactly
+/// three correlated combinations, so the type now makes every other mix
+/// unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueTiming {
-    BeforeSends,
-    AfterSends,
+pub enum SendDiscipline {
+    /// TUI confirm flavors: the queue is accounted BEFORE the sends, a
+    /// HUD summary lands only per SUCCESSFUL send, and the failed-send
+    /// tail is rolled back out of the queue accounting.
+    Interactive,
+    /// TUI resume flavor: every send happens first, the queue is
+    /// accounted once AFTER them, a HUD summary lands per file
+    /// regardless of send result, and nothing is ever rolled back.
+    Resume,
+    /// CLI flavors: every HUD summary is pushed up front (one lock),
+    /// the queue is accounted before the sends, and nothing is rolled
+    /// back.
+    Batch,
 }
 
-/// How the `download_queue_items` HUD mirror is populated (divergence
-/// knob 3).
+/// What the enqueue transaction does with a file whose path fails
+/// validation (divergence knob 3; the rule used to live in comments
+/// inside the registry arms below).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ItemsMirror {
-    /// TUI confirm flavors: after each SUCCESSFUL send, push that file's
-    /// summary (failed sends never reach the HUD).
-    PerSuccessfulSend,
-    /// TUI resume flavor: push each file's summary right after its send,
-    /// regardless of whether the send succeeded.
-    PerSendUnconditional,
-    /// CLI flavors: push every summary up front (one lock), before any
-    /// send.
-    AllUpfront,
+pub enum InvalidPolicy {
+    /// Mirror-registry flavors (TUI confirms): the invalid file is
+    /// skipped from the registry and reported via
+    /// [`EnqueueOutcome::invalid`] — but still queued and sent.
+    ReportAndQueue,
+    /// Disk-registry flavor (CLI `download`): the first invalid
+    /// filename aborts the whole enqueue (via `register_pending`'s
+    /// validate-first pass) — nothing is queued or sent; the error is
+    /// reported via [`EnqueueOutcome::aborted`].
+    AbortAll,
+    /// The no-registry flavors (TUI resume, `hf-cache sync`): no path
+    /// validation runs at enqueue time today — resume re-queues entries
+    /// that were validated when first recorded, hf-cache mirrors the
+    /// local cache layout, and `start_download` sanitizes every
+    /// filename component before writing regardless.
+    SkipValidation,
 }
 
-/// The full shape of one enqueue transaction: every knob is a documented
-/// divergence between the six legacy inline sites (see the W2.1 divergence
-/// table). Use the named constructors for the six known flavors.
+/// The full shape of one enqueue transaction: every field is a
+/// documented divergence between the six legacy inline sites (see the
+/// W2.1 divergence table). The fields are private on purpose — the five
+/// named constructors are the only public API (the design-review sealing
+/// decision: the raw knobs were N ways to spell one of five known
+/// flavors, and only their correlated combinations ever occurred).
 #[derive(Debug, Clone)]
 pub struct EnqueuePolicy {
-    /// Registry bookkeeping: none / TUI mirror upsert / CLI disk upsert.
-    pub registry: RegistryMode,
-    /// When `download_queue.add` runs relative to the sends.
-    pub queue: QueueTiming,
-    /// How `download_queue_items` is populated.
-    pub items: ItemsMirror,
-    /// Whether failed sends roll the failed tail back out of the queue
-    /// accounting (divergence knob 4; only the TUI confirm flavors roll
-    /// back — their HUD mirror never recorded the failed files).
-    pub failed_send_rollback: bool,
+    /// Registry bookkeeping: TUI mirror upsert / CLI disk upsert /
+    /// no writes (resume, staging sweep).
+    registry: RegistryMode,
+    /// How the sends interact with queue accounting and the HUD mirror.
+    discipline: SendDiscipline,
+    /// What happens to a file whose path fails validation.
+    on_invalid: InvalidPolicy,
 }
 
 impl EnqueuePolicy {
     /// TUI `confirm_download` (GGUF quant group): mirror registry with
-    /// zero-size entries, queue accounted before the sends, HUD mirror per
-    /// successful send, failed-send tail rollback.
+    /// zero-size entries; interactive sends (queue accounted before the
+    /// sends, HUD summary per successful send, failed-send tail
+    /// rollback); invalid files are skipped from the registry, reported,
+    /// and still queued.
     pub fn tui_quant(base: impl Into<String>) -> Self {
         Self {
             registry: RegistryMode::Mirror {
                 base: base.into(),
                 entry_size: RegistryEntrySize::Zero,
             },
-            queue: QueueTiming::BeforeSends,
-            items: ItemsMirror::PerSuccessfulSend,
-            failed_send_rollback: true,
+            discipline: SendDiscipline::Interactive,
+            on_invalid: InvalidPolicy::ReportAndQueue,
         }
     }
 
@@ -474,46 +520,43 @@ impl EnqueuePolicy {
                 base: base.into(),
                 entry_size: RegistryEntrySize::FromQueued,
             },
-            queue: QueueTiming::BeforeSends,
-            items: ItemsMirror::PerSuccessfulSend,
-            failed_send_rollback: true,
+            discipline: SendDiscipline::Interactive,
+            on_invalid: InvalidPolicy::ReportAndQueue,
         }
     }
 
-    /// TUI resume: no registry writes (entries already exist), queue
-    /// accounted AFTER the sends, HUD mirror pushed unconditionally per
-    /// file, no rollback.
+    /// TUI resume: no registry writes (entries already exist), sends
+    /// first with the queue accounted once after them, HUD mirror pushed
+    /// unconditionally per file, no rollback, no path validation.
     pub fn tui_resume() -> Self {
         Self {
-            registry: RegistryMode::None,
-            queue: QueueTiming::AfterSends,
-            items: ItemsMirror::PerSendUnconditional,
-            failed_send_rollback: false,
+            registry: RegistryMode::AlreadyRecorded,
+            discipline: SendDiscipline::Resume,
+            on_invalid: InvalidPolicy::SkipValidation,
         }
     }
 
-    /// CLI `download`: disk upsert via `register_pending` (validate-first,
-    /// abort on the first invalid file), queue accounted before the sends,
-    /// HUD mirror pushed up front, no rollback.
+    /// CLI `download`: disk upsert via `register_pending`
+    /// (validate-first, abort on the first invalid file), queue accounted
+    /// before the sends, HUD mirror pushed up front, no rollback.
     pub fn cli_download(base: impl Into<String>) -> Self {
         Self {
             registry: RegistryMode::Disk { base: base.into() },
-            queue: QueueTiming::BeforeSends,
-            items: ItemsMirror::AllUpfront,
-            failed_send_rollback: false,
+            discipline: SendDiscipline::Batch,
+            on_invalid: InvalidPolicy::AbortAll,
         }
     }
 
     /// `hf-cache sync`: registers NOTHING pending — the named
     /// staging-sweep decision (purge runs at bootstrap/publish, not here;
-    /// see `cli/hf_cache/sync.rs`); queue accounted before the sends, HUD mirror
-    /// pushed up front, no rollback.
+    /// see `cli/hf_cache/sync.rs`); batch sends (queue accounted before
+    /// the sends, HUD mirror pushed up front, no rollback), no path
+    /// validation.
     pub fn hf_cache_sync() -> Self {
         Self {
-            registry: RegistryMode::None,
-            queue: QueueTiming::BeforeSends,
-            items: ItemsMirror::AllUpfront,
-            failed_send_rollback: false,
+            registry: RegistryMode::StagingSweep,
+            discipline: SendDiscipline::Batch,
+            on_invalid: InvalidPolicy::SkipValidation,
         }
     }
 }

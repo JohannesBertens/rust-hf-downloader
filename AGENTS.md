@@ -91,9 +91,16 @@ removed in v2.0.0 because its duplicated copy drifted). Every queue handoff
 transaction (registry bookkeeping per policy → `download_queue.add` →
 `download_queue_items` mirror → `download_tx` sends → failed-send
 rollback). The per-frontend divergences are explicit `EnqueuePolicy`
-knobs (TUI mirror-registry upsert vs CLI `register_pending` disk upsert
-vs hf-cache's named no-register staging-sweep policy; queue-accounting
-timing; HUD-mirror population; rollback); user-facing status/error
+knobs — the fields are sealed; the five named constructors
+(`tui_quant`/`tui_repository`/`tui_resume`/`cli_download`/`hf_cache_sync`)
+are the only public API: `RegistryMode` (TUI mirror-registry upsert vs CLI
+`register_pending` disk upsert vs the two no-write flavors
+`AlreadyRecorded`/`StagingSweep`), `SendDiscipline`
+(`Interactive`/`Resume`/`Batch` — queue-accounting timing, HUD-mirror
+population, and rollback collapsed into the three correlated combinations
+that actually occur), and `InvalidPolicy` (`ReportAndQueue` for the mirror
+flavors, `AbortAll` for the disk flavor, `SkipValidation` for the no-write
+flavors); user-facing status/error
 strings stay at the call sites (`EnqueueOutcome`). The CLI signals
 completion by dropping `download_tx` (manager join resolves) and then
 waiting for `EngineState::verification_idle()`; per-file results stream over
