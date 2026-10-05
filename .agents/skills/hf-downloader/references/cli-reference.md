@@ -24,6 +24,7 @@ output, download-count sort, etc.) — a fresh `$HOME` works out of the box.
 | `--no-verify` | — | Skip SHA256 verification |
 | `--json` | — | NDJSON events on stdout (see `events.md`) |
 | `-q`, `--quiet` | — | Human mode only: suppress progress; errors and final summary remain |
+| `--progress` | `MODE` | Human progress output: `auto` (default; tty single-line rewrites, silent when piped), `plain` (one newline progress line every ~10 s, tty-independent — docker/CI logs; adds a verification heartbeat during the post-download SHA256 drain), `none` |
 
 **Selector rules** — at most one of `--quant` / `--file` / `--all`.
 Combining them exits `64` (usage). No selector works only when the repo has

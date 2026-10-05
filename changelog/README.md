@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] - 2026-10-05
+
+### Version 2.13.0 (2026-10-05)
+- **Added**: `--progress <MODE>` flag (`download`, `hf-cache sync`):
+  `plain` prints one newline progress line every ~10 s on stderr,
+  tty-independent — for `docker run` without `-t` and CI logs — and
+  adds a `verifying: N in flight, M verified` heartbeat for the
+  post-download SHA256 drain (previously silent between `✓ verified`
+  milestones). `auto` (default; unchanged tty rewrites / silent when
+  piped), `none` disables. `--quiet`/`--json` still take precedence.
+- **Internal**: progress rendering extracted into pure, unit-tested
+  helpers shared by the tty and plain renderers; heartbeat reads only
+  pre-existing try-locks in `poll_once`.
+
 ## [2.12.0] - 2026-10-05
 
 ### Version 2.12.0 (2026-10-05)
