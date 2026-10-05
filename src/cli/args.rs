@@ -4,7 +4,7 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::ProgressMode;
+use super::report::ProgressMode;
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
