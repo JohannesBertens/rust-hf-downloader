@@ -1,6 +1,6 @@
 # Plan: `hf-cache sync` — L1, the HuggingFace-cache drop-in writer
 
-**Status:** proposal (not yet implemented)
+**Status:** implemented on `feat/hf-cache-sync` (M1–M5: `hf-cache sync`/`path`, staging→publish pipeline, interop hardening items R1–R6, container docs; M4 `trees/`+`.no_exist` writers and M6 TUI toggle remain future work)
 **Goal:** A single new subcommand that populates the **real** HuggingFace hub
 cache (`~/.cache/huggingface/hub`) using the existing download engine, so
 that `vllm serve <repo_id>` (and transformers, and `hf download`'s resume
@@ -308,7 +308,7 @@ the repo dir.
 |---|---|
 | blob present, size ok, symlink ok | skip (up_to_date), no network |
 | blob present, symlink missing/dangling | relink only |
-| staging `.incomplete` exists | engine Range-resumes it |
+| staging `.incomplete` exists | engine re-fetches the file from scratch (its resume logic restarts, not Range-continues) |
 | staging complete file exists | engine skips download, verification re-runs, publish proceeds |
 | upstream branch moved | new SHA → new snapshot dir fetched; `refs/` overwritten; old snapshot retained |
 | `--force` | re-download regardless; blob replaced atomically |
