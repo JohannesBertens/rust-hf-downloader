@@ -23,13 +23,13 @@ pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
     }
     let revision = effective_revision(&args.revision);
     let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
-    let repo_dir = cache_dir.join(crate::hf_cache::repo_dir_name(&args.model_id));
+    let repo_dir = cache_dir.join(crate::cache_layout::repo_dir_name(&args.model_id));
 
     // refs/<rev> lookup: pure path math, no network (§2.1).
     if let Ok(sha) = std::fs::read_to_string(repo_dir.join("refs").join(&revision)) {
         let sha = sha.trim();
         if !sha.is_empty() {
-            let snapshot = absolute_path(&crate::hf_cache::snapshot_dir(
+            let snapshot = absolute_path(&crate::cache_layout::snapshot_dir(
                 &cache_dir,
                 &args.model_id,
                 sha,
@@ -51,7 +51,7 @@ pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
     let token = resolve_run_token(args.token.clone(), &crate::config::load_config());
     match crate::api::resolve_revision_sha(&args.model_id, &revision, token.as_ref()).await {
         Ok(sha) => {
-            let snapshot = absolute_path(&crate::hf_cache::snapshot_dir(
+            let snapshot = absolute_path(&crate::cache_layout::snapshot_dir(
                 &cache_dir,
                 &args.model_id,
                 &sha,

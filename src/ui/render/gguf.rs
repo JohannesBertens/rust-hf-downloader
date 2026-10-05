@@ -2,8 +2,8 @@
 //! group (plan W3.4b split out of `render.rs`; bodies byte-identical).
 
 use super::{border_style, panel_list, FocusCtx};
+use crate::fmt::size_full;
 use crate::models::{FocusedPane, QuantizationGroup, QuantizationInfo};
-use crate::utils::format_size;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -51,7 +51,7 @@ pub(super) fn render_gguf_panels(
     let quant_items: Vec<ListItem> = quantizations
         .iter()
         .map(|group| {
-            let size_str = format_size(group.total_size);
+            let size_str = size_full(group.total_size);
             let is_downloaded = complete_downloads.contains_key(&group.files[0].filename);
 
             let mut spans = vec![
@@ -118,7 +118,7 @@ pub(super) fn render_gguf_panels(
     let file_items: Vec<ListItem> = files_for_selected
         .iter()
         .map(|file| {
-            let size_str = format_size(file.size);
+            let size_str = size_full(file.size);
             let is_downloaded = complete_downloads.contains_key(&file.filename);
 
             // Inner width minus borders (2), highlight-symbol gutter (3) and

@@ -22,6 +22,10 @@
 //! matching sizes are skipped; `--force` refetches them.
 //!
 //! Driven by `cli::hf_cache::sync`; unit tests exercise the pipeline directly.
+//!
+//! Naming (W-final): this module is the cache *layout writer* — named
+//! `cache_layout` to disambiguate from `cli::hf_cache/`, the `hf-cache`
+//! command group that drives it.
 
 use crate::models::RepoFile;
 use crate::utils::atomic_rename_with_retry;

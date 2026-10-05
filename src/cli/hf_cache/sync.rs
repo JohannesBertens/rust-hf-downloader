@@ -116,7 +116,9 @@ fn relink_up_to_date(
         let Some(file) = tree.iter().find(|f| f.rfilename == *path) else {
             continue; // plan() only reports tree paths; skip defensively
         };
-        if let Err(e) = crate::hf_cache::ensure_snapshot_entry(repo_dir, sha, file, use_symlinks) {
+        if let Err(e) =
+            crate::cache_layout::ensure_snapshot_entry(repo_dir, sha, file, use_symlinks)
+        {
             return Err(format!("cannot link snapshot entry for {path}: {e}"));
         }
     }
@@ -130,7 +132,7 @@ fn print_sync_dry_run(
     model: &str,
     revision: &str,
     sha: &str,
-    plan: &crate::hf_cache::SyncPlan,
+    plan: &crate::cache_layout::SyncPlan,
     tree: &[crate::models::RepoFile],
     cache_dir: &Path,
 ) {
@@ -157,7 +159,7 @@ fn print_sync_dry_run(
             " {:<6} {:<58} {:>9}",
             "fetch",
             crate::fmt::truncate_path_cli(&item.repo_path, 58),
-            crate::utils::format_size(item.size)
+            crate::fmt::size_full(item.size)
         );
     }
     for path in &plan.up_to_date {
@@ -166,14 +168,14 @@ fn print_sync_dry_run(
             " {:<6} {:<58} {:>9}",
             "cached",
             crate::fmt::truncate_path_cli(path, 58),
-            crate::utils::format_size(size_of(path))
+            crate::fmt::size_full(size_of(path))
         );
     }
     let _ = writeln!(
         out,
         "{} file(s) to fetch ({}), {} already cached — dry run, nothing written",
         plan.fetch.len(),
-        crate::utils::format_size(fetch_bytes),
+        crate::fmt::size_full(fetch_bytes),
         plan.up_to_date.len()
     );
     let _ = out.flush();
@@ -268,7 +270,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 
     // --- 5. Plan against the current cache (R6) + SyncPlanned (§2.4) --------
     let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
-    let plan = match crate::hf_cache::plan(
+    let plan = match crate::cache_layout::plan(
         &cache_dir,
         &args.model_id,
         &metadata.siblings,
@@ -320,8 +322,8 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 
     // --- 7. Fully-cached no-op (§5.2 step 3): write refs, relink entries,
     //        print the snapshot path, exit 0.
-    let repo_dir = cache_dir.join(crate::hf_cache::repo_dir_name(&args.model_id));
-    let staging = crate::hf_cache::staging_dir(&repo_dir);
+    let repo_dir = cache_dir.join(crate::cache_layout::repo_dir_name(&args.model_id));
+    let staging = crate::cache_layout::staging_dir(&repo_dir);
     let use_symlinks = symlinks_enabled(
         args.no_symlinks,
         std::env::var("HF_HUB_DISABLE_SYMLINKS").ok().as_deref(),
@@ -342,7 +344,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             return EXIT_FAILURE;
         }
         if let Err(e) =
-            crate::hf_cache::write_refs(&repo_dir, ref_name_for_revision(&revision), &sha)
+            crate::cache_layout::write_refs(&repo_dir, ref_name_for_revision(&revision), &sha)
         {
             reporter.emit(&Event::error(
                 ErrorCode::Io,
@@ -361,7 +363,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
                 total_bytes: 0,
             },
         });
-        let snapshot_path = absolute_path(&crate::hf_cache::snapshot_dir(
+        let snapshot_path = absolute_path(&crate::cache_layout::snapshot_dir(
             &cache_dir,
             &args.model_id,
             &sha,
@@ -378,7 +380,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     }
 
     // --- 8. Layout dirs + CACHEDIR.TAG (§5.2 step 5) -------------------------
-    let snapshot_root = crate::hf_cache::snapshot_dir(&cache_dir, &args.model_id, &sha);
+    let snapshot_root = crate::cache_layout::snapshot_dir(&cache_dir, &args.model_id, &sha);
     for dir in [repo_dir.join("blobs"), snapshot_root, staging.clone()] {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             reporter.emit(&Event::error(
@@ -538,7 +540,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
                 }
             },
         }
-        match crate::hf_cache::publish_one(&repo_dir, &sha, item, &staged, use_symlinks) {
+        match crate::cache_layout::publish_one(&repo_dir, &sha, item, &staged, use_symlinks) {
             Ok(blob_oid) => {
                 published.push(item.repo_path.clone());
                 reporter.emit(&Event::FilePublished {
@@ -558,14 +560,14 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     if !interrupted && !failed {
         // R2: refs only for branch/tag revisions, never raw SHAs.
         if let Err(e) =
-            crate::hf_cache::write_refs(&repo_dir, ref_name_for_revision(&revision), &sha)
+            crate::cache_layout::write_refs(&repo_dir, ref_name_for_revision(&revision), &sha)
         {
             publish_failures.push(format!("refs/{}: {}", revision, e));
             failed = true;
         } else {
             // Full success: drop staging remnants of published files;
             // .incomplete files of failed runs keep their resume value.
-            let _ = crate::hf_cache::cleanup_staging(&repo_dir, &published);
+            let _ = crate::cache_layout::cleanup_staging(&repo_dir, &published);
         }
     }
 
@@ -582,7 +584,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     reporter.emit(&Event::Done { summary });
     reporter.finish();
 
-    let snapshot_path = absolute_path(&crate::hf_cache::snapshot_dir(
+    let snapshot_path = absolute_path(&crate::cache_layout::snapshot_dir(
         &cache_dir,
         &args.model_id,
         &sha,
@@ -620,8 +622,8 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 fn acquire_sync_lock_or_fail(
     staging: &Path,
     reporter: &mut Reporter,
-) -> Result<crate::hf_cache::SyncLockGuard, i32> {
-    crate::hf_cache::acquire_sync_lock(staging).map_err(|e| {
+) -> Result<crate::cache_layout::SyncLockGuard, i32> {
+    crate::cache_layout::acquire_sync_lock(staging).map_err(|e| {
         reporter.emit(&Event::error(
             ErrorCode::SyncLock,
             format!("cannot acquire sync lock: {e}"),

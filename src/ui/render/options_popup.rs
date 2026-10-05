@@ -3,7 +3,7 @@
 //! `render.rs`; W4.7 moved the field list into the [`OPTIONS_FIELDS`]
 //! table shared with `App::modify_option`).
 
-use crate::utils::format_size;
+use crate::fmt::size_full;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -139,13 +139,13 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "Min Chunk Size:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::MinChunkSize,
-        value: |options, _, _, _| format_size(options.min_chunk_size),
+        value: |options, _, _, _| size_full(options.min_chunk_size),
     },
     OptionsFieldSpec {
         label: "Max Chunk Size:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::MaxChunkSize,
-        value: |options, _, _, _| format_size(options.max_chunk_size),
+        value: |options, _, _, _| size_full(options.max_chunk_size),
     },
     OptionsFieldSpec {
         label: "Max Retries:",
@@ -215,7 +215,7 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "Verification Buffer Size:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::VerificationBufferSize,
-        value: |options, _, _, _| format_size(options.verification_buffer_size as u64),
+        value: |options, _, _, _| size_full(options.verification_buffer_size as u64),
     },
     OptionsFieldSpec {
         label: "Verification Update Interval:",

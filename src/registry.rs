@@ -18,9 +18,14 @@
 //! 2. **The save stays non-atomic** (`fs::File::create` semantics, errors
 //!    silently swallowed) — making it atomic is deliberately deferred
 //!    (plan §8.5); crash-truncation behavior is unchanged.
-//! 3. **The mirror is updated after the save, regardless of whether the
-//!    save succeeded** — today's silent-failure behavior, pinned by the
-//!    golden tests in `registry_tests`.
+//! 3. **`mark_complete` updates its mirror after the save, regardless of
+//!    whether the save succeeded** — today's silent-failure behavior,
+//!    pinned by the golden tests in `registry_tests`. `mark_mismatch` no
+//!    longer touches any mirror (final layering pass): the engine-mirror
+//!    patch moved to its caller, `verification::mark_mismatch_mirror`, so
+//!    this module is pure disk ops. Its timing contract — immediately
+//!    after the op, independent of the save outcome — is pinned by the
+//!    verification-side tests.
 //! 4. **No lock is held across load-modify-save.** The lost-update race
 //!    between concurrent writers is a known deferred defect (plan §8);
 //!    the ops must not add cross-op serialization.
@@ -249,12 +254,13 @@ pub(crate) fn path_matches(recorded: &str, actual: &Path) -> bool {
 }
 
 /// Record a SHA256 mismatch (`verification::verify_file`): the disk entry
-/// whose `local_path` matches flips to `HashMismatch`, is saved, and only
-/// then is the engine's registry mirror patched — regardless of whether
-/// the save succeeded. The disk and the mirror are patched independently
-/// (the mirror may lack the entry entirely; the disk is the source of
-/// truth).
-pub async fn mark_mismatch(download_registry: &Arc<Mutex<DownloadRegistry>>, local_path: &Path) {
+/// whose `local_path` matches flips to `HashMismatch` and is saved.
+/// Pure disk op (final layering pass): the engine's in-memory registry
+/// mirror is patched by the CALLER — `verification::mark_mismatch_mirror`
+/// — immediately after this op returns, regardless of whether the save
+/// succeeded (the mirror may lack the entry entirely; the disk is the
+/// source of truth).
+pub fn mark_mismatch(local_path: &Path) {
     let mut registry = load_registry();
     if let Some(entry) = registry
         .downloads
@@ -264,15 +270,6 @@ pub async fn mark_mismatch(download_registry: &Arc<Mutex<DownloadRegistry>>, loc
         entry.status = DownloadStatus::HashMismatch;
     }
     save_registry(&registry);
-
-    let mut mirror = download_registry.lock().await;
-    if let Some(entry) = mirror
-        .downloads
-        .iter_mut()
-        .find(|d| path_matches(&d.local_path, local_path))
-    {
-        entry.status = DownloadStatus::HashMismatch;
-    }
 }
 
 pub fn get_incomplete_downloads(

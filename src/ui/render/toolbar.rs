@@ -128,10 +128,10 @@ pub fn render_filter_toolbar(
     let sort_value = format!("{} {}", sort_name, sort_arrow);
     let separator1 = "  |  ";
     let downloads_label = "Min Downloads: ";
-    let downloads_value = crate::utils::format_number(min_downloads);
+    let downloads_value = crate::fmt::number(min_downloads);
     let separator2 = "  |  ";
     let likes_label = "Min Likes: ";
-    let likes_value = crate::utils::format_number(min_likes);
+    let likes_value = crate::fmt::number(min_likes);
 
     // Calculate x positions for each clickable area
     let mut x = inner.x;

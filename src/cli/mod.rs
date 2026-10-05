@@ -13,7 +13,7 @@
 //!
 //! `hf-cache sync` (plans/hf-cache-sync.md §2/§5.2) reuses the same engine
 //! to populate the real HuggingFace hub cache, publishing staged downloads
-//! atomically through [`crate::hf_cache`]; `hf-cache path` is the pure
+//! atomically through [`crate::cache_layout`]; `hf-cache path` is the pure
 //! path-math scripting helper.
 //!
 //! The TUI remains the default when the binary is started without a

@@ -3,7 +3,7 @@
 //! selector is unit-testable through [`select_sync_files`].
 //!
 //! Split out of `cli/hf_cache_cmd.rs` (plan W3.5); moved verbatim. The
-//! [`crate::hf_cache`] plan/publish pipeline consumes the selected paths in
+//! [`crate::cache_layout`] plan/publish pipeline consumes the selected paths in
 //! [`super::sync`].
 
 use crate::cli::events::FileDto;

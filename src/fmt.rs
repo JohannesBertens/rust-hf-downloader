@@ -27,9 +27,9 @@
 //! helper bodies as frozen oracles (characterization-first, H1): the
 //! differential table tests assert wrapper output == oracle output. The
 //! legacy helpers in `cli::report` and `ui::render` were deleted by
-//! W1.4b; `utils::format_size`/`utils::format_number` survive as
-//! delegates and are still pinned against the frozen oracles by
-//! [`crate::fmt::tests::utils_delegates_match_frozen_oracle`].
+//! W1.4b; the last `utils::format_size`/`utils::format_number` delegates
+//! were removed by the final cohesion pass (callers use `fmt::size_full` /
+//! `fmt::number` directly — pinned below against the same oracles).
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -554,25 +554,6 @@ mod tests {
 
     /// Widths from degenerate (0/1/2) through panel-realistic to no-op.
     const TRUNC_WIDTHS: [usize; 9] = [0, 1, 2, 3, 5, 7, 12, 20, 24];
-
-    /// `utils::format_size`/`utils::format_number` survive as one-line
-    /// delegates to `fmt` (widely used across the UI and CLI); pin them
-    /// against the frozen oracles so any later change to either side trips
-    /// a test.
-    #[test]
-    fn utils_delegates_match_frozen_oracle() {
-        use crate::utils;
-        for &b in SIZES.iter() {
-            assert_eq!(utils::format_size(b), oracle::format_size(b), "size {b}");
-        }
-        for &n in COUNTS.iter() {
-            assert_eq!(
-                utils::format_number(n),
-                oracle::format_number(n),
-                "count {n}"
-            );
-        }
-    }
 
     #[test]
     fn size_full_matches_oracle() {

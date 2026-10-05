@@ -2,8 +2,8 @@
 //! plus `--progress` modes; the progress-line building blocks (bar, ETA,
 //! path truncation) come from [`crate::fmt`].
 
+use crate::fmt::size_full;
 use crate::fmt::{bar_cli, eta_cli, truncate_path_cli};
-use crate::utils::format_size;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
@@ -149,7 +149,7 @@ impl Reporter {
                     self.line_stderr(&format!(
                         "{} file(s) to download, {} total",
                         files.len(),
-                        format_size(*total_bytes)
+                        size_full(*total_bytes)
                     ));
                 }
             }
@@ -209,7 +209,7 @@ impl Reporter {
                         " {} {} ({})",
                         mark,
                         truncate_path_cli(filename, 60),
-                        format_size(*bytes)
+                        size_full(*bytes)
                     ));
                 }
             }
@@ -234,7 +234,7 @@ impl Reporter {
                 self.line_stdout(&format!(
                     "Done: {} file(s), {} → {} downloaded, {} skipped (exists), {} verified, {} failed",
                     summary.files,
-                    format_size(summary.total_bytes),
+                    size_full(summary.total_bytes),
                     summary.downloaded,
                     summary.skipped,
                     summary.verified,
@@ -259,7 +259,7 @@ impl Reporter {
                         "{} file(s) to sync for {} ({} total, {} already cached)",
                         files.len(),
                         model,
-                        format_size(*total_bytes),
+                        size_full(*total_bytes),
                         skipped
                     ));
                 }
@@ -354,8 +354,8 @@ pub(super) fn format_file_progress(
         truncate_path_cli(filename, 42),
         pct.round() as u64,
         bar_cli(downloaded, total),
-        format_size(downloaded),
-        format_size(total),
+        size_full(downloaded),
+        size_full(total),
         speed_mbps,
         eta_suffix(speed_mbps, total.saturating_sub(downloaded)),
     )
@@ -387,8 +387,8 @@ pub(super) fn format_overall_progress(
         overall.files_done,
         overall.files_total,
         overall_pct.round() as u64,
-        format_size(overall.downloaded_bytes),
-        format_size(overall.total_bytes),
+        size_full(overall.downloaded_bytes),
+        size_full(overall.total_bytes),
         speed_mbps,
         eta_suffix(
             speed_mbps,

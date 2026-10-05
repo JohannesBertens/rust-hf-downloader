@@ -1,12 +1,18 @@
-//! Small shared helpers: [`format_size`] and [`format_number`] are thin
-//! aliases for the shared surface-pinned formatters in [`crate::fmt`]
-//! (kept because they are used across the UI and CLI),
-//! [`atomic_rename_with_retry`] is the shared final-rename primitive whose
-//! retry policy is chosen per call site (the download pipeline retries
-//! transient filesystem locks; other sites pass `retries = 0` for a plain
-//! single-attempt rename), and [`stream_file_digest`] / [`sha256_file`]
-//! are the shared streaming-digest primitives (one read+hash loop for the
-//! verification worker, the update path, and hub-cache blob hashing).
+//! Exactly two genuinely-generic helper families (final cohesion pass —
+//! the formatting delegates moved to their single home [`crate::fmt`]):
+//!
+//! - **Digest streaming**: [`stream_file_digest`] (one buffered
+//!   read+hash loop with per-chunk callbacks) plus [`sha256_file`] and
+//!   [`DIGEST_CHUNK`] — used by the verification worker and the hub-cache
+//!   layout writer.
+//! - **Atomic rename**: [`atomic_rename_with_retry`] and its async twin
+//!   [`atomic_rename_with_retry_async`] — the shared final-rename
+//!   primitive whose retry policy is chosen per call site (the download
+//!   pipeline retries transient filesystem locks; other sites pass
+//!   `retries = 0` for a plain single-attempt rename).
+//!
+//! Nothing else belongs here — both families are generic over their
+//! callers (no UI, CLI, engine or registry concepts appear below).
 
 use sha2::Digest as _;
 use std::io::Read;
@@ -24,7 +30,7 @@ pub(crate) const DIGEST_CHUNK: usize = 64 * 1024;
 /// read (the same loop the verification worker used to inline: open,
 /// buffered read, hash, report). Returns the number of bytes hashed, so
 /// callers that need a stat-vs-read consistency check (see
-/// [`crate::hf_cache::git_blob_sha1`]) can detect a file that changed
+/// [`crate::cache_layout::git_blob_sha1`]) can detect a file that changed
 /// size while being read.
 ///
 /// A `buffer_size` of 0 is legal: the reads then bypass buffering one
@@ -71,16 +77,6 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut hasher = sha2::Sha256::new();
     stream_file_digest(path, &mut hasher, DIGEST_CHUNK, |_, _| {})?;
     Ok(hex::encode(hasher.finalize()))
-}
-
-/// Abbreviated count (`1.2M`); see [`crate::fmt::number`].
-pub fn format_number(n: u64) -> String {
-    crate::fmt::number(n)
-}
-
-/// Byte size in full format (`1.00 GB`); see [`crate::fmt::size_full`].
-pub fn format_size(bytes: u64) -> String {
-    crate::fmt::size_full(bytes)
 }
 
 /// Rename with bounded retry for transient filesystem locks.
@@ -158,31 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn bytes_below_kb_boundary() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(1023), "1023 B");
-    }
-
-    #[test]
-    fn kb_boundary_switches_to_kb() {
-        assert_eq!(format_size(1024), "1.00 KB");
-    }
-
-    #[test]
-    fn mb_and_gb_boundaries() {
-        assert_eq!(format_size(1_048_576), "1.00 MB");
-        assert_eq!(format_size(1_073_741_824), "1.00 GB");
-        assert_eq!(format_size(5_368_709_120), "5.00 GB");
-    }
-
-    #[test]
-    fn format_number_abbreviates() {
-        assert_eq!(format_number(999), "999");
-        assert_eq!(format_number(1_000), "1.0K");
-        assert_eq!(format_number(1_234_567), "1.2M");
-    }
-
-    #[test]
     fn rename_moves_file_with_retry_budget() {
         let dir = tmp("rename-ok");
         let src = dir.join("src.bin");
@@ -196,8 +167,8 @@ mod tests {
 
     #[test]
     fn rename_zero_retries_is_plain_single_attempt() {
-        // retries = 0 is the policy hf_cache's rename_replacing delegates
-        // with: one attempt, success or the raw error.
+        // retries = 0 is the policy cache_layout's rename_replacing
+        // delegates with: one attempt, success or the raw error.
         let dir = tmp("rename-zero");
         let src = dir.join("src.bin");
         let dst = dir.join("dst.bin");

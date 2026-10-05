@@ -725,11 +725,11 @@ rust-hf-downloader/
     ├── engine.rs           # Shared download engine (manager + verification bootstrap)
     ├── models.rs           # Data structures & types
     ├── paths.rs            # Cross-platform config/registry/download path resolution
-    ├── hf_cache.rs         # HuggingFace hub cache layout writer
+    ├── cache_layout.rs    # HuggingFace hub cache layout writer (cache_layout: the on-disk shape; cli/hf_cache/ is the command group)
     ├── patterns.rs         # Python-fnmatch parity glob matcher (--include/--exclude)
     ├── update.rs           # Self-update backend (latest.json manifest + verified swap)
     ├── config.rs           # Configuration persistence (v0.9.0)
-    ├── utils.rs            # Formatting utilities
+    ├── utils.rs            # Streaming-digest + atomic-rename primitives (formatting lives in fmt.rs)
     ├── api.rs              # HuggingFace API client with auth (v0.9.5)
     ├── http_client.rs      # Authenticated HTTP requests (v0.9.5)
     ├── registry.rs         # Download registry persistence

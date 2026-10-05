@@ -93,9 +93,9 @@ Key modules
 - app.rs: run loop; spawns verification worker and download manager; defers network loads to avoid blocking draws
 - app/*: state, events, model and download flows
 
-9) utils.rs
-- format_number, format_size helpers for UI
-- atomic_rename_with_retry(src, dst, retries, delay): shared final-rename primitive; retry policy is per-site (download: 4 retries, 100ms linear backoff; hf_cache: retries=0 single attempt)
+9) utils.rs — exactly two genuinely-generic families (final pass; formatters moved to fmt.rs)
+- digest streaming: stream_file_digest(path, hasher, buffer_size, on_chunk) (progress-reporting read+hash loop), sha256_file, DIGEST_CHUNK
+- atomic rename: atomic_rename_with_retry / atomic_rename_with_retry_async (retry policy is per-site: download 4 retries/100ms linear backoff; cache_layout: retries=0 single attempt)
 
 10) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
 - `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::bootstrap

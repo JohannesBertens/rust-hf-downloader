@@ -170,9 +170,14 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
 
                 // Mark the mismatch in the on-disk registry (the source of
                 // truth — the in-memory engine mirror may be empty, e.g. for
-                // CLI runs that never loaded it) and keep the mirror in sync
-                // for TUI views.
-                crate::registry::mark_mismatch(&state.download_registry, &local_path).await;
+                // CLI runs that never loaded it), then patch the mirror for
+                // TUI views. Layering (final pass): the disk op is the pure
+                // registry op; the engine-mirror patch lives here, with the
+                // caller — same timing as when the op did both: mirror
+                // immediately after the disk save, regardless of its
+                // outcome.
+                crate::registry::mark_mismatch(&local_path);
+                mark_mismatch_mirror(&state.download_registry, &local_path).await;
             }
         }
         Err(e) => {
@@ -191,6 +196,27 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
     {
         let mut progress = state.verification_progress.lock().await;
         progress.retain(|p| p.filename != item.filename);
+    }
+}
+
+/// Patch the engine's in-memory registry mirror for a SHA mismatch
+/// (final layering pass: moved out of the `registry::mark_mismatch` op so
+/// that module is pure disk ops; the engine mirror is engine-caller
+/// state). Same contract as when the op owned it: called immediately
+/// after the disk op, regardless of whether the disk save succeeded; the
+/// mirror is patched independently and may lack the entry entirely (the
+/// disk is the source of truth). Pinned by the tests below.
+async fn mark_mismatch_mirror(
+    download_registry: &Arc<Mutex<crate::models::DownloadRegistry>>,
+    local_path: &Path,
+) {
+    let mut mirror = download_registry.lock().await;
+    if let Some(entry) = mirror
+        .downloads
+        .iter_mut()
+        .find(|d| crate::registry::path_matches(&d.local_path, local_path))
+    {
+        entry.status = crate::models::DownloadStatus::HashMismatch;
     }
 }
 
@@ -433,5 +459,68 @@ mod tests {
             .update_interval_iterations
             .store(old_interval, Ordering::Relaxed);
         std::fs::remove_file(&path).ok();
+    }
+
+    // ----------------- mark_mismatch_mirror (final layering pass) ---------
+    // The mirror patch moved out of `registry::mark_mismatch` so that
+    // module is pure disk ops; these tests pin its caller-side contract:
+    // only the matching entry flips, an empty mirror stays empty, and a
+    // mirror lacking the entry is untouched. In-memory only — no registry
+    // path involved, so no ENV_MUTEX/DataDirGuard is needed.
+
+    fn mirror_with(
+        entries: &[(&str, crate::models::DownloadStatus)],
+    ) -> Arc<Mutex<crate::models::DownloadRegistry>> {
+        Arc::new(Mutex::new(crate::models::DownloadRegistry {
+            downloads: entries
+                .iter()
+                .map(|(path, status)| crate::models::DownloadMetadata {
+                    model_id: "org/model".to_string(),
+                    filename: path.rsplit('/').next().unwrap().to_string(),
+                    url: format!("https://huggingface.co/org/model/resolve/main/{}", path),
+                    local_path: path.to_string(),
+                    total_size: 1,
+                    downloaded_size: 0,
+                    status: status.clone(),
+                    expected_sha256: None,
+                    revision: None,
+                })
+                .collect(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn mismatch_mirror_patch_flips_only_the_matching_entry() {
+        let mirror = mirror_with(&[
+            ("/x/a.gguf", crate::models::DownloadStatus::Complete),
+            ("/x/b.gguf", crate::models::DownloadStatus::Incomplete),
+        ]);
+        mark_mismatch_mirror(&mirror, std::path::Path::new("/x/a.gguf")).await;
+        let m = mirror.lock().await;
+        assert_eq!(
+            m.downloads[0].status,
+            crate::models::DownloadStatus::HashMismatch
+        );
+        assert_eq!(
+            m.downloads[1].status,
+            crate::models::DownloadStatus::Incomplete
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatch_mirror_patch_leaves_empty_and_unmatched_mirrors_untouched() {
+        // The CLI-before-bootstrap case: an empty mirror stays empty (the
+        // disk is the source of truth).
+        let empty = mirror_with(&[]);
+        mark_mismatch_mirror(&empty, std::path::Path::new("/x/missing.gguf")).await;
+        assert!(empty.lock().await.downloads.is_empty());
+
+        // A mirror lacking the matching entry is untouched.
+        let other = mirror_with(&[("/x/b.gguf", crate::models::DownloadStatus::Incomplete)]);
+        mark_mismatch_mirror(&other, std::path::Path::new("/x/a.gguf")).await;
+        assert_eq!(
+            other.lock().await.downloads[0].status,
+            crate::models::DownloadStatus::Incomplete
+        );
     }
 }

@@ -1,8 +1,8 @@
 //! Results-list item building (plan W3.4b): the per-model `ListItem` spans
 //! rendered into the Results pane by `render_ui`.
 
+use crate::fmt::number;
 use crate::models::ModelInfo;
-use crate::utils::format_number;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -23,8 +23,8 @@ pub(super) fn model_list_items(models: &[ModelInfo]) -> Vec<ListItem<'_>> {
                 .as_deref()
                 .or_else(|| model.id.split('/').next())
                 .unwrap_or("unknown");
-            let downloads = format_number(model.downloads);
-            let likes = format_number(model.likes);
+            let downloads = number(model.downloads);
+            let likes = number(model.likes);
 
             let tags_str = if model.tags.is_empty() {
                 String::new()

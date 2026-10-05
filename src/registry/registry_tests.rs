@@ -6,10 +6,14 @@
 //!
 //! - **Disk is the source of truth.** Every op loads the on-DISK registry,
 //!   mutates, saves (non-atomic `fs::File::create`, errors silently
-//!   swallowed — deliberately, see plan §8.5), and only then updates the
-//!   in-memory mirror — never the reverse.
-//! - **The mirror is updated regardless of whether the save succeeded**
-//!   (today's silent-failure behavior).
+//!   swallowed — deliberately, see plan §8.5) — never the reverse.
+//! - **`mark_complete` updates its mirror regardless of whether the save
+//!   succeeded** (today's silent-failure behavior). `mark_mismatch` no
+//!   longer touches a mirror (final layering pass): the engine-mirror
+//!   patch lives at the caller — `verification::mark_mismatch_mirror` —
+//!   and is pinned by the tests there; the barrier test below still pins
+//!   the full caller-sequence shape (disk op + mirror patch) by
+//!   replication.
 //! - **No lock is held across load-modify-save.** The lost-update race
 //!   between concurrent writers is a known deferred defect (plan §8) that
 //!   these tests PIN, not fix.
@@ -202,12 +206,6 @@ fn write_fixture(tmp: &Path) -> String {
     ]);
     std::fs::write(crate::paths::registry_path(), &content).expect("write fixture");
     content
-}
-
-/// The four fixture entries as an in-memory registry (for seeding mirrors
-/// the way `engine::seed_registry_mirror` would).
-fn fixture_registry(tmp: &Path) -> DownloadRegistry {
-    toml::from_str(&write_fixture(tmp)).expect("fixture parses")
 }
 
 // -------------------------------------------------------------------------
@@ -508,22 +506,23 @@ fn golden_upsert_metadata_updates_and_appends_pins_bytes() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// verification.rs mismatch site: disk entry flips to HashMismatch; the
-/// engine's registry mirror is patched after the save — independently of
-/// the disk (an empty mirror stays empty; a mirror lacking the entry is
-/// untouched while the disk still updates: disk is the source of truth).
+/// verification.rs mismatch site: disk entry flips to HashMismatch and the
+/// bytes are pinned. The engine-mirror patch moved to the caller
+/// (`verification::mark_mismatch_mirror`, pinned there); the empty-mirror
+/// case is likewise caller-side now — the disk updates regardless (disk is
+/// the source of truth), which this test pins through both phases.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes env-mutating tests
-async fn golden_mark_mismatch_pins_bytes_and_registry_mirror() {
+async fn golden_mark_mismatch_pins_bytes() {
     let _env = crate::paths::ENV_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let tmp = tmp("mark-mismatch");
     let _guard = DataDirGuard::install(&tmp);
 
-    // Phase 1: seeded mirror (the TUI case) — both disk and mirror update.
-    let mirror = Arc::new(Mutex::new(fixture_registry(&tmp)));
-    mark_mismatch(&mirror, Path::new(&local(&tmp, "org/model/complete.gguf"))).await;
+    // Phase 1: the TUI case — the disk entry flips.
+    write_fixture(&tmp);
+    mark_mismatch(Path::new(&local(&tmp, "org/model/complete.gguf")));
 
     assert_eq!(
         read_registry_file(),
@@ -543,20 +542,10 @@ async fn golden_mark_mismatch_pins_bytes_and_registry_mirror() {
             b_quant(&tmp),
         ])
     );
-    {
-        let m = mirror.lock().await;
-        assert_eq!(m.downloads[0].status, DownloadStatus::HashMismatch);
-        assert_eq!(m.downloads[1].status, DownloadStatus::Incomplete);
-    }
 
-    // Phase 2: EMPTY mirror (the CLI-before-bootstrap case) — the disk still
-    // updates (source of truth), the mirror has nothing to patch.
-    let empty_mirror = Arc::new(Mutex::new(DownloadRegistry::default()));
-    mark_mismatch(
-        &empty_mirror,
-        Path::new(&local(&tmp, "org/model/incomplete.bin")),
-    )
-    .await;
+    // Phase 2: the CLI-before-bootstrap case — no seeded mirror anywhere;
+    // the disk still updates (source of truth).
+    mark_mismatch(Path::new(&local(&tmp, "org/model/incomplete.bin")));
 
     assert_eq!(
         read_registry_file(),
@@ -584,10 +573,6 @@ async fn golden_mark_mismatch_pins_bytes_and_registry_mirror() {
             b_staging(&tmp),
             b_quant(&tmp),
         ])
-    );
-    assert!(
-        empty_mirror.lock().await.downloads.is_empty(),
-        "mirror untouched when it has no matching entry"
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -692,12 +677,13 @@ fn register_pending_aborts_on_first_invalid_file_without_saving() {
 // root ignores). This is the strongest redirectable save failure.
 // -------------------------------------------------------------------------
 
-/// verification.rs mismatch site under save failure: no panic, the error
-/// stays silent, and the mirror is STILL patched — today's behavior of
-/// updating the mirror regardless of the (swallowed) save outcome.
+/// verification.rs mismatch site under save failure: no panic, and the
+/// io error is silently swallowed by save_registry (the mirror patch is
+/// caller-side now — `verification::mark_mismatch_mirror` tests pin that
+/// it runs regardless of the disk outcome).
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes env-mutating tests
-async fn save_failure_mismatch_mirror_still_patched_and_error_silent() {
+async fn save_failure_mismatch_error_is_silent() {
     let _env = crate::paths::ENV_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -706,34 +692,16 @@ async fn save_failure_mismatch_mirror_still_patched_and_error_silent() {
     std::fs::write(&not_a_dir, "x").expect("create blocking file");
     let _guard = DataDirGuard::install(&not_a_dir);
 
-    // Mirror seeded with one entry whose local_path raw-equals the (dead)
-    // registry path — the mismatch site would target exactly it.
     let dead_path = not_a_dir
         .join("hf-downloads.toml")
         .to_string_lossy()
         .to_string();
-    let mirror = Arc::new(Mutex::new(DownloadRegistry {
-        downloads: vec![DownloadMetadata {
-            model_id: MODEL.to_string(),
-            filename: "f.bin".to_string(),
-            url: "https://huggingface.co/org/model/resolve/main/f.bin".to_string(),
-            local_path: dead_path.clone(),
-            total_size: 1,
-            downloaded_size: 0,
-            status: DownloadStatus::Incomplete,
-            expected_sha256: None,
-            revision: None,
-        }],
-    }));
 
     // Must not panic; the io error is silently swallowed by save_registry.
-    mark_mismatch(&mirror, Path::new(&dead_path)).await;
+    mark_mismatch(Path::new(&dead_path));
 
     // The save failed: no registry file can exist at the dead path.
     assert!(!crate::paths::registry_path().exists());
-    // The mirror was patched regardless of the failed save.
-    let m = mirror.lock().await;
-    assert_eq!(m.downloads[0].status, DownloadStatus::HashMismatch);
 
     let _ = std::fs::remove_dir_all(&parent);
 }
@@ -937,11 +905,13 @@ fn path_matches_resolves_symlinked_aliases() {
 //
 // Unlike the barrier-forced test above (which drives the load-modify-save
 // shape directly, with a rendezvous the typed op cannot expose), this test
-// runs the actual `mark_mismatch` op concurrently from two tasks. The
+// runs the actual `mark_mismatch` op concurrently from two tasks (pure
+// disk since the final layering pass — the engine-mirror patch is
+// caller-side; the barrier test pins that half of the sequence). The
 // un-serialized race means either writer's save may be lost — the pins are
 // the safety properties, not a specific interleaving: both ops complete,
-// the final file parses, the last completed write is on disk (at least one
-// entry updated), and the mirror reflects every writer's patch.
+// the final file parses, and the last completed write is on disk (at
+// least one entry updated).
 // -------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -980,16 +950,13 @@ async fn two_writers_through_the_real_ops_stay_safe() {
     )
     .expect("write fixture");
 
-    let mirror = Arc::new(Mutex::new(load_registry()));
     let a = tokio::spawn({
-        let mirror = mirror.clone();
         let path = PathBuf::from(local(&tmp, "a.bin"));
-        async move { mark_mismatch(&mirror, &path).await }
+        async move { mark_mismatch(&path) }
     });
     let b = tokio::spawn({
-        let mirror = mirror.clone();
         let path = PathBuf::from(local(&tmp, "b.bin"));
-        async move { mark_mismatch(&mirror, &path).await }
+        async move { mark_mismatch(&path) }
     });
     a.await.expect("op A completed without panic");
     b.await.expect("op B completed without panic");
@@ -1010,11 +977,6 @@ async fn two_writers_through_the_real_ops_stay_safe() {
         (1..=2).contains(&mismatches),
         "expected the last write (1) or both writes (2) to survive, got {mismatches}"
     );
-
-    // The mirror reflects every writer's patch.
-    let m = mirror.lock().await;
-    assert_eq!(m.downloads[0].status, DownloadStatus::HashMismatch);
-    assert_eq!(m.downloads[1].status, DownloadStatus::HashMismatch);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

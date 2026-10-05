@@ -206,8 +206,8 @@ fn mouse_areas_register_in_lookup_order() {
 
 #[test]
 fn options_fields_table_pins_dialog_shape() {
+    use crate::fmt::size_full;
     use crate::models::AppOptions;
-    use crate::utils::format_size;
 
     // The table is the options dialog's single source (W4.7): 16 rows in
     // the historical display order, ids at the historical indices, so the
@@ -284,6 +284,6 @@ fn options_fields_table_pins_dialog_shape() {
     );
     assert_eq!(
         (OPTIONS_FIELDS[4].value)(&options, &dialog, &empty, &empty),
-        format_size(options.min_chunk_size)
+        size_full(options.min_chunk_size)
     );
 }

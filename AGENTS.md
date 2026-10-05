@@ -31,13 +31,13 @@ src/
 ├── engine/           # Shared download engine (facade + private submodules, models/ precedent): mod.rs (EngineState + QueuedDownload + auth-status contract), enqueue.rs (EngineState::enqueue + sealed EnqueuePolicy knob types + characterization tests), workers.rs (spawn_manager / spawn_verification_worker + ManagerHandle drain contract), bootstrap.rs (bootstrap + seed_registry_mirror)
 ├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
-├── hf_cache.rs       # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock
+├── cache_layout.rs   # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock (named cache_layout to disambiguate from cli/hf_cache/, the hf-cache command group)
 ├── patterns.rs       # Python-fnmatch parity glob matcher (`--include`/`--exclude`, `--for vllm` preset table)
 ├── update.rs         # Self-update (v2.10.0): latest.json manifest check, SHA256-verified asset download, self_replace swap; RHD_UPDATE_BASE override
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
 ├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
-├── registry.rs       # Download metadata management + typed mutation ops (W2.4): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save → mirror patch; see registry.rs module docs)
+├── registry.rs       # Download metadata management + typed mutation ops (W2.4): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save; pure disk ops — the mismatch engine-mirror patch lives at the verification caller; see registry.rs module docs)
 ├── download/         # Download transport with auth; returns FileOutcome (v0.9.5). Facade (mod.rs) holds start_download = prepare_download_paths / handle_existing_file / execute_download_with_retry phases (W5.1a), retry glue, and the global DOWNLOAD_CONFIG/RATE_LIMITER atomics; private chunked.rs (W3.8) holds download_chunked = probe_file_size + spawn_chunk_tasks/wait_for_chunks phases (W5.1b), the per-chunk worker (bundled ChunkContext, W5.6), and chunk-size math. Error paths pinned by tests/download_failures.rs; the cross-chunk byte counter is an Arc<AtomicU64> (single-counter audit), the speed-pacing Instant+marker pair stays mutexed (compound)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
@@ -71,10 +71,13 @@ Every registry mutation goes through the typed ops in `registry.rs`
 `mark_complete` (one fn taking a `Completion::{AlreadyExists, Downloaded}`
 flavor — the two former `mark_complete`/`mark_complete_with_url` ops
 merged), `mark_failed`, `mark_mismatch`. Each op loads
-the on-DISK registry, mutates, saves (non-atomic by design — §8.5), then
-patches the caller's mirror regardless of save success; no lock is held
-across the load-modify-save (the concurrent-writer lost-update race is a
-known deferred defect, §8). Do not reintroduce inline load-modify-save
+the on-DISK registry, mutates, saves (non-atomic by design — §8.5); no
+lock is held across the load-modify-save (the concurrent-writer
+lost-update race is a known deferred defect, §8). `mark_complete`
+patches the caller's mirror after the save regardless of its outcome;
+`mark_mismatch` is pure disk ops — its engine-mirror patch lives at the
+caller (`verification::mark_mismatch_mirror`), run immediately after the
+op. Do not reintroduce inline load-modify-save
 sequences at call sites — the byte-level behavior of every op is pinned
 by the golden fixtures in `registry::registry_tests`.
 

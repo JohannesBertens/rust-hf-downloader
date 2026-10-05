@@ -62,8 +62,8 @@ fn render_search_table(models: &[ModelDto]) {
             stdout,
             "{:<id_w$}  {:>10}  {:>7}  {}",
             crate::fmt::truncate_path_cli(&m.id, id_width),
-            crate::utils::format_number(m.downloads),
-            crate::utils::format_number(m.likes),
+            crate::fmt::number(m.downloads),
+            crate::fmt::number(m.likes),
             updated,
             id_w = id_width
         );

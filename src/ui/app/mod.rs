@@ -288,11 +288,11 @@ impl App {
             0 => Some(format!("Sort by: {:?}", self.filters.sort_field)),
             1 => Some(format!(
                 "Min downloads: {}",
-                crate::utils::format_number(self.filters.min_downloads)
+                crate::fmt::number(self.filters.min_downloads)
             )),
             2 => Some(format!(
                 "Min likes: {}",
-                crate::utils::format_number(self.filters.min_likes)
+                crate::fmt::number(self.filters.min_likes)
             )),
             _ => None,
         }

@@ -2,9 +2,9 @@
 //! file tree (plan W3.4b split out of `render.rs`; bodies byte-identical).
 
 use super::{border_style, panel_list, FocusCtx};
+use crate::fmt::size_full;
 use crate::models::{FileTreeNode, FocusedPane, ModelMetadata};
 use crate::ui::tree::{count_tree_files, flatten_tree};
-use crate::utils::format_size;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -92,7 +92,7 @@ pub(super) fn render_standard_panels(
         let total_size: u64 = metadata.siblings.iter().filter_map(|f| f.size).sum();
         lines.push(Line::from(vec![
             Span::styled("Files: ", Style::default().fg(Color::Yellow)),
-            Span::raw(format!("{} ({})", file_count, format_size(total_size))),
+            Span::raw(format!("{} ({})", file_count, size_full(total_size))),
         ]));
 
         if !metadata.tags.is_empty() {
@@ -186,7 +186,7 @@ fn render_file_tree_panel(
 
                     let size_str = node
                         .size
-                        .map(format_size)
+                        .map(size_full)
                         .unwrap_or_else(|| String::from("-"));
                     let file_count = count_tree_files(&node);
 
@@ -199,7 +199,7 @@ fn render_file_tree_panel(
                     // File: show name and size
                     let size_str = node
                         .size
-                        .map(format_size)
+                        .map(size_full)
                         .unwrap_or_else(|| String::from("-"));
                     spans.push(Span::raw(node.name.clone()));
                     spans.push(Span::raw(format!("  {}", size_str)));

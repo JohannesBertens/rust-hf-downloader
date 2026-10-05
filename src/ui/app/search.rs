@@ -175,7 +175,7 @@ impl App {
                 *self.status.write() = format!(
                     "Type: {} | Size: {} | File: {}",
                     group.quant_type,
-                    crate::utils::format_size(group.total_size),
+                    crate::fmt::size_full(group.total_size),
                     first_file.filename
                 );
             }
@@ -193,7 +193,7 @@ impl App {
                         *self.status.write() = format!(
                             "File: {} | Size: {} | Type: {}",
                             file.filename,
-                            crate::utils::format_size(file.size),
+                            crate::fmt::size_full(file.size),
                             file.quant_type
                         );
                     }
