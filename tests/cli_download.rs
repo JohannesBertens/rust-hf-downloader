@@ -1485,3 +1485,29 @@ async fn download_progress_plain_prints_lines_without_tty() {
     assert_file_content(&env.models_dir().join("a/b/one.gguf"), &one);
     assert_file_content(&env.models_dir().join("a/b/two.gguf"), &two);
 }
+
+#[tokio::test]
+async fn help_renders_progress_default_exactly_once() {
+    // clap renders `[default: auto]` itself (after the possible-values
+    // list); the --progress doc comment must not repeat it — through
+    // v2.13.0 it printed twice. Pins the dedup on both subcommands that
+    // expose the flag. `--help` never touches the network.
+    let env = TestEnv::new("http://127.0.0.1:1");
+    for args in [
+        vec!["download", "--help"],
+        vec!["download", "-h"],
+        vec!["hf-cache", "sync", "--help"],
+    ] {
+        let (code, stdout, stderr) = env.run(&args).await;
+        assert_exit_code(code, 0, &stdout, &stderr);
+        assert!(
+            stdout.contains("--progress <MODE>"),
+            "--progress missing from {args:?} help:\n{stdout}"
+        );
+        assert_eq!(
+            stdout.matches("[default: auto]").count(),
+            1,
+            "[default: auto] must render exactly once in {args:?} help:\n{stdout}"
+        );
+    }
+}

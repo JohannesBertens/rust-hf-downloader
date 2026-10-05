@@ -277,6 +277,16 @@ async fn handle(req: Request<Body>, repo: Arc<MockRepo>, counts: ResolveCounts) 
 /// Spawn the mock server; returns its base URL (`HF_ENDPOINT` value) and
 /// the per-file resolve-request counters.
 async fn spawn_mock(repo: MockRepo) -> (String, ResolveCounts) {
+    spawn_mock_with_delay(repo, Duration::ZERO).await
+}
+
+/// `per_request_delay` slows every mock HTTP response, keeping downloads
+/// in flight across the CLI monitor's 400 ms poll tick so progress events
+/// exist to render (mirrors tests/cli_download.rs's knob).
+async fn spawn_mock_with_delay(
+    repo: MockRepo,
+    per_request_delay: Duration,
+) -> (String, ResolveCounts) {
     let addr = SocketAddr::from(([127, 0, 0, 1], 0));
     let repo = Arc::new(repo);
     let counts = ResolveCounts::default();
@@ -289,7 +299,12 @@ async fn spawn_mock(repo: MockRepo) -> (String, ResolveCounts) {
             Ok::<_, hyper::Error>(service_fn(move |req| {
                 let repo = repo.clone();
                 let counts = counts.clone();
-                async move { Ok::<Response<Body>, hyper::Error>(handle(req, repo, counts).await) }
+                async move {
+                    if per_request_delay > Duration::ZERO {
+                        tokio::time::sleep(per_request_delay).await;
+                    }
+                    Ok::<Response<Body>, hyper::Error>(handle(req, repo, counts).await)
+                }
             }))
         }
     });
@@ -1189,4 +1204,63 @@ async fn no_symlinks_mode_copies_real_files() {
             br#"{"model_type":"qwen","architectures":["Qwen2ForCausalLM"]}"#
         ))
         .exists());
+}
+
+/// `--progress plain` on `hf-cache sync`: the sync pipeline threads the
+/// flag into the same Reporter as `download` (rewired by the cli/ module
+/// split). Plain mode must print aggregate newline progress with TestEnv's
+/// piped stderr (where `auto` stays silent) and never use `\r` rewrites.
+/// The per-request delay keeps the 768 KB weights file in flight across
+/// the monitor's 400 ms tick so a progress event exists to render.
+#[tokio::test]
+async fn sync_progress_plain_prints_lines_without_tty() {
+    let weights = fixture_bytes(768 * 1024);
+    let config = br#"{"model_type":"qwen","architectures":["Qwen2ForCausalLM"]}"#.to_vec();
+    let repo = MockRepo {
+        model_id: "a/b".to_string(),
+        revisions: vec![Revision {
+            name: "main".to_string(),
+            sha: MAIN_SHA.to_string(),
+            files: vec![
+                FileEntry {
+                    path: "model.safetensors".to_string(),
+                    content: weights,
+                    lfs: true,
+                    serve_corrupted: false,
+                },
+                FileEntry {
+                    path: "config.json".to_string(),
+                    content: config,
+                    lfs: false,
+                    serve_corrupted: false,
+                },
+            ],
+        }],
+    };
+    let (endpoint, _counts) = spawn_mock_with_delay(repo, Duration::from_millis(30)).await;
+    let env = TestEnv::new(&endpoint);
+    let cache = env.cache_dir();
+    let (code, stdout, stderr) = env
+        .run(&[
+            "hf-cache",
+            "sync",
+            "a/b",
+            "--cache-dir",
+            cache.to_str().unwrap(),
+            "--progress",
+            "plain",
+        ])
+        .await;
+    assert_exit_code(code, 0, &stdout, &stderr);
+    assert!(
+        stderr.contains(" files "),
+        "expected an aggregate progress line on stderr, got: {stderr}"
+    );
+    assert!(stderr.contains("MB/s"), "speed missing: {stderr}");
+    assert!(
+        !stderr.contains('\r'),
+        "plain mode must not use \\r rewrites"
+    );
+    // The progress assertions are about a run that really synced.
+    assert!(cache.join("models--a--b/refs/main").exists());
 }
