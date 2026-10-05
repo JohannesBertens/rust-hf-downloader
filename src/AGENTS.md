@@ -77,6 +77,7 @@ Key modules
   • Preallocates file; spawns chunk workers limited by DOWNLOAD_CONFIG.concurrent_threads
   • Updates DownloadProgress and registry continuously; renames .incomplete -> final on success
   • Queues verification when enabled and hash known
+  • W5.6: each chunk task takes one bundled ChunkContext (client, url, incomplete path, progress handles, span, pacing state — formerly a 12-arg fn); the cross-chunk `progress_downloaded` counter is an Arc<AtomicU64> (audited: single u64, no compound state — fetch_add per stream item, relaxed load for the speed snapshot; rendered progress flows through DownloadProgress under its own lock); the speed-pacing Instant + byte-marker pair stays mutexed (compound state: the window gate and the marker update move as one unit)
 - Path security: paths::sanitize::{sanitize_path_component, validate_and_sanitize_path} (see 12)) — start_download applies them to user-supplied filenames; blocks traversal
 - DownloadConfig (global atomics) controls chunking, retries, timeouts, and UI update cadence
 
@@ -103,9 +104,11 @@ Key modules
 - Human reporter or JSON Lines (`--json`); documented exit-code table
 - `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
 
-11) engine.rs — the single shared download pipeline bootstrap (v2.9.x)
-- EngineState bundle + bootstrap() (state → registry-mirror seed → verification worker → manager) + seed_registry_mirror()
-- EngineState::enqueue(files, policy) (W2.1): the one enqueue transaction (registry bookkeeping per policy → queue.add → HUD mirror → sends → failed-send rollback); every divergence between the six legacy inline sites is an EnqueuePolicy knob — fields sealed, the five named constructors are the only public API (tui_quant/tui_repository/tui_resume/cli_download/hf_cache_sync): RegistryMode {AlreadyRecorded (TUI resume) | StagingSweep (hf-cache sync) | Mirror (TUI confirms) | Disk (CLI register_pending)}, SendDiscipline {Interactive | Resume | Batch} (queue timing + HUD-mirror shape + rollback, collapsed to the three correlated combos that occur), InvalidPolicy {ReportAndQueue (Mirror) | AbortAll (Disk) | SkipValidation (no-write flavors)}; outcome {sent, invalid[], aborted} feeds the call sites' own status/error strings
+11) engine/ — the single shared download pipeline bootstrap (v2.9.x; split from one engine.rs into a facade + private submodules, external crate::engine:: imports unchanged)
+- mod.rs: EngineState bundle (+ QueuedDownload message type, auth-status string contract W2.6); submodule facade (pub use enqueue/workers/bootstrap)
+- enqueue.rs: EngineState::enqueue(files, policy) (W2.1): the one enqueue transaction (registry bookkeeping per policy → queue.add → HUD mirror → sends → failed-send rollback); every divergence between the six legacy inline sites is an EnqueuePolicy knob — fields sealed, the five named constructors are the only public API (tui_quant/tui_repository/tui_resume/cli_download/hf_cache_sync): RegistryMode {AlreadyRecorded (TUI resume) | StagingSweep (hf-cache sync) | Mirror (TUI confirms) | Disk (CLI register_pending)}, SendDiscipline {Interactive | Resume | Batch} (queue timing + HUD-mirror shape + rollback, collapsed to the three correlated combos that occur), InvalidPolicy {ReportAndQueue (Mirror) | AbortAll (Disk) | SkipValidation (no-write flavors)}; outcome {sent, invalid[], aborted} feeds the call sites' own status/error strings; the 8 characterization tests live here
+- workers.rs: spawn_manager (serial channel consumer → download::start_download, queue accounting) + spawn_verification_worker + ManagerHandle (drain-based join contract)
+- bootstrap.rs: bootstrap() (state → registry-mirror seed → verification worker → manager) + seed_registry_mirror()
 - CLI: run::queue_run (engine::bootstrap → EngineState::enqueue → drop the sender) in run_download + hf-cache sync (after purging staging registry entries); TUI: composes the same pieces (EngineState::new in App::new, seed_registry_mirror in the startup scan, both spawns in App::run) — never duplicate this logic
 
 12) paths.rs — cross-platform path resolution (v2.6.0) + path-security policy (paths::sanitize)

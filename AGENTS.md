@@ -28,7 +28,7 @@ src/
 │   ├── hf_cache/     # hf-cache group (private submodules + mod facade re-exporting selection/sync helpers): sync pipeline (selection, sync lock, publish) + path helper
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
 │   └── tests.rs      # cli::tests — insta snapshots in src/cli/snapshots/
-├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, the enqueue transaction (EnqueuePolicy), drain signals
+├── engine/           # Shared download engine (facade + private submodules, models/ precedent): mod.rs (EngineState + QueuedDownload + auth-status contract), enqueue.rs (EngineState::enqueue + sealed EnqueuePolicy knob types + characterization tests), workers.rs (spawn_manager / spawn_verification_worker + ManagerHandle drain contract), bootstrap.rs (bootstrap + seed_registry_mirror)
 ├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
 ├── hf_cache.rs       # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock
@@ -38,7 +38,7 @@ src/
 ├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
 ├── registry.rs       # Download metadata management + typed mutation ops (W2.4): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save → mirror patch; see registry.rs module docs)
-├── download.rs       # Download orchestration with auth; returns FileOutcome (v0.9.5)
+├── download.rs       # Download orchestration with auth; returns FileOutcome (v0.9.5). Chunk tasks take a bundled ChunkContext (W5.6); the cross-chunk byte counter is an Arc<AtomicU64> (single-counter audit), the speed-pacing Instant+marker pair stays mutexed (compound)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
 ├── utils.rs          # Helper functions

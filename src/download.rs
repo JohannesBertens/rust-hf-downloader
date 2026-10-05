@@ -549,8 +549,15 @@ async fn download_chunked(
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let mut handles = Vec::new();
 
-    // Shared progress tracking
-    let progress_downloaded = Arc::new(Mutex::new(0u64));
+    // Shared progress tracking (W5.6 audit): `progress_downloaded` is a
+    // single monotonic u64 counter — the only state its old mutex guarded —
+    // so it is an `AtomicU64` (fetch_add per stream item, relaxed load for
+    // the speed snapshot). Rendered progress never reads it directly: the
+    // HUD/CLI read `DownloadProgress` under its own lock. The two
+    // speed-pacing mutexes stay mutexed — they are compound state (the
+    // Instant gates the global recalculation window; the byte marker and
+    // the timestamp update must move as one unit, under exclusion).
+    let progress_downloaded = Arc::new(AtomicU64::new(0));
     let start_time = std::time::Instant::now();
     let last_update_time = Arc::new(Mutex::new(start_time));
     let last_downloaded_bytes = Arc::new(Mutex::new(0u64));
@@ -589,25 +596,28 @@ async fn download_chunked(
             }
 
             let chunk_start_time = std::time::Instant::now();
-            let mut chunk_last_update = chunk_start_time;
-            let mut chunk_last_bytes = 0u64;
 
-            // Download this chunk with progress tracking
-            let result = download_chunk_with_progress(
-                &client,
-                &download_url,
-                &incomplete_path,
+            // W5.6: everything the chunk task needs, bundled — this used
+            // to be a 12-argument function signature. The pacing fields
+            // start exactly where the old caller initialized them (after
+            // the chunk registers itself in the progress struct).
+            let ctx = ChunkContext {
+                client,
+                download_url,
+                incomplete_path,
+                progress: progress.clone(),
+                progress_downloaded,
+                last_update_time,
+                last_downloaded_bytes,
+                chunk_id,
                 start,
                 stop,
-                chunk_id,
-                &progress,
-                &mut chunk_last_update,
-                &mut chunk_last_bytes,
-                &progress_downloaded,
-                &last_update_time,
-                &last_downloaded_bytes,
-            )
-            .await;
+                last_update: chunk_start_time,
+                last_bytes: 0,
+            };
+
+            // Download this chunk with progress tracking
+            let result = download_chunk_with_progress(ctx).await;
 
             let chunk_size = stop - start + 1;
             let chunk_ok = result.is_ok();
@@ -707,25 +717,56 @@ async fn download_chunked(
     Ok((total_size, total_size, verification_item, final_url))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn download_chunk_with_progress(
-    client: &reqwest::Client,
-    url: &str,
-    file_path: &PathBuf,
+/// Everything one chunk task needs (W5.6): the shared per-download
+/// handles plus this chunk's byte span and per-chunk speed-pacing state —
+/// the bundle replaces what used to be a 12-argument
+/// `download_chunk_with_progress` signature.
+struct ChunkContext {
+    client: reqwest::Client,
+    /// URL that serves the bytes (the possibly-raw-fallback endpoint).
+    download_url: String,
+    /// The `.incomplete` file all chunks write into at their offsets.
+    incomplete_path: PathBuf,
+    /// The engine-wide progress struct the HUD/CLI render from.
+    progress: Arc<Mutex<Option<DownloadProgress>>>,
+    /// Monotonic sum of every chunk's downloaded bytes (single u64
+    /// counter — see the W5.6 audit note at its creation site).
+    progress_downloaded: Arc<AtomicU64>,
+    /// Global speed-pacing compound state (Instant gate + byte marker);
+    /// mutexed on purpose — only one chunk task may run the global
+    /// recalculation per interval window.
+    last_update_time: Arc<Mutex<std::time::Instant>>,
+    last_downloaded_bytes: Arc<Mutex<u64>>,
+    chunk_id: usize,
     start: u64,
     stop: u64,
-    chunk_id: usize,
-    progress: &Arc<Mutex<Option<DownloadProgress>>>,
-    last_update: &mut std::time::Instant,
-    last_bytes: &mut u64,
-    progress_downloaded: &Arc<Mutex<u64>>,
-    last_update_time: &Arc<Mutex<std::time::Instant>>,
-    last_downloaded_bytes: &Arc<Mutex<u64>>,
+    /// This chunk's last speed sample (when/what it last reported).
+    last_update: std::time::Instant,
+    last_bytes: u64,
+}
+
+async fn download_chunk_with_progress(
+    ctx: ChunkContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ChunkContext {
+        client,
+        download_url,
+        incomplete_path,
+        progress,
+        progress_downloaded,
+        last_update_time,
+        last_downloaded_bytes,
+        chunk_id,
+        start,
+        stop,
+        mut last_update,
+        mut last_bytes,
+    } = ctx;
+
     let range = format!("bytes={}-{}", start, stop);
 
     let response = client
-        .get(url)
+        .get(&download_url)
         .header("Range", range)
         .send()
         .await?
@@ -736,7 +777,7 @@ async fn download_chunk_with_progress(
     // Open file for writing at offset
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
-        .open(file_path)
+        .open(&incomplete_path)
         .await?;
 
     file.seek(SeekFrom::Start(start)).await?;
@@ -758,22 +799,20 @@ async fn download_chunk_with_progress(
         let bytes_len = bytes.len() as u64;
         chunk_downloaded += bytes_len;
 
-        // Update total downloaded bytes immediately
-        {
-            let mut downloaded = progress_downloaded.lock().await;
-            *downloaded += bytes_len;
-        }
+        // Update total downloaded bytes immediately (single u64 counter —
+        // atomic fetch_add; the reader below takes a relaxed snapshot).
+        progress_downloaded.fetch_add(bytes_len, Ordering::Relaxed);
 
         // Update chunk progress and total speed at configured interval
         let now = std::time::Instant::now();
-        let elapsed = now.duration_since(*last_update).as_secs_f64();
+        let elapsed = now.duration_since(last_update).as_secs_f64();
         let interval_secs = DOWNLOAD_CONFIG
             .progress_update_interval_ms
             .load(Ordering::Relaxed) as f64
             / 1000.0;
 
         if elapsed >= interval_secs {
-            let bytes_since_last = chunk_downloaded - *last_bytes;
+            let bytes_since_last = chunk_downloaded - last_bytes;
             let chunk_speed_mbps = (bytes_since_last as f64 / elapsed) / 1_048_576.0;
 
             // Calculate total download speed
@@ -781,9 +820,7 @@ async fn download_chunk_with_progress(
             let elapsed_global = now.duration_since(*last_update_global).as_secs_f64();
 
             let total_speed_mbps = if elapsed_global >= interval_secs {
-                let downloaded = progress_downloaded.lock().await;
-                let total_downloaded = *downloaded;
-                drop(downloaded);
+                let total_downloaded = progress_downloaded.load(Ordering::Relaxed);
 
                 let mut last_bytes_global = last_downloaded_bytes.lock().await;
                 let bytes_since_last_global = total_downloaded - *last_bytes_global;
@@ -812,8 +849,8 @@ async fn download_chunk_with_progress(
                 }
             }
 
-            *last_update = now;
-            *last_bytes = chunk_downloaded;
+            last_update = now;
+            last_bytes = chunk_downloaded;
         }
     }
 
