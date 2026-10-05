@@ -1,6 +1,6 @@
 //! Stable, additive-only NDJSON event schema (snapshot-tested).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::resolve::FileSpec;
 
@@ -45,6 +45,92 @@ pub struct OverallProgress {
     pub total_bytes: u64,
 }
 
+/// Stable error codes carried by [`Event::Error`] (wire contract, plan
+/// H6: exactly the 13 codes pinned by `error_event_code_wire_contract_table`).
+/// The enum is deliberately NOT serde-derived — `Event::Error` keeps a
+/// `code: String` field and constructors serialize via [`ErrorCode::as_str`],
+/// which is what keeps the NDJSON bytes identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    Usage,
+    InvalidPath,
+    Interrupted,
+    DownloadFailed,
+    HashMismatch,
+    AuthRequired,
+    VerificationError,
+    PlanFailed,
+    Io,
+    PublishFailed,
+    SyncLock,
+    Internal,
+    Network,
+}
+
+impl ErrorCode {
+    /// The wire string for this code (no allocation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorCode::Usage => "usage",
+            ErrorCode::InvalidPath => "invalid_path",
+            ErrorCode::Interrupted => "interrupted",
+            ErrorCode::DownloadFailed => "download_failed",
+            ErrorCode::HashMismatch => "hash_mismatch",
+            ErrorCode::AuthRequired => "auth_required",
+            ErrorCode::VerificationError => "verification_error",
+            ErrorCode::PlanFailed => "plan_failed",
+            ErrorCode::Io => "io",
+            ErrorCode::PublishFailed => "publish_failed",
+            ErrorCode::SyncLock => "sync_lock",
+            ErrorCode::Internal => "internal",
+            ErrorCode::Network => "network",
+        }
+    }
+}
+
+/// Terminal status of one downloaded file (wire contract, plan H6: both
+/// literals pinned by `file_complete_status_wire_contract`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileStatus {
+    Downloaded,
+    AlreadyExists,
+}
+
+impl Event {
+    /// Error event without an `available` list. Use this (with an
+    /// [`ErrorCode`]) instead of raw struct construction so the code string
+    /// stays tied to the pinned wire set.
+    pub fn error(code: ErrorCode, message: impl Into<String>) -> Event {
+        Event::Error {
+            code: code.as_str().to_string(),
+            message: message.into(),
+            available: None,
+        }
+    }
+
+    /// Error event with an `available` list of files. For codes outside the
+    /// H6 set (resolve/selection errors like `ambiguous`), construct
+    /// [`Event::Error`] directly — that is why the field stays `String`.
+    ///
+    /// No current H6-code construction site carries an `available` list (the
+    /// two available-bearing sites emit resolve/selection codes outside the
+    /// pinned 13), so this has no production caller yet; its wire shape is
+    /// pinned by `error_with_available_constructor_wire_shape`.
+    #[allow(dead_code)]
+    pub fn error_with_available(
+        code: ErrorCode,
+        message: impl Into<String>,
+        available: Vec<FileDto>,
+    ) -> Event {
+        Event::Error {
+            code: code.as_str().to_string(),
+            message: message.into(),
+            available: Some(available),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -71,7 +157,7 @@ pub enum Event {
     },
     FileComplete {
         filename: String,
-        status: &'static str, // "downloaded" | "already_exists"
+        status: FileStatus,
         bytes: u64,
     },
     VerificationStart {

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::args::{apply_rate_limit_overrides, merge_token, valid_model_id, DownloadArgs};
-use super::events::{Event, FileDto, OverallProgress, Summary};
+use super::events::{ErrorCode, Event, FileDto, FileStatus, OverallProgress, Summary};
 use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, FileSpec, Selector};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
@@ -86,24 +86,19 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         .clone()
         .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
     if !valid_model_id(&args.model_id) {
-        reporter.emit(&Event::Error {
-            code: "usage".to_string(),
-            message: format!(
+        reporter.emit(&Event::error(
+            ErrorCode::Usage,
+            format!(
                 "invalid model ID {:?} — expected \"author/model-name\"",
                 args.model_id
             ),
-            available: None,
-        });
+        ));
         return EXIT_USAGE;
     }
     let selector = match parse_selector(&args) {
         Ok(selector) => selector,
         Err(message) => {
-            reporter.emit(&Event::Error {
-                code: "usage".to_string(),
-                message,
-                available: None,
-            });
+            reporter.emit(&Event::error(ErrorCode::Usage, message));
             return EXIT_USAGE;
         }
     };
@@ -165,11 +160,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     if let Err(message) =
         crate::engine::register_pending(&args.model_id, &revision, &pending, &base)
     {
-        reporter.emit(&Event::Error {
-            code: "invalid_path".to_string(),
-            message,
-            available: None,
-        });
+        reporter.emit(&Event::error(ErrorCode::InvalidPath, message));
         return EXIT_FAILURE;
     }
 
@@ -242,36 +233,29 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     reporter.finish();
 
     if interrupted {
-        reporter.emit(&Event::Error {
-            code: "interrupted".to_string(),
-            message: "interrupted by SIGINT; unfinished files stay registered as incomplete and restart from scratch on the next run".to_string(),
-            available: None,
-        });
+        reporter.emit(&Event::error(ErrorCode::Interrupted, "interrupted by SIGINT; unfinished files stay registered as incomplete and restart from scratch on the next run".to_string()));
         return EXIT_INTERRUPTED;
     }
     if !tally.failures.is_empty() {
-        reporter.emit(&Event::Error {
-            code: "download_failed".to_string(),
-            message: tally.failures.join("; "),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::DownloadFailed,
+            tally.failures.join("; "),
+        ));
     }
     if !tally.mismatches.is_empty() {
-        reporter.emit(&Event::Error {
-            code: "hash_mismatch".to_string(),
-            message: tally.mismatches.join("; "),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::HashMismatch,
+            tally.mismatches.join("; "),
+        ));
     }
     if tally.auth_required {
-        reporter.emit(&Event::Error {
-            code: "auth_required".to_string(),
-            message: format!(
+        reporter.emit(&Event::error(
+            ErrorCode::AuthRequired,
+            format!(
                 "authentication required for {} (pass --token or set $HF_TOKEN)",
                 args.model_id
             ),
-            available: None,
-        });
+        ));
     }
 
     tally.exit_code()
@@ -504,7 +488,7 @@ fn apply_outcome_event(
             tally.done_bytes += *bytes;
             reporter.emit(&Event::FileComplete {
                 filename: filename.clone(),
-                status: "downloaded",
+                status: FileStatus::Downloaded,
                 bytes: *bytes,
             });
         }
@@ -513,29 +497,27 @@ fn apply_outcome_event(
             tally.done_bytes += *bytes;
             reporter.emit(&Event::FileComplete {
                 filename: filename.clone(),
-                status: "already_exists",
+                status: FileStatus::AlreadyExists,
                 bytes: *bytes,
             });
         }
         FileOutcome::AuthRequired { model_id } => {
             tally.auth_required = true;
-            reporter.emit(&Event::Error {
-                code: "auth_required".to_string(),
-                message: format!(
+            reporter.emit(&Event::error(
+                ErrorCode::AuthRequired,
+                format!(
                     "authentication required for {} (pass --token or set $HF_TOKEN)",
                     model_id
                 ),
-                available: None,
-            });
+            ));
         }
         FileOutcome::Failed { filename, reason } => {
             tally.failed += 1;
             tally.failures.push(format!("{}: {}", filename, reason));
-            reporter.emit(&Event::Error {
-                code: "download_failed".to_string(),
-                message: format!("{}: {}", filename, reason),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::DownloadFailed,
+                format!("{}: {}", filename, reason),
+            ));
             let _ = (index_of, count);
         }
     }
@@ -598,18 +580,16 @@ fn apply_verify_outcome(outcome: &VerifyOutcome, reporter: &mut Reporter, tally:
             });
         }
         VerifyOutcome::Error { filename, reason } => {
-            reporter.emit(&Event::Error {
-                code: "verification_error".to_string(),
-                message: format!("{}: {}", filename, reason),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::VerificationError,
+                format!("{}: {}", filename, reason),
+            ));
         }
         VerifyOutcome::Missing { filename } => {
-            reporter.emit(&Event::Error {
-                code: "verification_error".to_string(),
-                message: format!("{}: file not found for verification", filename),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::VerificationError,
+                format!("{}: file not found for verification", filename),
+            ));
         }
     }
 }

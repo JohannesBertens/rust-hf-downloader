@@ -3,7 +3,7 @@
 use std::io::Write;
 
 use super::args::{merge_token, ModelDto, SearchArgs};
-use super::events::Event;
+use super::events::{ErrorCode, Event};
 use super::report::{truncate_path, ProgressMode, Reporter};
 use super::{EXIT_FAILURE, EXIT_OK};
 
@@ -107,11 +107,10 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
                     }
                     Err(e) => {
                         drop(stdout);
-                        reporter.emit(&Event::Error {
-                            code: "internal".to_string(),
-                            message: format!("failed to serialize results: {}", e),
-                            available: None,
-                        });
+                        reporter.emit(&Event::error(
+                            ErrorCode::Internal,
+                            format!("failed to serialize results: {}", e),
+                        ));
                         return EXIT_FAILURE;
                     }
                 }
@@ -125,11 +124,10 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
             EXIT_OK
         }
         Err(e) => {
-            reporter.emit(&Event::Error {
-                code: "network".to_string(),
-                message: format!("search failed: {}", e),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::Network,
+                format!("search failed: {}", e),
+            ));
             EXIT_FAILURE
         }
     }

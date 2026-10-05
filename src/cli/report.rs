@@ -5,7 +5,7 @@ use crate::utils::format_size;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
-use super::events::{Event, OverallProgress};
+use super::events::{Event, FileStatus, OverallProgress};
 
 const PROGRESS_BAR_WIDTH: usize = 20;
 /// Minimum interval between JSON `progress` events per run.
@@ -199,7 +199,7 @@ impl Reporter {
                 bytes,
             } => {
                 if !self.quiet {
-                    let mark = if *status == "already_exists" {
+                    let mark = if *status == FileStatus::AlreadyExists {
                         "="
                     } else {
                         "+"

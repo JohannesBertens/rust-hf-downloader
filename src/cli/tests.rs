@@ -7,7 +7,7 @@ use super::args::{
     apply_rate_limit_overrides, merge_token, parse_rate_limit_mbps, parse_revision, valid_model_id,
     DownloadArgs, HfCacheArgs, HfCacheCommand, ModelDto,
 };
-use super::events::{Event, FileDto, OverallProgress, Summary};
+use super::events::{Event, FileDto, FileStatus, OverallProgress, Summary};
 use super::hf_cache_cmd::{
     absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
     SyncSelectionError,
@@ -746,7 +746,7 @@ fn snapshot_event_file_complete() {
     snap(
         &Event::FileComplete {
             filename: "model-Q4_K_M.gguf".to_string(),
-            status: "downloaded",
+            status: FileStatus::Downloaded,
             bytes: 4_947_802_324,
         },
         "event-file-complete",
@@ -1485,15 +1485,15 @@ fn error_event_available_variant_wire_contract() {
 
 #[test]
 fn file_complete_status_wire_contract() {
-    // The `status` field is a &'static str with exactly two literals at
-    // download_cmd.rs — pin their serialized bytes.
+    // The `status` field is a FileStatus with exactly two variants, both
+    // produced at download_cmd.rs — pin their serialized bytes.
     for (status, expected) in [
         (
-            "downloaded",
+            FileStatus::Downloaded,
             r#"{"type":"file_complete","filename":"model-Q4_K_M.gguf","status":"downloaded","bytes":4947802324}"#,
         ),
         (
-            "already_exists",
+            FileStatus::AlreadyExists,
             r#"{"type":"file_complete","filename":"model-Q4_K_M.gguf","status":"already_exists","bytes":4947802324}"#,
         ),
     ] {
@@ -1569,5 +1569,22 @@ async fn plain_heartbeat_skips_when_progress_snapshot_missed() {
     assert!(
         out.contains("verifying: 1 in flight, 0 verified"),
         "got: {out:?}"
+    );
+}
+
+#[test]
+fn error_with_available_constructor_wire_shape() {
+    let event = Event::error_with_available(
+        super::events::ErrorCode::Usage,
+        "m",
+        vec![FileDto {
+            filename: "f.gguf".to_string(),
+            size_bytes: 1,
+            sha256: None,
+        }],
+    );
+    assert_eq!(
+        serde_json::to_string(&event).unwrap(),
+        r#"{"type":"error","code":"usage","message":"m","available":[{"filename":"f.gguf","size_bytes":1,"sha256":null}]}"#
     );
 }

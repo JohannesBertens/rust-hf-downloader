@@ -6,7 +6,7 @@ use super::args::{
     HfCachePathArgs, HfCacheSyncArgs,
 };
 use super::download_cmd::{monitor, RunTally};
-use super::events::{Event, FileDto, Summary};
+use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::{truncate_path, Reporter};
 use super::resolve::FileSpec;
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
@@ -383,14 +383,13 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     // --- 2. Validate usage (§5.2 step 1: revision already parsed by
     //        clap's parse_revision) ----------------------------------------
     if !valid_model_id(&args.model_id) {
-        reporter.emit(&Event::Error {
-            code: "usage".to_string(),
-            message: format!(
+        reporter.emit(&Event::error(
+            ErrorCode::Usage,
+            format!(
                 "invalid model ID {:?} — expected \"author/model-name\"",
                 args.model_id
             ),
-            available: None,
-        });
+        ));
         return EXIT_USAGE;
     }
     let revision = args
@@ -477,11 +476,10 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     ) {
         Ok(plan) => plan,
         Err(e) => {
-            reporter.emit(&Event::Error {
-                code: "plan_failed".to_string(),
-                message: format!("cannot plan cache sync for {}: {}", args.model_id, e),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::PlanFailed,
+                format!("cannot plan cache sync for {}: {}", args.model_id, e),
+            ));
             return EXIT_FAILURE;
         }
     };
@@ -538,21 +536,16 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             &plan.up_to_date,
             use_symlinks,
         ) {
-            reporter.emit(&Event::Error {
-                code: "io".to_string(),
-                message,
-                available: None,
-            });
+            reporter.emit(&Event::error(ErrorCode::Io, message));
             return EXIT_FAILURE;
         }
         if let Err(e) =
             crate::hf_cache::write_refs(&repo_dir, ref_name_for_revision(&revision), &sha)
         {
-            reporter.emit(&Event::Error {
-                code: "io".to_string(),
-                message: format!("cannot write refs: {e}"),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::Io,
+                format!("cannot write refs: {e}"),
+            ));
             return EXIT_FAILURE;
         }
         reporter.emit(&Event::Done {
@@ -586,24 +579,22 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     let snapshot_root = crate::hf_cache::snapshot_dir(&cache_dir, &args.model_id, &sha);
     for dir in [repo_dir.join("blobs"), snapshot_root, staging.clone()] {
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            reporter.emit(&Event::Error {
-                code: "io".to_string(),
-                message: format!("cannot create {}: {}", dir.display(), e),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::Io,
+                format!("cannot create {}: {}", dir.display(), e),
+            ));
             return EXIT_FAILURE;
         }
     }
     if let Err(e) = crate::paths::write_cachedir_tag(&cache_dir) {
-        reporter.emit(&Event::Error {
-            code: "io".to_string(),
-            message: format!(
+        reporter.emit(&Event::error(
+            ErrorCode::Io,
+            format!(
                 "cannot write CACHEDIR.TAG in {}: {}",
                 cache_dir.display(),
                 e
             ),
-            available: None,
-        });
+        ));
         return EXIT_FAILURE;
     }
 
@@ -619,11 +610,7 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         &plan.up_to_date,
         use_symlinks,
     ) {
-        reporter.emit(&Event::Error {
-            code: "io".to_string(),
-            message,
-            available: None,
-        });
+        reporter.emit(&Event::error(ErrorCode::Io, message));
         return EXIT_FAILURE;
     }
 
@@ -817,12 +804,10 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         &sha,
     ));
     if interrupted {
-        reporter.emit(&Event::Error {
-            code: "interrupted".to_string(),
-            message: "interrupted by SIGINT; staged partial files resume on the next run"
-                .to_string(),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::Interrupted,
+            "interrupted by SIGINT; staged partial files resume on the next run".to_string(),
+        ));
         return EXIT_INTERRUPTED;
     }
     if !failed {
@@ -837,35 +822,31 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         return EXIT_OK;
     }
     if !tally.failures.is_empty() {
-        reporter.emit(&Event::Error {
-            code: "download_failed".to_string(),
-            message: tally.failures.join("; "),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::DownloadFailed,
+            tally.failures.join("; "),
+        ));
     }
     if !publish_failures.is_empty() {
-        reporter.emit(&Event::Error {
-            code: "publish_failed".to_string(),
-            message: publish_failures.join("; "),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::PublishFailed,
+            publish_failures.join("; "),
+        ));
     }
     if !tally.mismatches.is_empty() {
-        reporter.emit(&Event::Error {
-            code: "hash_mismatch".to_string(),
-            message: tally.mismatches.join("; "),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::HashMismatch,
+            tally.mismatches.join("; "),
+        ));
     }
     if tally.auth_required {
-        reporter.emit(&Event::Error {
-            code: "auth_required".to_string(),
-            message: format!(
+        reporter.emit(&Event::error(
+            ErrorCode::AuthRequired,
+            format!(
                 "authentication required for {} (pass --token or set $HF_TOKEN)",
                 args.model_id
             ),
-            available: None,
-        });
+        ));
         return EXIT_AUTH;
     }
     EXIT_FAILURE
@@ -878,11 +859,10 @@ fn acquire_sync_lock_or_fail(
     reporter: &mut Reporter,
 ) -> Result<crate::hf_cache::SyncLockGuard, i32> {
     crate::hf_cache::acquire_sync_lock(staging).map_err(|e| {
-        reporter.emit(&Event::Error {
-            code: "sync_lock".to_string(),
-            message: format!("cannot acquire sync lock: {e}"),
-            available: None,
-        });
+        reporter.emit(&Event::error(
+            ErrorCode::SyncLock,
+            format!("cannot acquire sync lock: {e}"),
+        ));
         EXIT_FAILURE
     })
 }
