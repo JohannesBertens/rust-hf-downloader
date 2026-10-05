@@ -59,11 +59,9 @@ pub struct App {
     pub needs_search_models: bool,
     // Prefetch debounce timer
     pub last_prefetch_time: Arc<Mutex<std::time::Instant>>,
-    // Filter & Sort state
-    pub sort_field: crate::models::SortField,
-    pub sort_direction: crate::models::SortDirection,
-    pub filter_min_downloads: u64,
-    pub filter_min_likes: u64,
+    // Filter & Sort values (cycling/stepping rules in ui/app/filters.rs;
+    // focused_filter_field is focus state and stays on App)
+    pub filters: super::filters::FilterState,
     pub focused_filter_field: usize, // 0=sort, 1=downloads, 2=likes
     // Mouse interaction state
     pub panel_areas: Vec<(FocusedPane, Rect)>, // Store panel areas for click/hover detection
@@ -101,11 +99,10 @@ impl App {
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
 
-        // Extract filter settings before moving options
-        let default_sort_field = options.default_sort_field;
-        let default_sort_direction = options.default_sort_direction;
-        let default_min_downloads = options.default_min_downloads;
-        let default_min_likes = options.default_min_likes;
+        // Seed filter state from the persisted config defaults before
+        // `options` moves into Self (config load/save mapping unchanged —
+        // AppOptions stays the serde surface, App only borrows the seeds)
+        let filters = super::filters::FilterState::from_options(&options);
 
         let mut download_path_input = Input::default();
         download_path_input = download_path_input.with_value(options.default_directory.clone());
@@ -147,10 +144,7 @@ impl App {
             needs_load_quantizations: false,
             needs_search_models: false,
             last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),
-            sort_field: default_sort_field,
-            sort_direction: default_sort_direction,
-            filter_min_downloads: default_min_downloads,
-            filter_min_likes: default_min_likes,
+            filters,
             focused_filter_field: 0,
             // Mouse interaction state
             panel_areas: Vec::new(),

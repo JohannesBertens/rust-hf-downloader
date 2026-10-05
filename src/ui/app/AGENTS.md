@@ -32,6 +32,14 @@ Files and roles
   • Popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError
   • Navigation helpers for models, quantizations, files, file tree
   • Filter preset application and persistence (Ctrl+S saves as defaults)
+  • Filter VALUE mutations only route through App.filters (ui/app/filters.rs); events.rs owns key dispatch, status wording, and write order
+
+- filters.rs (W4.5)
+  • FilterState { sort_field, sort_direction, min_downloads, min_likes } — the single home of the four filter values and their mutation rules
+  • cycle(field, forward) = mouse click/scroll wrap-around semantics; step(field, delta) = keyboard '+/-' clamped semantics; step(0, −1) toggles the sort DIRECTION (not a backward cycle) — the intentional divergences are documented in the module header divergence table
+  • toggle_direction/reset/apply_preset/matches_preset; refresh_request() consumes the needs_refresh flag and gates the clear_search_results + needs_search_models tail at every call site
+  • Step tables DOWNLOAD_STEPS / LIKE_STEPS live here; off-table values (e.g. config-loaded 42) resolve to index 0
+  • Seeded from AppOptions::default_* via from_options; saved back by App::save_filter_settings — the config serde surface stays AppOptions (byte-identical config files)
 
 - models.rs (search + model-detail loading; renamed search.rs in W3.6)
   • search_models: cache-first on ApiCache.searches; calls api::fetch_models_filtered; sets loading/status

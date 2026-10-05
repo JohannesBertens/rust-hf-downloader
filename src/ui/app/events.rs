@@ -70,40 +70,29 @@ impl App {
             }
             (_, KeyCode::Char('s')) => {
                 // Cycle sort field: Downloads → Likes → Modified → Name → Downloads
-                self.sort_field = match self.sort_field {
-                    crate::models::SortField::Downloads => crate::models::SortField::Likes,
-                    crate::models::SortField::Likes => crate::models::SortField::Modified,
-                    crate::models::SortField::Modified => crate::models::SortField::Name,
-                    crate::models::SortField::Name => crate::models::SortField::Downloads,
-                };
+                self.filters.cycle(0, true);
 
-                // Re-fetch with new sort
-                self.clear_search_results();
-                self.needs_search_models = true;
+                // Re-fetch with new sort (status written AFTER the clear,
+                // unlike the mouse sites — historical order, kept)
+                self.apply_filter_refresh();
 
-                *self.status.write() = format!("Sort by: {:?}", self.sort_field);
+                *self.status.write() = format!("Sort by: {:?}", self.filters.sort_field);
             }
             (KeyModifiers::SHIFT, KeyCode::Char('S')) => {
                 // Toggle sort direction
-                self.sort_direction = match self.sort_direction {
-                    crate::models::SortDirection::Ascending => {
-                        crate::models::SortDirection::Descending
-                    }
-                    crate::models::SortDirection::Descending => {
-                        crate::models::SortDirection::Ascending
-                    }
-                };
+                self.filters.toggle_direction();
 
                 // Re-fetch with new direction
-                self.clear_search_results();
-                self.needs_search_models = true;
+                self.apply_filter_refresh();
 
-                let arrow = match self.sort_direction {
+                let arrow = match self.filters.sort_direction {
                     crate::models::SortDirection::Ascending => "▲",
                     crate::models::SortDirection::Descending => "▼",
                 };
-                *self.status.write() =
-                    format!("Sort direction: {:?} {}", self.sort_direction, arrow);
+                *self.status.write() = format!(
+                    "Sort direction: {:?} {}",
+                    self.filters.sort_direction, arrow
+                );
             }
             (_, KeyCode::Char('f')) => {
                 // Cycle focused filter field
@@ -128,15 +117,11 @@ impl App {
             }
             (_, KeyCode::Char('r')) => {
                 // Reset all filters to defaults
-                self.sort_field = crate::models::SortField::default();
-                self.sort_direction = crate::models::SortDirection::default();
-                self.filter_min_downloads = 0;
-                self.filter_min_likes = 0;
+                self.filters.reset();
                 self.focused_filter_field = 0;
 
                 // Re-fetch with reset filters
-                self.clear_search_results();
-                self.needs_search_models = true;
+                self.apply_filter_refresh();
 
                 *self.status.write() = "Filters reset to defaults".to_string();
             }
@@ -687,137 +672,48 @@ impl App {
 
     /// Modify focused filter field value
     pub fn modify_focused_filter(&mut self, delta: i32) {
-        match self.focused_filter_field {
-            0 => {
-                // Sort field cycling
-                if delta > 0 {
-                    self.sort_field = match self.sort_field {
-                        crate::models::SortField::Downloads => crate::models::SortField::Likes,
-                        crate::models::SortField::Likes => crate::models::SortField::Modified,
-                        crate::models::SortField::Modified => crate::models::SortField::Name,
-                        crate::models::SortField::Name => crate::models::SortField::Downloads,
-                    };
-                } else {
-                    // Toggle direction with -
-                    self.sort_direction = match self.sort_direction {
-                        crate::models::SortDirection::Ascending => {
-                            crate::models::SortDirection::Descending
-                        }
-                        crate::models::SortDirection::Descending => {
-                            crate::models::SortDirection::Ascending
-                        }
-                    };
-                }
-            }
-            1 => {
-                // Min downloads: 0, 100, 1k, 10k, 100k, 1M
-                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
-                let current_idx = steps
-                    .iter()
-                    .position(|&x| x == self.filter_min_downloads)
-                    .unwrap_or(0);
-                let new_idx = if delta > 0 {
-                    (current_idx + 1).min(steps.len() - 1)
-                } else {
-                    current_idx.saturating_sub(1)
-                };
-                self.filter_min_downloads = steps[new_idx];
-            }
-            2 => {
-                // Min likes: 0, 10, 50, 100, 500, 1k, 5k
-                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
-                let current_idx = steps
-                    .iter()
-                    .position(|&x| x == self.filter_min_likes)
-                    .unwrap_or(0);
-                let new_idx = if delta > 0 {
-                    (current_idx + 1).min(steps.len() - 1)
-                } else {
-                    current_idx.saturating_sub(1)
-                };
-                self.filter_min_likes = steps[new_idx];
-            }
-            _ => {}
-        }
+        // Keyboard semantics: clamped table steps; on the sort field,
+        // '+' cycles forward while '−' toggles the direction (see
+        // FilterState::step for the divergence table)
+        self.filters.step(self.focused_filter_field, delta);
 
-        // Re-fetch with new filters
-        self.clear_search_results();
-        self.needs_search_models = true;
+        // Re-fetch with new filters (no status write on this path —
+        // historical behavior, kept)
+        self.apply_filter_refresh();
     }
 
     /// Check if applying a preset would change the current settings
     /// Returns true if the preset settings differ from current settings
     fn would_change_settings(&self, preset: crate::models::FilterPreset) -> bool {
-        use crate::models::FilterPreset;
-
-        let (target_sort_field, target_sort_direction, target_min_downloads, target_min_likes) =
-            match preset {
-                FilterPreset::NoFilters => (SortField::Downloads, SortDirection::Descending, 0, 0),
-                FilterPreset::Popular => {
-                    (SortField::Downloads, SortDirection::Descending, 10_000, 100)
-                }
-                FilterPreset::HighlyRated => {
-                    (SortField::Likes, SortDirection::Descending, 0, 1_000)
-                }
-                FilterPreset::Recent => (SortField::Modified, SortDirection::Descending, 0, 0),
-            };
-
-        self.sort_field != target_sort_field
-            || self.sort_direction != target_sort_direction
-            || self.filter_min_downloads != target_min_downloads
-            || self.filter_min_likes != target_min_likes
+        !self.filters.matches_preset(preset)
     }
 
     /// Apply a filter preset
     pub fn apply_filter_preset(&mut self, preset: crate::models::FilterPreset) {
-        use crate::models::FilterPreset;
+        self.filters.apply_preset(preset);
 
-        match preset {
-            FilterPreset::NoFilters => {
-                // Default: downloads descending, no filters
-                self.sort_field = SortField::Downloads;
-                self.sort_direction = SortDirection::Descending;
-                self.filter_min_downloads = 0;
-                self.filter_min_likes = 0;
-                *self.status.write() = "Preset: No Filters".to_string();
+        let status = match preset {
+            crate::models::FilterPreset::NoFilters => "Preset: No Filters".to_string(),
+            crate::models::FilterPreset::Popular => {
+                "Preset: Popular (10k+ downloads, 100+ likes)".to_string()
             }
-            FilterPreset::Popular => {
-                // Popular models: 10k+ downloads, 100+ likes
-                self.sort_field = SortField::Downloads;
-                self.sort_direction = SortDirection::Descending;
-                self.filter_min_downloads = 10_000;
-                self.filter_min_likes = 100;
-                *self.status.write() = "Preset: Popular (10k+ downloads, 100+ likes)".to_string();
+            crate::models::FilterPreset::HighlyRated => {
+                "Preset: Highly Rated (1k+ likes)".to_string()
             }
-            FilterPreset::HighlyRated => {
-                // Highly rated: 1k+ likes, sorted by likes
-                self.sort_field = SortField::Likes;
-                self.sort_direction = SortDirection::Descending;
-                self.filter_min_downloads = 0;
-                self.filter_min_likes = 1_000;
-                *self.status.write() = "Preset: Highly Rated (1k+ likes)".to_string();
-            }
-            FilterPreset::Recent => {
-                // Recently updated
-                self.sort_field = SortField::Modified;
-                self.sort_direction = SortDirection::Descending;
-                self.filter_min_downloads = 0;
-                self.filter_min_likes = 0;
-                *self.status.write() = "Preset: Recent".to_string();
-            }
-        }
+            crate::models::FilterPreset::Recent => "Preset: Recent".to_string(),
+        };
+        *self.status.write() = status;
 
         // Apply preset by re-searching
-        self.clear_search_results();
-        self.needs_search_models = true;
+        self.apply_filter_refresh();
     }
 
     /// Save current filter settings to config
     pub fn save_filter_settings(&mut self) {
-        self.options.default_sort_field = self.sort_field;
-        self.options.default_sort_direction = self.sort_direction;
-        self.options.default_min_downloads = self.filter_min_downloads;
-        self.options.default_min_likes = self.filter_min_likes;
+        self.options.default_sort_field = self.filters.sort_field;
+        self.options.default_sort_direction = self.filters.sort_direction;
+        self.options.default_min_downloads = self.filters.min_downloads;
+        self.options.default_min_likes = self.filters.min_likes;
 
         if let Err(e) = crate::config::save_config(&self.options) {
             *self.status.write() = format!("Failed to save filter settings: {}", e);

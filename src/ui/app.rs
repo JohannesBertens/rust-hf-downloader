@@ -1,6 +1,7 @@
 // Declare submodules
 mod downloads;
 mod events;
+mod filters;
 mod search;
 mod state;
 mod verification;
@@ -176,10 +177,10 @@ impl App {
                 model_metadata: &model_metadata,
                 file_tree: &file_tree,
                 file_tree_state: &mut self.file_tree_state,
-                sort_field: self.sort_field,
-                sort_direction: self.sort_direction,
-                filter_min_downloads: self.filter_min_downloads,
-                filter_min_likes: self.filter_min_likes,
+                sort_field: self.filters.sort_field,
+                sort_direction: self.filters.sort_direction,
+                filter_min_downloads: self.filters.min_downloads,
+                filter_min_likes: self.filters.min_likes,
                 focused_filter_field: self.focused_filter_field,
                 panel_areas: &mut self.panel_areas,
                 hovered_panel: &self.hovered_panel,
@@ -260,54 +261,41 @@ impl App {
 
     /// Handle click on a filter field - cycle to next value
     fn handle_filter_click(&mut self, field_idx: usize) {
-        // Set focused field and cycle its value
+        // Set focused field and cycle its value (wrap-around semantics;
+        // status write happens BEFORE the refresh tail, which overwrites
+        // it with "Searching..." — historical order, kept)
         self.focused_filter_field = field_idx;
-
-        match field_idx {
-            0 => {
-                // Sort field: cycle through Downloads → Likes → Modified → Name → Downloads
-                self.sort_field = match self.sort_field {
-                    crate::models::SortField::Downloads => crate::models::SortField::Likes,
-                    crate::models::SortField::Likes => crate::models::SortField::Modified,
-                    crate::models::SortField::Modified => crate::models::SortField::Name,
-                    crate::models::SortField::Name => crate::models::SortField::Downloads,
-                };
-                *self.status.write() = format!("Sort by: {:?}", self.sort_field);
-            }
-            1 => {
-                // Min downloads: cycle through 0, 100, 1k, 10k, 100k, 1M
-                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
-                let current_idx = steps
-                    .iter()
-                    .position(|&x| x == self.filter_min_downloads)
-                    .unwrap_or(0);
-                let new_idx = (current_idx + 1) % steps.len();
-                self.filter_min_downloads = steps[new_idx];
-                *self.status.write() = format!(
-                    "Min downloads: {}",
-                    crate::utils::format_number(self.filter_min_downloads)
-                );
-            }
-            2 => {
-                // Min likes: cycle through 0, 10, 50, 100, 500, 1k, 5k
-                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
-                let current_idx = steps
-                    .iter()
-                    .position(|&x| x == self.filter_min_likes)
-                    .unwrap_or(0);
-                let new_idx = (current_idx + 1) % steps.len();
-                self.filter_min_likes = steps[new_idx];
-                *self.status.write() = format!(
-                    "Min likes: {}",
-                    crate::utils::format_number(self.filter_min_likes)
-                );
-            }
-            _ => {}
+        self.filters.cycle(field_idx, true);
+        if let Some(msg) = self.filter_status_message(field_idx) {
+            *self.status.write() = msg;
         }
+        self.apply_filter_refresh();
+    }
 
-        // Re-fetch with new filters
-        self.clear_search_results();
-        self.needs_search_models = true;
+    /// Status line for a filter field after a mouse cycle (None for
+    /// unknown fields — the historical `_ => {}` arms wrote nothing).
+    fn filter_status_message(&self, field_idx: usize) -> Option<String> {
+        match field_idx {
+            0 => Some(format!("Sort by: {:?}", self.filters.sort_field)),
+            1 => Some(format!(
+                "Min downloads: {}",
+                crate::utils::format_number(self.filters.min_downloads)
+            )),
+            2 => Some(format!(
+                "Min likes: {}",
+                crate::utils::format_number(self.filters.min_likes)
+            )),
+            _ => None,
+        }
+    }
+
+    /// The shared refresh tail: every filter mutation re-fetches the model
+    /// list (clearing results sets "Searching..." + loading state).
+    fn apply_filter_refresh(&mut self) {
+        if self.filters.refresh_request() {
+            self.clear_search_results();
+            self.needs_search_models = true;
+        }
     }
 
     /// Handle mouse scroll events - scroll the focused panel up or down,
@@ -369,79 +357,13 @@ impl App {
 
     /// Handle scroll on a filter field - cycle value up or down
     fn handle_filter_scroll(&mut self, field_idx: usize, scroll_up: bool) {
-        // Set focused field
+        // Set focused field and cycle (wrap-around; scroll-up = backward)
         self.focused_filter_field = field_idx;
-
-        match field_idx {
-            0 => {
-                // Sort field: cycle through options
-                self.sort_field = if scroll_up {
-                    match self.sort_field {
-                        crate::models::SortField::Downloads => crate::models::SortField::Name,
-                        crate::models::SortField::Likes => crate::models::SortField::Downloads,
-                        crate::models::SortField::Modified => crate::models::SortField::Likes,
-                        crate::models::SortField::Name => crate::models::SortField::Modified,
-                    }
-                } else {
-                    match self.sort_field {
-                        crate::models::SortField::Downloads => crate::models::SortField::Likes,
-                        crate::models::SortField::Likes => crate::models::SortField::Modified,
-                        crate::models::SortField::Modified => crate::models::SortField::Name,
-                        crate::models::SortField::Name => crate::models::SortField::Downloads,
-                    }
-                };
-                *self.status.write() = format!("Sort by: {:?}", self.sort_field);
-            }
-            1 => {
-                // Min downloads: cycle through steps
-                let steps = [0, 100, 1_000, 10_000, 100_000, 1_000_000];
-                let current_idx = steps
-                    .iter()
-                    .position(|&x| x == self.filter_min_downloads)
-                    .unwrap_or(0);
-                let new_idx = if scroll_up {
-                    if current_idx == 0 {
-                        steps.len() - 1
-                    } else {
-                        current_idx - 1
-                    }
-                } else {
-                    (current_idx + 1) % steps.len()
-                };
-                self.filter_min_downloads = steps[new_idx];
-                *self.status.write() = format!(
-                    "Min downloads: {}",
-                    crate::utils::format_number(self.filter_min_downloads)
-                );
-            }
-            2 => {
-                // Min likes: cycle through steps
-                let steps = [0, 10, 50, 100, 500, 1_000, 5_000];
-                let current_idx = steps
-                    .iter()
-                    .position(|&x| x == self.filter_min_likes)
-                    .unwrap_or(0);
-                let new_idx = if scroll_up {
-                    if current_idx == 0 {
-                        steps.len() - 1
-                    } else {
-                        current_idx - 1
-                    }
-                } else {
-                    (current_idx + 1) % steps.len()
-                };
-                self.filter_min_likes = steps[new_idx];
-                *self.status.write() = format!(
-                    "Min likes: {}",
-                    crate::utils::format_number(self.filter_min_likes)
-                );
-            }
-            _ => {}
+        self.filters.cycle(field_idx, !scroll_up);
+        if let Some(msg) = self.filter_status_message(field_idx) {
+            *self.status.write() = msg;
         }
-
-        // Re-fetch with new filters
-        self.clear_search_results();
-        self.needs_search_models = true;
+        self.apply_filter_refresh();
     }
 
     /// Update hover state based on mouse position (called once per frame with coalesced position)

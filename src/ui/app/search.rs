@@ -16,10 +16,10 @@ impl App {
 
         let models = self.models.clone();
         let token = self.options.hf_token.as_ref();
-        let sort_field = self.sort_field;
-        let sort_direction = self.sort_direction;
-        let min_downloads = self.filter_min_downloads;
-        let min_likes = self.filter_min_likes;
+        let sort_field = self.filters.sort_field;
+        let sort_direction = self.filters.sort_direction;
+        let min_downloads = self.filters.min_downloads;
+        let min_likes = self.filters.min_likes;
 
         // Create search key for caching
         let search_key = crate::models::SearchKey {
