@@ -6,7 +6,7 @@ use crate::models::{ModelMetadata, QuantizationGroup};
 
 use super::args::{
     apply_rate_limit_overrides, merge_token, parse_rate_limit_mbps, parse_revision, valid_model_id,
-    DownloadArgs, HfCacheArgs, HfCacheCommand, ModelDto,
+    DownloadArgs, HfCacheArgs, HfCacheCommand, ModelDto, RateLimitArgs, RunOutputArgs,
 };
 use super::events::{Event, FileDto, FileStatus, OverallProgress, Summary};
 use super::hf_cache::{
@@ -184,15 +184,19 @@ fn download_args(quant: Option<&str>, file: &[&str], all: bool) -> DownloadArgs 
         quant: quant.map(String::from),
         file: file.iter().map(|f| f.to_string()).collect(),
         all,
-        progress: ProgressMode::Auto,
+        run_output: RunOutputArgs {
+            progress: ProgressMode::Auto,
+            token: None,
+            no_verify: false,
+            json: false,
+            quiet: false,
+        },
+        rate_limits: RateLimitArgs {
+            rate_limit: false,
+            no_rate_limit: false,
+            rate_limit_mbps: None,
+        },
         output: None,
-        token: None,
-        no_verify: false,
-        json: false,
-        quiet: false,
-        rate_limit: false,
-        no_rate_limit: false,
-        rate_limit_mbps: None,
         revision: None,
     }
 }
@@ -610,7 +614,7 @@ fn progress_mode_flag_parses_and_defaults() {
     let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
         panic!("expected download subcommand");
     };
-    assert_eq!(args.progress, ProgressMode::Auto);
+    assert_eq!(args.run_output.progress, ProgressMode::Auto);
 
     // explicit modes on download
     for (raw, mode) in [
@@ -623,7 +627,7 @@ fn progress_mode_flag_parses_and_defaults() {
         let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
             panic!("expected download subcommand");
         };
-        assert_eq!(args.progress, mode, "--progress {raw}");
+        assert_eq!(args.run_output.progress, mode, "--progress {raw}");
     }
 
     // hf-cache sync accepts it too
@@ -642,7 +646,7 @@ fn progress_mode_flag_parses_and_defaults() {
     let HfCacheCommand::Sync(args) = hf.command else {
         panic!("expected hf-cache sync subcommand");
     };
-    assert_eq!(args.progress, ProgressMode::Plain);
+    assert_eq!(args.run_output.progress, ProgressMode::Plain);
 
     // unknown mode is a usage error
     assert!(
@@ -714,9 +718,9 @@ fn rate_limit_flags_parse() {
     let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
         panic!("expected download subcommand");
     };
-    assert_eq!(args.rate_limit_mbps, Some(7.25));
-    assert!(!args.rate_limit);
-    assert!(!args.no_rate_limit);
+    assert_eq!(args.rate_limits.rate_limit_mbps, Some(7.25));
+    assert!(!args.rate_limits.rate_limit);
+    assert!(!args.rate_limits.no_rate_limit);
 
     // --rate-limit and --no-rate-limit conflict
     assert!(Cli::try_parse_from([
@@ -819,8 +823,8 @@ fn parses_download_subcommand_flags() {
             assert_eq!(args.quant.as_deref(), Some("Q4_K_M"));
             assert_eq!(args.file, vec!["a.gguf", "b.gguf"]);
             assert_eq!(args.output.as_deref(), Some("/tmp/x"));
-            assert!(args.no_verify);
-            assert!(args.json);
+            assert!(args.run_output.no_verify);
+            assert!(args.run_output.json);
         }
         other => panic!("expected download, got {:?}", other),
     }
@@ -1352,12 +1356,12 @@ fn parses_hf_cache_sync_positional_files_and_flags() {
     assert!(args.no_symlinks);
     assert!(args.force);
     assert!(args.dry_run);
-    assert!(args.no_verify);
-    assert!(args.json);
-    assert!(args.quiet);
-    assert_eq!(args.rate_limit_mbps, Some(7.25));
-    assert!(!args.rate_limit);
-    assert!(!args.no_rate_limit);
+    assert!(args.run_output.no_verify);
+    assert!(args.run_output.json);
+    assert!(args.run_output.quiet);
+    assert_eq!(args.rate_limits.rate_limit_mbps, Some(7.25));
+    assert!(!args.rate_limits.rate_limit);
+    assert!(!args.rate_limits.no_rate_limit);
 }
 
 #[test]

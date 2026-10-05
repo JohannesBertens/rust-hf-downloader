@@ -180,17 +180,21 @@ fn print_sync_dry_run(
 }
 
 pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
-    let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
+    let mut reporter = Reporter::new(
+        args.run_output.json,
+        args.run_output.quiet,
+        args.run_output.progress,
+    );
 
     // --- 1. Configuration (Runner fold: run::load_run_config, no output
     //        override — the destination is the hub cache, §4.1) ------------
     let (_options, token) = load_run_config(
-        args.token.clone(),
+        args.run_output.token.clone(),
         None,
-        args.rate_limit,
-        args.no_rate_limit,
-        args.rate_limit_mbps,
-        args.no_verify,
+        args.rate_limits.rate_limit,
+        args.rate_limits.no_rate_limit,
+        args.rate_limits.rate_limit_mbps,
+        args.run_output.no_verify,
     );
 
     // --- 2. Validate usage (§5.2 step 1: revision already parsed by
@@ -304,7 +308,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 
     // --- 6. Dry run: the plan is the output; no writes (§5.2 step 4) --------
     if args.dry_run {
-        if !args.json {
+        if !args.run_output.json {
             print_sync_dry_run(
                 &args.model_id,
                 &revision,
@@ -504,7 +508,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         // verification deliberately skipped, or an explicit Ok.
         match &item.sha256 {
             None => {}
-            Some(_) if args.no_verify => {
+            Some(_) if args.run_output.no_verify => {
                 reporter.status_line(&format!(
                     "Warning: publishing {} without SHA256 verification (--no-verify)",
                     item.repo_path

@@ -17,16 +17,20 @@ use super::{EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
 
 pub(super) async fn run_download(args: DownloadArgs) -> i32 {
-    let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
+    let mut reporter = Reporter::new(
+        args.run_output.json,
+        args.run_output.quiet,
+        args.run_output.progress,
+    );
 
     // --- 1. Configuration (Runner fold: run::load_run_config) ------------
     let (options, token) = load_run_config(
-        args.token.clone(),
+        args.run_output.token.clone(),
         args.output.as_deref(),
-        args.rate_limit,
-        args.no_rate_limit,
-        args.rate_limit_mbps,
-        args.no_verify,
+        args.rate_limits.rate_limit,
+        args.rate_limits.no_rate_limit,
+        args.rate_limits.rate_limit_mbps,
+        args.run_output.no_verify,
     );
 
     // --- 2. Validate usage ------------------------------------------------
