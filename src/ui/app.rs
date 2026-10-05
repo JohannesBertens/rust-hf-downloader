@@ -31,11 +31,14 @@ impl App {
         terminal.draw(|frame| self.draw(frame))?;
 
         // Spawn the shared engine tasks (verification worker + download
-        // manager). Both the TUI and the CLI bootstrap through these same
-        // functions in `engine`, so the two frontends cannot drift. The TUI
-        // keeps its download_tx alive for the whole session, so the manager
-        // runs until the process exits (the join handle is dropped, i.e. the
-        // task stays detached — same behavior as the previous inline spawn).
+        // manager). The CLI frontends bootstrap through `engine::bootstrap`
+        // (fresh state → registry-mirror seed → these same spawns in this
+        // order); `App::new` is sync, so the TUI composes the identical
+        // pieces — the mirror seed already ran in
+        // `scan_incomplete_downloads` above. The TUI keeps its download_tx
+        // alive for the whole session, so the manager runs until the process
+        // exits (the join handle is dropped, i.e. the task stays detached —
+        // same behavior as the previous inline spawn).
         crate::engine::spawn_verification_worker(self.engine.clone());
         let _manager = crate::engine::spawn_manager(self.engine.clone());
 

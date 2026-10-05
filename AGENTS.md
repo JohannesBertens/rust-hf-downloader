@@ -55,14 +55,19 @@ src/
 
 ### Frontends share one engine (v-unreleased)
 
-The TUI (`ui::App::run`) and the CLI (`cli::run_download`) both bootstrap the
-queue/download pipeline through `engine::spawn_manager` /
-`engine::spawn_verification_worker` over an `engine::EngineState` bundle —
-there is exactly ONE manager bootstrap (the v1 headless CLI was removed in
-v2.0.0 because its duplicated copy drifted). The CLI signals completion by
-dropping `download_tx` (manager join resolves) and then waiting for
-`EngineState::verification_idle()`; per-file results stream over the
-`outcome_tx`/`verify_tx` channels. `HF_ENDPOINT` overrides all HuggingFace
+The CLI frontends (`cli::run_download`, `cli::hf-cache sync`) bootstrap the
+queue/download pipeline through `engine::bootstrap()` — fresh
+`engine::EngineState` → on-disk registry loaded into the `download_registry`
+mirror via `engine::seed_registry_mirror` → `engine::spawn_verification_worker`
+→ `engine::spawn_manager`, in that order (`hf-cache sync` purges staging
+registry entries immediately before it). The TUI's `App::new` is sync, so it
+composes the same pieces: `EngineState::new()` at construction,
+`engine::seed_registry_mirror` in the startup scan, the two spawns in
+`App::run` — there is exactly ONE manager bootstrap (the v1 headless CLI was
+removed in v2.0.0 because its duplicated copy drifted). The CLI signals
+completion by dropping `download_tx` (manager join resolves) and then
+waiting for `EngineState::verification_idle()`; per-file results stream over
+the `outcome_tx`/`verify_tx` channels. `HF_ENDPOINT` overrides all HuggingFace
 base URLs — required knowledge for integration tests and mirror users.
 Check `README.md` for more information.
 

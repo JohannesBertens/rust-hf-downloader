@@ -13,6 +13,7 @@ Files and roles
   • `download_tx` is the only channel endpoint kept on App: the frontend-owned sender half of the engine's download queue (dropping it ends the manager loop once drained)
   • engine_state() snapshot method is gone — App::run passes `self.engine.clone()` directly to engine::spawn_verification_worker / spawn_manager
   • App::new loads options from config; seeds filter defaults; prepares channels through EngineState::new
+  • the startup registry-mirror seed lives in engine::seed_registry_mirror (called by scan_incomplete_downloads) — the same helper engine::bootstrap runs for the CLI, so the seed convention is encoded in one place
   • App::sync_options_to_config maps AppOptions → global atomics (download & verification configs)
   • Display flags: needs_search_models, needs_load_quantizations to defer heavy work until after a frame draw
   • File tree state for Standard mode; display_mode is shared to switch GGUF vs Standard
@@ -40,7 +41,7 @@ Files and roles
   • clear_search_results/clear_model_details give immediate UI feedback
 
 - downloads.rs
-  • scan_incomplete_downloads: populates popup, complete map, and status
+  • scan_incomplete_downloads: seeds the engine registry mirror via engine::seed_registry_mirror (one disk read, snapshot reused), populates popup, complete map, and status
   • trigger_download: decides scope based on focused pane (group/file/repo)
   • confirm_download: validates paths, populates registry entries, fetches SHA256 map (multipart), queues N downloads
   • resume/delete incomplete downloads operate on registry + filesystem

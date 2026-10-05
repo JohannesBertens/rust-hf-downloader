@@ -11,14 +11,10 @@ use tui_input::Input;
 impl App {
     /// Scan registry for incomplete downloads and show resume popup if found
     pub async fn scan_incomplete_downloads(&mut self) {
-        // Load registry from disk
-        let registry = registry::load_registry();
-
-        // Update the app's registry
-        {
-            let mut reg = self.engine.download_registry.lock().await;
-            *reg = registry.clone();
-        }
+        // Seed the engine's registry mirror from disk (the shared startup
+        // step the CLI's engine::bootstrap also runs) and reuse the same
+        // snapshot for the incomplete/complete views — one disk read.
+        let registry = crate::engine::seed_registry_mirror(&self.engine).await;
 
         // Find incomplete downloads
         self.incomplete_downloads = registry::get_incomplete_downloads(&registry);

@@ -19,7 +19,7 @@ Panes and focus
 - PopupMode overlays: Search, Options, ResumeDownload, DownloadPath, AuthError
 
 app.rs
-- App::run: sets running, syncs options to atomics, scans for incomplete downloads, spawns the shared engine tasks via `engine_state()`:
+- App::run: sets running, syncs options to atomics, scans for incomplete downloads, spawns the shared engine tasks (engine::spawn_verification_worker + engine::spawn_manager on self.engine — the same sequence the CLI runs via engine::bootstrap):
   • engine::spawn_verification_worker (background)
   • engine::spawn_manager (download manager consuming download_rx and calling download::start_download)
 - Main loop draws, then conditionally calls async loaders flagged by state:

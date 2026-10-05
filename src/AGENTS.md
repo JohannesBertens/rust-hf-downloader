@@ -95,14 +95,14 @@ Key modules
 - atomic_rename_with_retry(src, dst, retries, delay): shared final-rename primitive; retry policy is per-site (download: 4 retries, 100ms linear backoff; hf_cache: retries=0 single attempt)
 
 10) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
-- `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::spawn_manager
+- `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::bootstrap
 - Split by section: mod (Cli/Command/run), args, resolve, events, report, download_cmd, search_cmd, hf_cache_cmd, update_cmd, tests
 - Human reporter or JSON Lines (`--json`); documented exit-code table
 - `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
 
 11) engine.rs — the single shared download pipeline bootstrap (v2.9.x)
-- EngineState bundle + spawn_manager / spawn_verification_worker
-- Consumed by BOTH the TUI and cli::run_download — never duplicate this logic
+- EngineState bundle + bootstrap() (state → registry-mirror seed → verification worker → manager) + seed_registry_mirror()
+- CLI: engine::bootstrap in run_download + hf-cache sync (after purging staging registry entries); TUI: composes the same pieces (EngineState::new in App::new, seed_registry_mirror in the startup scan, both spawns in App::run) — never duplicate this logic
 
 12) paths.rs — cross-platform path resolution (v2.6.0) + path-security policy (paths::sanitize)
 - Precedence: env overrides > portable mode (config.toml next to exe) > dirs

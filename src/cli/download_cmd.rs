@@ -1,6 +1,7 @@
 //! Download orchestration: config -> resolve -> engine bootstrap -> event
-//! drain. The bootstrap is one of three production sites; `monitor`/
-//! `poll_once` follow the AGENTS.md lock hierarchy.
+//! drain. `engine::bootstrap` owns the startup sequence (fresh state +
+//! registry-mirror seed + both spawns); `monitor`/`poll_once` follow the
+//! AGENTS.md lock hierarchy.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -162,15 +163,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         return EXIT_FAILURE;
     }
 
-    let (state, download_tx) = EngineState::new();
-    // Load the on-disk registry into the engine mirror (parity with the
-    // TUI's startup scan) so verification updates find their entries.
-    {
-        let mut mirror = state.download_registry.lock().await;
-        *mirror = crate::registry::load_registry();
-    }
-    crate::engine::spawn_verification_worker(state.clone());
-    let manager = crate::engine::spawn_manager(state.clone());
+    let (state, download_tx, manager) = crate::engine::bootstrap().await;
 
     // Model files land under base/author/model-name (same layout as the TUI)
     let parts: Vec<&str> = args.model_id.split('/').collect();

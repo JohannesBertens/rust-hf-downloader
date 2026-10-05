@@ -10,7 +10,7 @@ use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::FileSpec;
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
-use crate::engine::{EngineState, QueuedDownload};
+use crate::engine::QueuedDownload;
 use crate::models::{FileOutcome, ModelMetadata, VerifyOutcome};
 use std::collections::HashMap;
 use std::io::Write;
@@ -621,15 +621,7 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     // are swept after the run and at the start of the next one so the
     // TUI's resume/complete views stay clean.
     purge_staging_registry_entries();
-    let (state, download_tx) = EngineState::new();
-    // Load the on-disk registry into the engine mirror (parity with the
-    // TUI's startup scan) so verification updates find their entries.
-    {
-        let mut mirror = state.download_registry.lock().await;
-        *mirror = crate::registry::load_registry();
-    }
-    crate::engine::spawn_verification_worker(state.clone());
-    let manager = crate::engine::spawn_manager(state.clone());
+    let (state, download_tx, manager) = crate::engine::bootstrap().await;
 
     let files: Vec<FileSpec> = plan
         .fetch
