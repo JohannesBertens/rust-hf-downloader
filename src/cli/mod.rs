@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 mod args;
 mod download_cmd;
 mod events;
-mod hf_cache_cmd;
+mod hf_cache;
 mod report;
 mod resolve;
 mod run;
@@ -36,7 +36,7 @@ mod tests;
 
 use args::{DownloadArgs, HfCacheArgs, SearchArgs, UpdateArgs};
 use download_cmd::run_download;
-use hf_cache_cmd::run_hf_cache;
+use hf_cache::run_hf_cache;
 use search_cmd::run_search;
 use update_cmd::run_update;
 

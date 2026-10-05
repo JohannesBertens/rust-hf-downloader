@@ -1,189 +1,44 @@
-//! `hf-cache` subcommand group (plans/hf-cache-sync.md §2, §5.2): the
-//! hub-cache sync pipeline and pure path helper.
+//! `hf-cache sync` (§5.2 pipeline, followed exactly): config bootstrap →
+//! tree + commit SHA → selection → cache plan → engine run → publish gate
+//! → refs/staging cleanup → summary and snapshot path.
+//!
+//! Split out of `cli/hf_cache_cmd.rs` (plan W3.5); bodies moved verbatim.
+//! The pure selector lives in [`super::selection`], the scripting helper
+//! `hf-cache path` in [`super::path`], and [`super::absolute_path`] is the
+//! shared path helper. Runner machinery (config/token bootstrap, engine
+//! bootstrap, monitor, run-tail emissions) is shared with `download`
+//! through [`crate::cli::run`].
 
-use super::args::{valid_model_id, HfCacheArgs, HfCacheCommand, HfCachePathArgs, HfCacheSyncArgs};
-use super::events::{ErrorCode, Event, FileDto, Summary};
-use super::report::Reporter;
-use super::resolve::FileSpec;
-use super::run::{
-    effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
-    queue_run, resolve_run_token, RunTally,
-};
-use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
-use crate::engine::{EnqueuePolicy, QueuedDownload};
-use crate::models::{FileOutcome, ModelMetadata, VerifyOutcome};
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::Ordering;
+
+use super::absolute_path;
+// Reached through the `hf_cache` facade (`pub use selection::*`), which is
+// what keeps the re-export live for `cli/tests.rs`.
+use super::{select_sync_files, tree_file_dtos, SelectionMode};
+use crate::cli::args::{valid_model_id, HfCacheSyncArgs};
+use crate::cli::events::{ErrorCode, Event, FileDto, Summary};
+use crate::cli::report::Reporter;
+use crate::cli::resolve::FileSpec;
+use crate::cli::run::{
+    effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
+    queue_run, RunTally,
+};
+use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
+use crate::engine::{EnqueuePolicy, QueuedDownload};
+use crate::models::{FileOutcome, VerifyOutcome};
 
 /// Whole-repo sync hint (§2.2 precedence step 4).
 const TIP_USE_FOR_VLLM: &str = "tip: use --for vllm to fetch only what vLLM reads";
 
-/// Dispatch the `hf-cache` subcommand group.
-pub(super) async fn run_hf_cache(args: HfCacheArgs) -> i32 {
-    match args.command {
-        HfCacheCommand::Sync(args) => run_hf_cache_sync(args).await,
-        HfCacheCommand::Path(args) => run_hf_cache_path(args).await,
-    }
-}
-
-// --- selection (§2.2 precedence; pure, unit-testable) ---------------------
-
-/// How a sync's file selection was derived (§2.2) — `WholeRepo` triggers
-/// the `--for vllm` tip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SelectionMode {
-    /// Explicit positional `FILE…` — exactly those files.
-    Files,
-    /// `--include`/`--exclude` globs over the full tree.
-    Patterns,
-    /// A `--for <PRESET>` allow/ignore table (§2.3).
-    Preset,
-    /// No selector: the whole repository (hf `download` parity).
-    WholeRepo,
-}
-
-/// Selection failures (§2.2): all map to [`EXIT_USAGE`] with the full
-/// structured file list attached.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyncSelectionError {
-    /// A positional `FILE` is not present in the repository tree.
-    MissingPositional {
-        path: String,
-        available: Vec<String>,
-    },
-    /// `--for` named a preset this binary does not know (unreachable via
-    /// clap's `parse_preset`; kept for direct callers).
-    UnknownPreset { name: String },
-    /// Every mode plus `--exclude` filtering left nothing to sync.
-    EmptySelection { available: Vec<String> },
-}
-
-impl SyncSelectionError {
-    pub(super) fn code(&self) -> &'static str {
-        match self {
-            SyncSelectionError::MissingPositional { .. } => "no_files_match",
-            SyncSelectionError::UnknownPreset { .. } => "unknown_preset",
-            SyncSelectionError::EmptySelection { .. } => "empty_selection",
-        }
-    }
-
-    pub(super) fn message(&self) -> String {
-        match self {
-            SyncSelectionError::MissingPositional { path, .. } => {
-                format!("file not present in repository: {path}")
-            }
-            SyncSelectionError::UnknownPreset { name } => {
-                format!("unknown preset {name:?} — available presets: vllm")
-            }
-            SyncSelectionError::EmptySelection { .. } => {
-                "selection matched no files in the repository".to_string()
-            }
-        }
-    }
-}
-
-/// Resolve the files a sync targets, per the §2.2 precedence:
-///
-/// 1. positional `FILE…` → exactly those files (each must exist in the
-///    tree; duplicates collapse, order preserved),
-/// 2. else `--include`/`--exclude` → Python-fnmatch globs over the full
-///    tree (`*` crosses `/`, §7),
-/// 3. else `--for vllm` → the preset allow/ignore table from §2.3
-///    ([`crate::patterns::VLLM_ALLOW`]/[`crate::patterns::VLLM_IGNORE`]),
-/// 4. else the whole repository ([`SelectionMode::WholeRepo`] — the
-///    caller prints the `--for vllm` tip).
-///
-/// `--exclude` applies on top of every mode (§2.2). An empty selection
-/// after all filtering is an error carrying the available file list.
-pub fn select_sync_files(
-    tree: &[&str],
-    files: &[String],
-    include: &[String],
-    exclude: &[String],
-    preset: Option<&str>,
-) -> Result<(Vec<String>, SelectionMode), SyncSelectionError> {
-    let available = || {
-        tree.iter()
-            .map(|path| (*path).to_string())
-            .collect::<Vec<_>>()
-    };
-    let (mut selected, mode) = if !files.is_empty() {
-        let mut picked: Vec<String> = Vec::with_capacity(files.len());
-        for file in files {
-            if !tree.contains(&file.as_str()) {
-                return Err(SyncSelectionError::MissingPositional {
-                    path: file.clone(),
-                    available: available(),
-                });
-            }
-            if !picked.contains(file) {
-                picked.push(file.clone());
-            }
-        }
-        (picked, SelectionMode::Files)
-    } else if !include.is_empty() {
-        let picked = crate::patterns::filter_paths(tree, include, exclude)
-            .into_iter()
-            .map(String::from)
-            .collect();
-        (picked, SelectionMode::Patterns)
-    } else if let Some(preset) = preset {
-        match preset {
-            "vllm" => {
-                let allow: Vec<String> = crate::patterns::VLLM_ALLOW
-                    .iter()
-                    .map(|pattern| pattern.to_string())
-                    .collect();
-                // The preset's own ignore table filters here; a user
-                // --exclude is additionally applied by the universal
-                // post-filter below (§2.2: exclude applies on top of every
-                // mode).
-                let ignore: Vec<String> = crate::patterns::VLLM_IGNORE
-                    .iter()
-                    .map(|pattern| pattern.to_string())
-                    .collect();
-                let picked = crate::patterns::filter_paths(tree, &allow, &ignore)
-                    .into_iter()
-                    .map(String::from)
-                    .collect();
-                (picked, SelectionMode::Preset)
-            }
-            other => {
-                return Err(SyncSelectionError::UnknownPreset {
-                    name: other.to_string(),
-                })
-            }
-        }
-    } else {
-        (available(), SelectionMode::WholeRepo)
-    };
-
-    // §2.2: --exclude applies on top of every mode (filter_paths already
-    // applied it for the Patterns/Preset paths; re-applying is idempotent).
-    if !exclude.is_empty() {
-        selected.retain(|path| {
-            !exclude
-                .iter()
-                .any(|pattern| crate::patterns::fnmatch(pattern, path))
-        });
-    }
-
-    if selected.is_empty() {
-        return Err(SyncSelectionError::EmptySelection {
-            available: available(),
-        });
-    }
-    Ok((selected, mode))
-}
-
-// --- small pure helpers ----------------------------------------------------
+// --- sync-pipeline helpers (pure or filesystem-local) ----------------------
 
 /// The `refs/` name for a revision (R2): branch/tag revisions are written
 /// to `refs/<name>`; a raw 40-hex commit-SHA revision gets **no** ref (hub
 /// behavior — the snapshot is addressed by SHA alone).
-pub(super) fn ref_name_for_revision(revision: &str) -> Option<&str> {
+pub fn ref_name_for_revision(revision: &str) -> Option<&str> {
     let is_commit_sha = revision.len() == 40 && revision.bytes().all(|b| b.is_ascii_hexdigit());
     if is_commit_sha {
         None
@@ -208,7 +63,7 @@ fn env_flag_is_true(value: &str) -> bool {
 /// hub's own degraded-cache default — because relative targets with `/`
 /// separators fail to resolve (os error 123) and creation needs developer
 /// mode; snapshots get real files instead.
-pub(super) fn symlinks_enabled(no_symlinks_flag: bool, env_value: Option<&str>) -> bool {
+pub fn symlinks_enabled(no_symlinks_flag: bool, env_value: Option<&str>) -> bool {
     if no_symlinks_flag || env_value.is_some_and(env_flag_is_true) {
         return false;
     }
@@ -223,20 +78,6 @@ pub(super) fn symlinks_enabled(no_symlinks_flag: bool, env_value: Option<&str>) 
     #[cfg(not(windows))]
     {
         true
-    }
-}
-
-/// Absolute form of `path` without canonicalization's symlink resolution:
-/// already-absolute paths pass through verbatim, relative paths anchor at
-/// the current directory. §2.4's "last line: the snapshot path" wants a
-/// stable, predictable absolute path (containers mount caches elsewhere).
-pub(super) fn absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
     }
 }
 
@@ -259,21 +100,6 @@ fn verify_outcome_filename(outcome: &VerifyOutcome) -> &str {
         | VerifyOutcome::Error { filename, .. }
         | VerifyOutcome::Missing { filename } => filename,
     }
-}
-
-/// FileDto listing of a repo tree (selection-error `available` payloads,
-/// mirroring `resolve_files`' ambiguity lists).
-fn tree_file_dtos(metadata: &ModelMetadata) -> Vec<FileDto> {
-    metadata
-        .siblings
-        .iter()
-        .filter(|f| !f.rfilename.ends_with('/'))
-        .map(|f| FileDto {
-            filename: f.rfilename.clone(),
-            size_bytes: f.size.unwrap_or(0),
-            sha256: f.lfs.as_ref().map(|lfs| lfs.oid.clone()),
-        })
-        .collect()
 }
 
 /// R6/E9 relink: ensure snapshot entries exist for already-cached files
@@ -353,9 +179,7 @@ fn print_sync_dry_run(
     let _ = out.flush();
 }
 
-// --- `hf-cache sync` (§5.2 pipeline, followed exactly) ---------------------
-
-async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
+pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
 
     // --- 1. Configuration (Runner fold: run::load_run_config, no output
@@ -821,74 +645,5 @@ fn purge_staging_registry_entries() {
         .retain(|d| !d.local_path.contains(".rhd-staging"));
     if registry.downloads.len() != before {
         crate::registry::save_registry(&registry);
-    }
-}
-
-// --- `hf-cache path` (§2.1: pure path math + refs lookup) ------------------
-
-async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
-    if !valid_model_id(&args.model_id) {
-        eprintln!(
-            "error [usage]: invalid model ID {:?} — expected \"author/model-name\"",
-            args.model_id
-        );
-        return EXIT_USAGE;
-    }
-    let revision = effective_revision(&args.revision);
-    let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
-    let repo_dir = cache_dir.join(crate::hf_cache::repo_dir_name(&args.model_id));
-
-    // refs/<rev> lookup: pure path math, no network (§2.1).
-    if let Ok(sha) = std::fs::read_to_string(repo_dir.join("refs").join(&revision)) {
-        let sha = sha.trim();
-        if !sha.is_empty() {
-            let snapshot = absolute_path(&crate::hf_cache::snapshot_dir(
-                &cache_dir,
-                &args.model_id,
-                sha,
-            ));
-            if !snapshot.is_dir() {
-                eprintln!(
-                    "note: snapshot directory is missing from the cache; \
-                     re-run the sync to repair it"
-                );
-            }
-            println!("{}", snapshot.display());
-            return EXIT_OK;
-        }
-    }
-
-    // Online fallback: resolve the revision to a commit SHA (Runner
-    // partial bootstrap: load config, resolve the token by the run
-    // precedence — no engine, no apply_options).
-    let token = resolve_run_token(args.token.clone(), &crate::config::load_config());
-    match crate::api::resolve_revision_sha(&args.model_id, &revision, token.as_ref()).await {
-        Ok(sha) => {
-            let snapshot = absolute_path(&crate::hf_cache::snapshot_dir(
-                &cache_dir,
-                &args.model_id,
-                &sha,
-            ));
-            if !snapshot.is_dir() {
-                eprintln!(
-                    "note: snapshot not present in the cache yet; run \
-                     `rust-hf-downloader hf-cache sync {} --revision {}` to populate it",
-                    args.model_id, revision
-                );
-            }
-            println!("{}", snapshot.display());
-            EXIT_OK
-        }
-        Err(e) => {
-            eprintln!(
-                "error [network]: cannot resolve revision {} of {}: {}",
-                revision, args.model_id, e
-            );
-            eprintln!(
-                "hint: run `rust-hf-downloader hf-cache sync {}` to populate the cache first",
-                args.model_id
-            );
-            EXIT_FAILURE
-        }
     }
 }

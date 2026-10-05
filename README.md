@@ -719,7 +719,7 @@ rust-hf-downloader/
     │   ├── download_cmd.rs # download orchestration (run_download)
     │   ├── run.rs          # cross-command runner: RunTally/monitor/poll_once drain, shared bootstrap helpers
     │   ├── search_cmd.rs   # search subcommand
-    │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline
+    │   ├── hf_cache/       # hf-cache group: selection (pure) / sync (pipeline) / path
     │   ├── update_cmd.rs   # self-update subcommand
     │   └── tests.rs        # cli::tests — insta snapshots in src/cli/snapshots/
     ├── engine.rs           # Shared download engine (manager + verification bootstrap)

@@ -9,7 +9,7 @@ use super::args::{
     DownloadArgs, HfCacheArgs, HfCacheCommand, ModelDto,
 };
 use super::events::{Event, FileDto, FileStatus, OverallProgress, Summary};
-use super::hf_cache_cmd::{
+use super::hf_cache::{
     absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
     SyncSelectionError,
 };
@@ -254,9 +254,8 @@ fn token_precedence_flag_env_then_file() {
 // | `run_download` (download_cmd.rs ~60)| load_config → output override → rate-limit   |
 // |                                     | overrides → merge_token → writeback →        |
 // |                                     | apply_options → no-verify store              |
-// | `run_hf_cache_sync` (hf_cache_cmd   | same minus the output-dir override           |
-// | ~363)                               |                                              |
-// | `run_hf_cache_path` (~914)          | load_config → merge_token (partial variant)  |
+// | `run_hf_cache_sync` (hf_cache/sync) | same minus the output-dir override           |
+// | `run_hf_cache_path` (hf_cache/path) | load_config → merge_token (partial variant)  |
 // | `run_search` (search_cmd.rs ~77)    | load_config → merge_token (partial variant)  |
 //
 // Each `*_site_token` fn below is a verbatim transcription of its site's
@@ -422,7 +421,7 @@ fn download_site_token(flag: Option<String>) -> Option<String> {
     )
 }
 
-/// `run_hf_cache_sync`'s config bootstrap (hf_cache_cmd.rs step 1) — the
+/// `run_hf_cache_sync`'s config bootstrap (hf_cache/sync.rs step 1) — the
 /// download composition minus the output-dir override.
 fn hf_cache_sync_site_token(flag: Option<String>) -> Option<String> {
     let mut options = crate::config::load_config();
@@ -434,7 +433,7 @@ fn hf_cache_sync_site_token(flag: Option<String>) -> Option<String> {
     )
 }
 
-/// `run_hf_cache_path`'s partial bootstrap (hf_cache_cmd.rs, online
+/// `run_hf_cache_path`'s partial bootstrap (hf_cache/path.rs, online
 /// fallback): load + merge only — no rate-limit flags, no `apply_options`.
 fn hf_cache_path_site_token(flag: Option<String>) -> Option<String> {
     let options = crate::config::load_config();
@@ -1709,7 +1708,7 @@ fn cli_command_tree_passes_clap_debug_assert() {
 
 // --- H6: error-event wire contract table ---------------------------------
 // Additive-only NDJSON contract (plan H6). Every `code: "…"` literal in
-// src/cli/*.rs (26 construction sites: download_cmd 11, hf_cache_cmd 13,
+// src/cli/*.rs (26 construction sites: download_cmd 11, hf_cache 13,
 // search_cmd 2) collapses to the 13 distinct codes below; each entry pins
 // the exact serialized bytes of `Event::Error` with that code. A new code
 // MUST be added here; renaming or dropping one fails this table.
@@ -1743,7 +1742,7 @@ fn error_event_code_wire_contract_table() {
             "verification_error",
             r#"{"type":"error","code":"verification_error","message":"m"}"#,
         ),
-        // hf_cache_cmd.rs
+        // hf_cache/sync.rs
         (
             "plan_failed",
             r#"{"type":"error","code":"plan_failed","message":"m"}"#,

@@ -506,7 +506,7 @@ impl EnqueuePolicy {
 
     /// `hf-cache sync`: registers NOTHING pending — the named
     /// staging-sweep decision (purge runs at bootstrap/publish, not here;
-    /// see `hf_cache_cmd.rs`); queue accounted before the sends, HUD mirror
+    /// see `cli/hf_cache/sync.rs`); queue accounted before the sends, HUD mirror
     /// pushed up front, no rollback.
     pub fn hf_cache_sync() -> Self {
         Self {

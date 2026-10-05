@@ -25,7 +25,7 @@ src/
 │   ├── download_cmd.rs # run_download (config → resolve → enqueue → monitor → summary/exit)
 │   ├── run.rs          # Cross-command runner (W3.7+W4.2+W4.3): RunTally + monitor/poll_once drain (lock ordering!), tally_outcome, load_run_config/resolve_run_token, effective_revision, queue_run, metadata-error + run-tail emissions
 │   ├── search_cmd.rs # Query-only search (no engine)
-│   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline (selection, sync lock, publish)
+│   ├── hf_cache/     # hf-cache group (private submodules + mod facade re-exporting selection/sync helpers): sync pipeline (selection, sync lock, publish) + path helper
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
 │   └── tests.rs      # cli::tests — insta snapshots in src/cli/snapshots/
 ├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, the enqueue transaction (EnqueuePolicy), drain signals
