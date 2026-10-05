@@ -11,7 +11,7 @@ use tui_input::Input;
 
 // The queue transport types live in the engine module (single source of
 // truth shared with the CLI frontend).
-pub use crate::engine::{DownloadMessage, DownloadReceiver};
+pub use crate::engine::{DownloadReceiver, QueuedDownload};
 
 /// Main application state container
 #[derive(Debug)]
@@ -39,7 +39,7 @@ pub struct App {
     /// A directory queues every file under it. Cleared on confirm/cancel.
     pub pending_tree_download: Option<(String, bool)>,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
+    pub download_tx: mpsc::UnboundedSender<QueuedDownload>,
     pub download_rx: DownloadReceiver,
     pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
     /// Mirror of files waiting in the download channel, for HUD display

@@ -44,7 +44,7 @@ Files and roles
   • confirm_repository_download: non-GGUF repo case; preserves folder structure under base/author/model
 
 Important queues and channels
-- download_tx/rx: (model_id, revision, filename, base_path, expected_sha256, hf_token, total_size)
+- download_tx/rx: QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size }
 - status_tx/rx: strings consumed by run loop to update status and popups (e.g., AUTH_ERROR:<model_id>)
 - verification_queue(+size) and verification_progress: shared with verification worker
 

@@ -31,21 +31,27 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
-/// One queued download: (model_id, revision, filename, base_path,
-/// expected_sha256, hf_token, total_size). `revision` is a branch, tag, or
-/// commit SHA (issue #28); it flows into resolve URLs and registry entries.
-pub type DownloadMessage = (
-    String,
-    String,
-    String,
-    PathBuf,
-    Option<String>,
-    Option<String>,
-    u64,
-);
+/// One queued download, sent over the `download_tx` channel to the manager.
+/// `revision` is a branch, tag, or commit SHA (issue #28); it flows into
+/// resolve URLs and registry entries.
+#[derive(Debug, Clone)]
+pub struct QueuedDownload {
+    pub model_id: String,
+    pub revision: String,
+    pub filename: String,
+    /// Model root directory (base/author/model); the filename's subpath is
+    /// appended during download.
+    pub base_path: PathBuf,
+    /// Expected SHA256 (LFS oid) when known; `None` skips hash checking.
+    pub expected_sha256: Option<String>,
+    /// Hugging Face auth token, if the session has one.
+    pub hf_token: Option<String>,
+    /// Total file size in bytes, for queue accounting and progress.
+    pub total_size: u64,
+}
 
 /// Type alias for download receiver to reduce complexity
-pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>;
+pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>;
 
 /// The bundle of shared handles the engine tasks and frontends communicate
 /// through. Every field is an Arc or a channel endpoint, so cloning is cheap.
@@ -85,7 +91,7 @@ impl EngineState {
     /// Create a fresh, fully connected engine state. Returns the state bundle
     /// plus the sender half of the download channel. Dropping *all* clones of
     /// the sender ends the manager loop once the queue drains.
-    pub fn new() -> (Self, mpsc::UnboundedSender<DownloadMessage>) {
+    pub fn new() -> (Self, mpsc::UnboundedSender<QueuedDownload>) {
         let (download_tx, download_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
@@ -149,13 +155,22 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
             // Lock only when receiving, release immediately after. This
             // prevents deadlock by not holding download_rx while acquiring
             // other locks (see AGENTS.md lock hierarchy).
-            let (model_id, revision, filename, base_path, sha256, hf_token, total_size) = {
+            let download = {
                 let mut rx = state.download_rx.lock().await;
                 match rx.recv().await {
                     Some(msg) => msg,
                     None => break, // Channel closed and drained
                 }
             };
+            let QueuedDownload {
+                model_id,
+                revision,
+                filename,
+                base_path,
+                expected_sha256,
+                hf_token,
+                total_size,
+            } = download;
 
             // Decrement queue size and bytes when we start processing
             {
@@ -178,7 +193,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 progress: state.download_progress.clone(),
                 status_tx: state.status_tx.clone(),
                 complete_downloads: state.complete_downloads.clone(),
-                expected_sha256: sha256,
+                expected_sha256,
                 verification_queue: state.verification_queue.clone(),
                 verification_queue_size: state.verification_queue_size.clone(),
                 hf_token,
@@ -315,15 +330,15 @@ mod tests {
         let handle = spawn_manager(state.clone());
 
         for name in ["f.bin", "g.bin"] {
-            tx.send((
-                "a/b".to_string(),
-                crate::api::DEFAULT_REVISION.to_string(),
-                name.to_string(),
-                tmp.clone(),
-                None,
-                None,
-                10,
-            ))
+            tx.send(QueuedDownload {
+                model_id: "a/b".to_string(),
+                revision: crate::api::DEFAULT_REVISION.to_string(),
+                filename: name.to_string(),
+                base_path: tmp.clone(),
+                expected_sha256: None,
+                hf_token: None,
+                total_size: 10,
+            })
             .unwrap();
         }
         drop(tx); // closes the channel → manager drains and resolves
@@ -344,6 +359,36 @@ mod tests {
             .max_retries
             .store(old_retries, Ordering::Relaxed);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn queued_download_fields_roundtrip_through_the_channel() {
+        // QueuedDownload is a named struct, so the two adjacent
+        // Option<String> fields (expected_sha256 / hf_token) can no longer
+        // be swapped at a construction site without the compiler catching
+        // it. Pin the field meaning by roundtripping one message through the
+        // engine channel and reading every field back by name.
+        let (state, tx) = EngineState::new();
+        tx.send(QueuedDownload {
+            model_id: "author/model".to_string(),
+            revision: "deadbeef".to_string(),
+            filename: "sub/dir/file.bin".to_string(),
+            base_path: PathBuf::from("/tmp/base/author/model"),
+            expected_sha256: Some("abc123".to_string()),
+            hf_token: None,
+            total_size: 42,
+        })
+        .unwrap();
+        drop(tx);
+
+        let received = { state.download_rx.lock().await.recv().await }.expect("message queued");
+        assert_eq!(received.model_id, "author/model");
+        assert_eq!(received.revision, "deadbeef");
+        assert_eq!(received.filename, "sub/dir/file.bin");
+        assert_eq!(received.base_path, PathBuf::from("/tmp/base/author/model"));
+        assert_eq!(received.expected_sha256.as_deref(), Some("abc123"));
+        assert_eq!(received.hf_token, None);
+        assert_eq!(received.total_size, 42);
     }
 
     #[tokio::test]

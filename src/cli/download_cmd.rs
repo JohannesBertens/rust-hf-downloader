@@ -12,7 +12,7 @@ use super::events::{Event, FileDto, OverallProgress, Summary};
 use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, FileSpec, Selector};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
-use crate::engine::{EngineState, ManagerHandle};
+use crate::engine::{EngineState, ManagerHandle, QueuedDownload};
 use crate::models::{FileOutcome, VerifyOutcome};
 
 /// Everything the monitor loop accumulates for the summary and exit code.
@@ -202,15 +202,15 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         }
     }
     for file in &files {
-        let _ = download_tx.send((
-            args.model_id.clone(),
-            revision.clone(),
-            file.filename.clone(),
-            model_path.clone(),
-            file.sha256.clone(),
-            token.clone(),
-            file.size_bytes,
-        ));
+        let _ = download_tx.send(QueuedDownload {
+            model_id: args.model_id.clone(),
+            revision: revision.clone(),
+            filename: file.filename.clone(),
+            base_path: model_path.clone(),
+            expected_sha256: file.sha256.clone(),
+            hf_token: token.clone(),
+            total_size: file.size_bytes,
+        });
     }
     // Dropping the sender closes the channel — the manager drains, then its
     // join handle resolves. This is the deterministic completion signal.

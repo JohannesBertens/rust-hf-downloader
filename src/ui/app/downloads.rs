@@ -1,5 +1,6 @@
 use super::state::App;
 use crate::api::fetch_multipart_sha256s;
+use crate::engine::QueuedDownload;
 use crate::models::*;
 use crate::paths::sanitize::validate_and_sanitize_path;
 use crate::registry;
@@ -307,15 +308,15 @@ impl App {
 
                     if self
                         .download_tx
-                        .send((
-                            model.id.clone(),
-                            crate::api::DEFAULT_REVISION.to_string(),
-                            filename.clone(),
-                            model_path.clone(),
-                            sha256,
-                            hf_token.clone(),
-                            file_size,
-                        ))
+                        .send(QueuedDownload {
+                            model_id: model.id.clone(),
+                            revision: crate::api::DEFAULT_REVISION.to_string(),
+                            filename: filename.clone(),
+                            base_path: model_path.clone(),
+                            expected_sha256: sha256,
+                            hf_token: hf_token.clone(),
+                            total_size: file_size,
+                        })
                         .is_ok()
                     {
                         success_count += 1;
@@ -389,18 +390,18 @@ impl App {
 
             total_bytes += metadata.total_size;
 
-            let _ = self.download_tx.send((
-                metadata.model_id.clone(),
-                metadata
+            let _ = self.download_tx.send(QueuedDownload {
+                model_id: metadata.model_id.clone(),
+                revision: metadata
                     .revision
                     .clone()
                     .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string()),
-                metadata.filename.clone(),
+                filename: metadata.filename.clone(),
                 base_path,
-                metadata.expected_sha256.clone(),
-                hf_token.clone(),
-                metadata.total_size,
-            ));
+                expected_sha256: metadata.expected_sha256.clone(),
+                hf_token: hf_token.clone(),
+                total_size: metadata.total_size,
+            });
             // Mirror the queued file for HUD display
             {
                 let mut items = self.download_queue_items.lock().await;
@@ -578,15 +579,15 @@ impl App {
 
                     if self
                         .download_tx
-                        .send((
-                            model.id.clone(),
-                            crate::api::DEFAULT_REVISION.to_string(),
-                            file.rfilename.clone(),
-                            model_root.clone(),
-                            sha256,
-                            hf_token.clone(),
-                            file_size,
-                        ))
+                        .send(QueuedDownload {
+                            model_id: model.id.clone(),
+                            revision: crate::api::DEFAULT_REVISION.to_string(),
+                            filename: file.rfilename.clone(),
+                            base_path: model_root.clone(),
+                            expected_sha256: sha256,
+                            hf_token: hf_token.clone(),
+                            total_size: file_size,
+                        })
                         .is_ok()
                     {
                         success_count += 1;
@@ -737,15 +738,15 @@ impl App {
 
             if self
                 .download_tx
-                .send((
-                    model.id.clone(),
-                    crate::api::DEFAULT_REVISION.to_string(),
-                    file.rfilename.clone(),
-                    model_root.clone(),
-                    sha256,
-                    hf_token.clone(),
-                    file_size,
-                ))
+                .send(QueuedDownload {
+                    model_id: model.id.clone(),
+                    revision: crate::api::DEFAULT_REVISION.to_string(),
+                    filename: file.rfilename.clone(),
+                    base_path: model_root.clone(),
+                    expected_sha256: sha256,
+                    hf_token: hf_token.clone(),
+                    total_size: file_size,
+                })
                 .is_ok()
             {
                 success_count += 1;

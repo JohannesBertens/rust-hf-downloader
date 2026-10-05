@@ -10,7 +10,7 @@ use super::events::{Event, FileDto, Summary};
 use super::report::{truncate_path, Reporter};
 use super::resolve::FileSpec;
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
-use crate::engine::EngineState;
+use crate::engine::{EngineState, QueuedDownload};
 use crate::models::{FileOutcome, ModelMetadata, VerifyOutcome};
 use std::collections::HashMap;
 use std::io::Write;
@@ -671,15 +671,15 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         // base_path = staging dir, filename = repo path (§5.1); the
         // revision is the resolved commit SHA, so a moving branch cannot
         // race the plan. Expected sha = LFS oid; total size from the tree.
-        let _ = download_tx.send((
-            args.model_id.clone(),
-            sha.clone(),
-            item.repo_path.clone(),
-            staging.clone(),
-            item.sha256.clone(),
-            token.clone(),
-            item.size,
-        ));
+        let _ = download_tx.send(QueuedDownload {
+            model_id: args.model_id.clone(),
+            revision: sha.clone(),
+            filename: item.repo_path.clone(),
+            base_path: staging.clone(),
+            expected_sha256: item.sha256.clone(),
+            hf_token: token.clone(),
+            total_size: item.size,
+        });
     }
     // Dropping the sender closes the channel — the manager drains, then
     // its join handle resolves. This is the deterministic completion signal.
