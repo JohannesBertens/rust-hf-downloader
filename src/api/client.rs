@@ -25,11 +25,7 @@ pub async fn fetch_models_filtered(
     limit: usize,
     token: Option<&String>,
 ) -> Result<Vec<ModelInfo>, reqwest::Error> {
-    use crate::models::{SortDirection, SortField};
-
-    // Determine if we need client-side sorting
-    let needs_client_side_sort =
-        matches!(sort_field, SortField::Name) || matches!(sort_direction, SortDirection::Ascending);
+    use crate::models::SortField;
 
     // API only reliably supports descending sort (direction=-1)
     // For name or ascending, we'll fetch descending and sort client-side
@@ -59,26 +55,71 @@ pub async fn fetch_models_filtered(
     let mut models: Vec<ModelInfo> = response.json().await?;
 
     // Client-side filtering (API doesn't support these filters)
-    models.retain(|m| m.downloads >= min_downloads && m.likes >= min_likes);
+    filter_models(&mut models, min_downloads, min_likes);
 
     // Client-side sorting when needed
-    if needs_client_side_sort {
-        models.sort_by(|a, b| {
-            let cmp = match sort_field {
-                SortField::Name => a.id.to_lowercase().cmp(&b.id.to_lowercase()),
-                SortField::Downloads => a.downloads.cmp(&b.downloads),
-                SortField::Likes => a.likes.cmp(&b.likes),
-                SortField::Modified => a.last_modified.as_ref().cmp(&b.last_modified.as_ref()),
-            };
-
-            match sort_direction {
-                SortDirection::Ascending => cmp,
-                SortDirection::Descending => cmp.reverse(),
-            }
-        });
+    if needs_client_side_sort(sort_field, sort_direction) {
+        sort_models(&mut models, sort_field, sort_direction);
     }
 
     Ok(models)
+}
+
+/// Whether [`fetch_models_filtered`] has to finish the sorting itself.
+///
+/// The API only reliably sorts descending, so the request always goes out with
+/// `direction=-1`; whatever it cannot express — sorting by name, or any
+/// ascending request — is ordered client-side instead. Extracted verbatim from
+/// `fetch_models_filtered` (plan W3.3); the pinned order tables in this
+/// module's tests cover every field/direction combination.
+pub(crate) fn needs_client_side_sort(
+    sort_field: crate::models::SortField,
+    sort_direction: crate::models::SortDirection,
+) -> bool {
+    use crate::models::{SortDirection, SortField};
+
+    matches!(sort_field, SortField::Name) || matches!(sort_direction, SortDirection::Ascending)
+}
+
+/// Client-side filter pass of [`fetch_models_filtered`]: keeps the models whose
+/// `downloads` and `likes` reach the thresholds, because the API has no such
+/// filters.
+///
+/// Extracted verbatim (plan W3.3). Both comparisons are inclusive `>=`, and
+/// `retain` keeps the survivors in the incoming (API) order.
+pub(crate) fn filter_models(models: &mut Vec<ModelInfo>, min_downloads: u64, min_likes: u64) {
+    models.retain(|m| m.downloads >= min_downloads && m.likes >= min_likes);
+}
+
+/// Client-side sorting pass of [`fetch_models_filtered`]: orders `models` by
+/// `sort_field`/`sort_direction`.
+///
+/// Extracted verbatim (plan W3.3). The sort is STABLE — `sort_by`, never
+/// `sort_unstable_by` — so models that compare equal keep their incoming order;
+/// `equal_keys_keep_their_incoming_order` and the pinned tables assert exactly
+/// that (and were mutation-checked against `sort_unstable_by`). Call it only
+/// behind [`needs_client_side_sort`]: descending responses that the API already
+/// ordered are deliberately left untouched.
+pub(crate) fn sort_models(
+    models: &mut [ModelInfo],
+    sort_field: crate::models::SortField,
+    sort_direction: crate::models::SortDirection,
+) {
+    use crate::models::{SortDirection, SortField};
+
+    models.sort_by(|a, b| {
+        let cmp = match sort_field {
+            SortField::Name => a.id.to_lowercase().cmp(&b.id.to_lowercase()),
+            SortField::Downloads => a.downloads.cmp(&b.downloads),
+            SortField::Likes => a.likes.cmp(&b.likes),
+            SortField::Modified => a.last_modified.as_ref().cmp(&b.last_modified.as_ref()),
+        };
+
+        match sort_direction {
+            SortDirection::Ascending => cmp,
+            SortDirection::Descending => cmp.reverse(),
+        }
+    });
 }
 
 /// Fetch detailed model metadata from /api/models/{model_id}
@@ -295,6 +336,12 @@ mod tests {
     // Mutation-checked: swapping the oracle's `sort_by` for `sort_unstable_by`
     // turns both the pinned table and `equal_keys_keep_their_incoming_order`
     // red, so the fixtures pin stability instead of restating it.
+    //
+    // W3.3 then landed: `filter_and_sort` runs the extracted free functions and
+    // the tables re-ran unchanged; the oracle stays as the permanent
+    // differential counterpart (same role as `quant::tests::legacy_multipart`),
+    // with `extracted_pass_matches_the_legacy_oracle_on_the_matrix` closing the
+    // loop over the full field/direction/threshold matrix.
 
     /// Pre-W3.3 filter+sort pass, verbatim, as the behavioral oracle.
     mod legacy_filter_sort {
@@ -336,7 +383,11 @@ mod tests {
     }
 
     /// The seam under test: whatever implements the client-side filter/sort
-    /// step of `fetch_models_filtered` right now.
+    /// step of `fetch_models_filtered` right now — since W3.3 the extracted
+    /// `filter_models` + `needs_client_side_sort` + `sort_models` triple,
+    /// called in the same order and behind the same gate as the real caller.
+    /// In W3.3a these tables ran against `legacy_filter_sort::apply` instead
+    /// and did not change.
     fn filter_and_sort(
         models: &mut Vec<ModelInfo>,
         sort_field: SortField,
@@ -344,7 +395,10 @@ mod tests {
         min_downloads: u64,
         min_likes: u64,
     ) {
-        legacy_filter_sort::apply(models, sort_field, sort_direction, min_downloads, min_likes);
+        filter_models(models, min_downloads, min_likes);
+        if needs_client_side_sort(sort_field, sort_direction) {
+            sort_models(models, sort_field, sort_direction);
+        }
     }
 
     /// Fixed 26-entry search-result fixture for the pinned order tables.
@@ -826,6 +880,69 @@ mod tests {
                     );
                 }
                 prev = Some((key, &m.id));
+            }
+        }
+    }
+
+    /// Differential test (plan H1): the extracted triple reproduces the
+    /// verbatim oracle exactly on the whole (SortField x SortDirection) matrix
+    /// crossed with eight threshold pairs, over the tie-loaded corpus, a
+    /// partially pre-filtered corpus, a single-element corpus and the empty one
+    /// — so the pinned tables are not the only thing standing between a future
+    /// edit and a silent order change.
+    #[test]
+    fn extracted_pass_matches_the_legacy_oracle_on_the_matrix() {
+        let fixtures: Vec<Vec<ModelInfo>> = vec![
+            Vec::new(),
+            vec![model("solo/one", 3, 1)],
+            corpus(),
+            corpus().into_iter().filter(|m| m.likes >= 10).collect(),
+        ];
+        let thresholds: [(u64, u64); 8] = [
+            (0, 0),
+            (10, 1),
+            (75, 0),
+            (100, 10),
+            (400, 10),
+            (500, 10),
+            (900, 10),
+            (1000, 1000),
+        ];
+
+        for base in &fixtures {
+            for field in [
+                SortField::Downloads,
+                SortField::Likes,
+                SortField::Modified,
+                SortField::Name,
+            ] {
+                for dir in [SortDirection::Ascending, SortDirection::Descending] {
+                    for (min_downloads, min_likes) in thresholds {
+                        let mut legacy = base.clone();
+                        legacy_filter_sort::apply(
+                            &mut legacy,
+                            field,
+                            dir,
+                            min_downloads,
+                            min_likes,
+                        );
+
+                        let mut extracted = base.clone();
+                        filter_models(&mut extracted, min_downloads, min_likes);
+                        if needs_client_side_sort(field, dir) {
+                            sort_models(&mut extracted, field, dir);
+                        }
+
+                        let fixture_len = base.len();
+                        assert_eq!(
+                            ids(&extracted),
+                            ids(&legacy),
+                            "extracted pass diverged for {field:?}/{dir:?} \
+                             min_downloads={min_downloads} min_likes={min_likes} \
+                             on a fixture of {fixture_len} entries"
+                        );
+                    }
+                }
             }
         }
     }
