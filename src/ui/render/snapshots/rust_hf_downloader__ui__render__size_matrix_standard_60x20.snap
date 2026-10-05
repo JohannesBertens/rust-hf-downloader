@@ -1,0 +1,25 @@
+---
+source: src/ui/render/mod.rs
+assertion_line: 407
+expression: terminal.backend()
+---
+"┌Filters  [Click to cycle | 1-4: Presets | r: Reset | Ctrl+┐"
+"│Sort: Downloads ▼  |  Min Downloads: 0  |  Min Likes: 0   │"
+"└──────────────────────────────────────────────────────────┘"
+"┌Results───────────────────────────────────────────────────┐"
+"│     1. meta-llama/Llama-3.1-8B by meta-llama ↓1.2M ♥12.3K│"
+"│>>   2. mistralai/Mistral-7B-v0.3 by mistralai ↓987.7K ♥8.│"
+"│     3. Qwen/Qwen2.5-Coder-32B-Instruct by Qwen ↓45.7K ♥67│"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
+"┌Model Information───────────┐┌Repository Files────────────┐"
+"│ID: meta-llama/Llama-3.1-8B ││    README.md  12.06 KB     │"
+"│Library: transformers       ││  ▾ Q4_K_M/  4.58 GB (2 file│"
+"│Pipeline: text-generation   ││      Llama-3.1-8B-Q4_K_M.gg│"
+"│Base Model:                 ││      Llama-3.1-8B-Q4_K_M-00│"
+"│meta-llama/Llama-3.1-8B-Inst││  ▸ original/  14.95 GB (1 f│"
+"└────────────────────────────┘└────────────────────────────┘"

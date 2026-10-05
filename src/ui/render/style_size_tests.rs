@@ -14,8 +14,8 @@
 use super::snapshot_tests::{quantization_fixtures, three_model_fixtures};
 use super::*;
 use crate::models::{
-    AppOptions, DownloadMetadata, DownloadProgress, DownloadStatus, FileTreeNode, ModelMetadata,
-    QuantizationGroup, SortDirection, SortField,
+    AppOptions, DownloadMetadata, DownloadProgress, DownloadStatus, FileTreeNode, ModelCardData,
+    ModelMetadata, QuantizationGroup, RepoFile, SortDirection, SortField,
 };
 use ratatui::{backend::TestBackend, Terminal};
 use std::collections::HashMap;
@@ -253,6 +253,211 @@ fn draw_ui(
     );
 }
 
+// ----------------- Standard-mode fixture + draw helper (G1) -------------
+
+/// Standard-mode model-metadata fixture: every metadata-panel line shape
+/// (ID, library, pipeline, card-data block, files total, tags).
+fn standard_metadata() -> ModelMetadata {
+    ModelMetadata {
+        model_id: "meta-llama/Llama-3.1-8B".to_string(),
+        library_name: Some("transformers".to_string()),
+        pipeline_tag: Some("text-generation".to_string()),
+        card_data: Some(ModelCardData {
+            base_model: Some("meta-llama/Llama-3.1-8B-Instruct".to_string()),
+            license: Some("llama3.2".to_string()),
+            language: Some(vec!["en".to_string(), "de".to_string()]),
+            datasets: None,
+        }),
+        siblings: vec![
+            RepoFile {
+                rfilename: "README.md".to_string(),
+                size: Some(12_345),
+                oid: None,
+                lfs: None,
+            },
+            RepoFile {
+                rfilename: "model-00001-of-00004.safetensors".to_string(),
+                size: Some(4_980_000_000),
+                oid: None,
+                lfs: None,
+            },
+            RepoFile {
+                rfilename: "Q4_K_M/Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+                size: Some(4_921_860_096),
+                oid: None,
+                lfs: None,
+            },
+        ],
+        tags: vec![
+            "text-generation".to_string(),
+            "llama".to_string(),
+            "facebook".to_string(),
+            "meta".to_string(),
+        ],
+        sha: None,
+    }
+}
+
+fn tree_node(
+    name: &str,
+    path: &str,
+    is_dir: bool,
+    size: Option<u64>,
+    expanded: bool,
+    depth: usize,
+    children: Vec<FileTreeNode>,
+) -> FileTreeNode {
+    FileTreeNode {
+        name: name.to_string(),
+        path: path.to_string(),
+        is_dir,
+        size,
+        expanded,
+        depth,
+        children,
+    }
+}
+
+/// Standard-mode file-tree fixture with NESTED directories and mixed
+/// expansion: an expanded top-level dir (its two files visible), a
+/// collapsed one (its file hidden — pins flatten_tree's expansion filter
+/// in the snapshot), and a top-level file.
+fn standard_tree() -> FileTreeNode {
+    tree_node(
+        "root",
+        "",
+        true,
+        None,
+        true,
+        0,
+        vec![
+            tree_node(
+                "README.md",
+                "README.md",
+                false,
+                Some(12_345),
+                false,
+                1,
+                vec![],
+            ),
+            tree_node(
+                "Q4_K_M",
+                "Q4_K_M",
+                true,
+                Some(4_921_860_096),
+                true,
+                1,
+                vec![
+                    tree_node(
+                        "Llama-3.1-8B-Q4_K_M.gguf",
+                        "Q4_K_M/Llama-3.1-8B-Q4_K_M.gguf",
+                        false,
+                        Some(4_921_860_096),
+                        false,
+                        2,
+                        vec![],
+                    ),
+                    tree_node(
+                        "Llama-3.1-8B-Q4_K_M-00002-of-00002.gguf",
+                        "Q4_K_M/Llama-3.1-8B-Q4_K_M-00002-of-00002.gguf",
+                        false,
+                        Some(1_000_000_000),
+                        false,
+                        2,
+                        vec![],
+                    ),
+                ],
+            ),
+            tree_node(
+                "original",
+                "original",
+                true,
+                Some(16_048_000_000),
+                false, // collapsed: contents must NOT render
+                1,
+                vec![tree_node(
+                    "consolidated.safetensors",
+                    "original/consolidated.safetensors",
+                    false,
+                    Some(16_048_000_000),
+                    false,
+                    2,
+                    vec![],
+                )],
+            ),
+        ],
+    )
+}
+
+/// Draw `render_ui` in STANDARD display mode (the G1 gap fill: the size
+/// matrix and style signatures previously covered GGUF mode only) with
+/// the metadata + tree fixtures above, focus/hover parameterized like
+/// [`draw_ui`].
+#[allow(clippy::too_many_arguments)]
+fn draw_standard_ui(
+    terminal: &mut Terminal<TestBackend>,
+    fixture: &mut UiFixture,
+    focused: FocusedPane,
+    hovered: Option<FocusedPane>,
+    hud_height: u16,
+    status: &str,
+    selection_info: &str,
+) {
+    let error: Option<String> = None;
+    let model_metadata = standard_metadata();
+    let file_tree = standard_tree();
+    let mut file_tree_state = ListState::default();
+    let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
+
+    terminal
+        .draw(|frame| {
+            render_ui(
+                frame,
+                RenderParams {
+                    display_mode: ModelDisplayMode::Standard,
+                    focus: FocusCtx {
+                        input_mode: InputMode::Normal,
+                        focused_pane: focused,
+                        hovered_panel: hovered,
+                    },
+                    list: ListCtx {
+                        input: &fixture.input,
+                        models: &fixture.models,
+                        list_state: &mut fixture.list_state,
+                        loading: false,
+                    },
+                    gguf: GgufPanelContext {
+                        quantizations: &fixture.quantizations,
+                        quant_list_state: &mut fixture.quant_list_state,
+                        quant_file_list_state: &mut fixture.quant_file_list_state,
+                        loading_quants: false,
+                        complete_downloads: &complete_downloads,
+                    },
+                    standard: StandardPanelContext {
+                        model_metadata: &Some(model_metadata.clone()),
+                        file_tree: &Some(file_tree.clone()),
+                        file_tree_state: &mut file_tree_state,
+                        loading: false,
+                    },
+                    filters: FilterCtx {
+                        sort_field: SortField::Downloads,
+                        sort_direction: SortDirection::Descending,
+                        min_downloads: 0,
+                        min_likes: 0,
+                        focused_field: 5,
+                    },
+                    status: StatusCtx {
+                        error: &error,
+                        status,
+                        selection_info,
+                    },
+                    hud_height,
+                },
+            );
+        })
+        .expect("failed to draw standard UI");
+}
+
 // ----------------- style snapshots -----------------
 
 #[test]
@@ -317,6 +522,97 @@ fn style_hovered_pane_border_is_cyan() {
     );
     snap_style(
         "style_hovered_pane_border_is_cyan",
+        &style_runs(&terminal, Rect::new(0, 0, 100, 30)),
+    );
+}
+
+// ----------------- Standard-mode style signatures (G1) -----------------
+// The GGUF trio above pins border_style's precedence on the GGUF panes;
+// these four pin the SAME precedence on the two Standard-mode panes
+// (ModelMetadata, FileTree), which different renderers draw — the W3.4
+// dedup promised identical styling, and these snapshots make a
+// regression reviewable instead of invisible.
+
+#[test]
+fn style_focus_border_yellow_on_file_tree_pane() {
+    // Keyboard focus on the repository file tree: its border is fg=Yellow
+    // while the metadata pane (unfocused, unhovered) stays plain.
+    let mut fixture = UiFixture::with_selection();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    draw_standard_ui(
+        &mut terminal,
+        &mut fixture,
+        FocusedPane::FileTree,
+        None,
+        0,
+        "Repository files loaded",
+        "Selection: 2 of 3",
+    );
+    snap_style(
+        "style_focus_border_yellow_on_file_tree_pane",
+        &style_runs(&terminal, Rect::new(0, 0, 100, 30)),
+    );
+}
+
+#[test]
+fn style_focus_border_yellow_on_model_metadata_pane() {
+    // Focus CAN rest on the metadata pane (mouse click): its border gains
+    // fg=Yellow; the file tree (plain) loses it.
+    let mut fixture = UiFixture::with_selection();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    draw_standard_ui(
+        &mut terminal,
+        &mut fixture,
+        FocusedPane::ModelMetadata,
+        None,
+        0,
+        "Repository files loaded",
+        "Selection: 2 of 3",
+    );
+    snap_style(
+        "style_focus_border_yellow_on_model_metadata_pane",
+        &style_runs(&terminal, Rect::new(0, 0, 100, 30)),
+    );
+}
+
+#[test]
+fn style_standard_unfocused_bottom_panes_border_is_plain() {
+    // Focus on the Results list: BOTH Standard-mode bottom panes keep the
+    // default border style (the contrast pair for the two tests above).
+    let mut fixture = UiFixture::with_selection();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    draw_standard_ui(
+        &mut terminal,
+        &mut fixture,
+        FocusedPane::Models,
+        None,
+        0,
+        "Repository files loaded",
+        "Selection: 2 of 3",
+    );
+    snap_style(
+        "style_standard_unfocused_bottom_panes_border_is_plain",
+        &style_runs(&terminal, Rect::new(0, 0, 100, 30)),
+    );
+}
+
+#[test]
+fn style_standard_hovered_file_tree_pane_border_is_cyan() {
+    // Hover beats plain but loses to focus: hover the file tree while the
+    // Results list holds focus — tree border fg=Cyan, Results fg=Yellow.
+    let mut fixture = UiFixture::with_selection();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    draw_standard_ui(
+        &mut terminal,
+        &mut fixture,
+        FocusedPane::Models,
+        Some(FocusedPane::FileTree),
+        0,
+        "Repository files loaded",
+        "Selection: 2 of 3",
+    );
+    snap_style(
+        "style_standard_hovered_file_tree_pane_border_is_cyan",
         &style_runs(&terminal, Rect::new(0, 0, 100, 30)),
     );
 }
@@ -421,8 +717,9 @@ fn style_resume_popup_clear_and_background() {
 
 // ----------------- size matrix -----------------
 
-/// Render both main layouts (models-list focus and the
-/// downloads/quant view) at one size and snapshot each buffer.
+/// Render all three main layouts (models-list focus, the downloads/quant
+/// view, and — since the G1 gap fill — the Standard-mode metadata + file
+/// tree view) at one size and snapshot each buffer.
 fn size_matrix_at(width: u16, height: u16, label: &str) {
     let mut fixture = UiFixture::with_selection();
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -449,6 +746,23 @@ fn size_matrix_at(width: u16, height: u16, label: &str) {
         "",
     );
     snap_ui(&format!("size_matrix_quant_view_{label}"), &terminal);
+
+    // Standard mode (G1): same size grid, display_mode parameterized to
+    // Standard — the nested-tree fixture pins expansion filtering (the
+    // collapsed `original/` directory renders without its contents) at
+    // every terminal size, including the odd 61x23 wrap edge.
+    let mut fixture = UiFixture::with_selection();
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    draw_standard_ui(
+        &mut terminal,
+        &mut fixture,
+        FocusedPane::FileTree,
+        None,
+        0,
+        "Repository files loaded",
+        "Selection: 2 of 3",
+    );
+    snap_ui(&format!("size_matrix_standard_{label}"), &terminal);
 }
 
 #[test]

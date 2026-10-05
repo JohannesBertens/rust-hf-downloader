@@ -1,0 +1,27 @@
+---
+source: src/ui/render/style_size_tests.rs
+assertion_line: 109
+expression: signature
+---
+y0: 0..99 fg=Cyan
+y1: 0 fg=Cyan | 1..6 fg=DarkGray | 7..17 fg=White,mod=BOLD | 18..22 fg=Cyan | 23..37 fg=DarkGray | 38 fg=White | 39..43 fg=Cyan | 44..54 fg=DarkGray | 55 fg=White | 56..60 fg=Cyan | 61..72 fg=Green,mod=BOLD | 73..91 fg=Cyan | 92..98 fg=DarkGray | 99 fg=Cyan
+y2: 0..99 fg=Cyan
+y3: 0..99 fg=Yellow
+y4: 0 fg=Yellow | 4..8 fg=DarkGray | 9..31 fg=Cyan,mod=BOLD | 36..45 fg=Green | 59..71 fg=Cyan | 72..96 fg=Yellow | 99 fg=Yellow
+y5: 0 fg=Yellow | 1..3 bg=DarkGray,mod=BOLD | 4..8 fg=DarkGray,bg=DarkGray,mod=BOLD | 9..33 fg=Cyan,bg=DarkGray,mod=BOLD | 34..37 bg=DarkGray,mod=BOLD | 38..46 fg=Green,bg=DarkGray,mod=BOLD | 47..60 bg=DarkGray,mod=BOLD | 61..78 fg=Yellow,bg=DarkGray,mod=BOLD | 79..98 bg=DarkGray,mod=BOLD | 99 fg=Yellow
+y6: 0 fg=Yellow | 4..8 fg=DarkGray | 9..39 fg=Cyan,mod=BOLD | 44..47 fg=Green | 60..72 fg=Cyan | 99 fg=Yellow
+y7: 0 fg=Yellow | 99 fg=Yellow
+y8: 0 fg=Yellow | 99 fg=Yellow
+y9: 0 fg=Yellow | 99 fg=Yellow
+y10: 0 fg=Yellow | 99 fg=Yellow
+y11: 0 fg=Yellow | 99 fg=Yellow
+y12: 0 fg=Yellow | 99 fg=Yellow
+y13: 0..99 fg=Yellow
+y15: 1..4 fg=Yellow | 53..54 fg=Cyan
+y16: 1..9 fg=Yellow | 53..54 fg=Cyan | 55..61 fg=Cyan,mod=BOLD | 71..80 fg=DarkGray
+y17: 1..10 fg=Yellow | 55..56 fg=Cyan
+y18: 1..12 fg=Yellow | 55..56 fg=Cyan
+y19: 1..9 fg=Yellow | 53..54 fg=Cyan | 55..63 fg=Cyan,mod=BOLD | 74..83 fg=DarkGray
+y20: 1..11 fg=Yellow
+y21: 1..7 fg=Yellow
+y23: 1..5 fg=Yellow
