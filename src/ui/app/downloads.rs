@@ -1,6 +1,6 @@
 use super::state::App;
 use crate::api::fetch_multipart_sha256s;
-use crate::engine::{EnqueuePolicy, QueuedDownload};
+use crate::engine::{EnqueueOutcome, EnqueuePolicy, QueuedDownload};
 use crate::models::*;
 use crate::paths::sanitize::validate_and_sanitize_path;
 use crate::registry;
@@ -9,6 +9,22 @@ use std::path::PathBuf;
 use tui_input::Input;
 
 impl App {
+    /// Shared tail of the three confirm flows: surface every filename the
+    /// enqueue transaction rejected (skipped from the registry but still
+    /// queued and sent), then the per-flow success status or the per-flow
+    /// failure error — identical control flow at every call site, only the
+    /// strings differ.
+    fn finish_enqueue(&mut self, outcome: &EnqueueOutcome, success: String, failure: &str) {
+        for (filename, err) in &outcome.invalid {
+            *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
+        }
+        if outcome.sent > 0 {
+            *self.status.write() = success;
+        } else {
+            *self.error.write() = Some(failure.to_string());
+        }
+    }
+
     /// Scan registry for incomplete downloads and show resume popup if found
     pub async fn scan_incomplete_downloads(&mut self) {
         // Seed the engine's registry mirror from disk (the shared startup
@@ -181,14 +197,7 @@ impl App {
                 // Calculate model_path as base/author/model_name (without file's subdirectory)
                 // The filename may contain subdirectories (e.g., "UD-Q6_K_XL/model.gguf")
                 // which will be appended during download, so we don't include them here
-                let model_parts: Vec<&str> = model.id.split('/').collect();
-                let model_path = if model_parts.len() == 2 {
-                    PathBuf::from(&base_path)
-                        .join(model_parts[0])
-                        .join(model_parts[1])
-                } else {
-                    PathBuf::from(&base_path)
-                };
+                let model_path = model_root(&base_path, &model.id);
 
                 // Convert files_to_download to filenames
                 let filenames_to_download: Vec<String> = files_to_download
@@ -253,28 +262,24 @@ impl App {
                     )
                     .await;
 
-                for (filename, err) in &outcome.invalid {
-                    *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
-                }
-
-                if outcome.sent > 0 {
-                    if num_files > 1 {
-                        *self.status.write() = format!(
-                            "Queued {} parts of {} to {}",
-                            num_files,
-                            quant.filename,
-                            model_path.display()
-                        );
-                    } else {
-                        *self.status.write() = format!(
-                            "Starting download of {} to {}",
-                            quant.filename,
-                            model_path.display()
-                        );
-                    }
+                // Per-flow strings for the shared tail: a multi-file group
+                // counts the requested parts, a single file gets the
+                // starting-download line.
+                let success = if num_files > 1 {
+                    format!(
+                        "Queued {} parts of {} to {}",
+                        num_files,
+                        quant.filename,
+                        model_path.display()
+                    )
                 } else {
-                    *self.error.write() = Some("Failed to start download".to_string());
-                }
+                    format!(
+                        "Starting download of {} to {}",
+                        quant.filename,
+                        model_path.display()
+                    )
+                };
+                self.finish_enqueue(&outcome, success, "Failed to start download");
             }
         }
     }
@@ -293,17 +298,11 @@ impl App {
             .incomplete_downloads
             .iter()
             .map(|metadata| {
-                let model_parts: Vec<&str> = metadata.model_id.split('/').collect();
-                let base_path = if model_parts.len() == 2 {
-                    PathBuf::from(&default_dir)
-                        .join(model_parts[0])
-                        .join(model_parts[1])
-                } else {
-                    PathBuf::from(&metadata.local_path)
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| PathBuf::from(&default_dir))
-                };
+                let fallback = PathBuf::from(&metadata.local_path)
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from(&default_dir));
+                let base_path = model_root_or(&default_dir, &metadata.model_id, fallback);
                 QueuedDownload {
                     model_id: metadata.model_id.clone(),
                     revision: metadata
@@ -380,89 +379,8 @@ impl App {
 
     /// Download entire repository (non-GGUF models)
     pub async fn confirm_repository_download(&mut self) {
-        let models = self.models.read().clone();
-        let metadata = self.model_metadata.read().clone();
-
-        let model_selected = self.list_state.selected();
-
-        if let (Some(model_idx), Some(meta)) = (model_selected, metadata) {
-            if model_idx < models.len() {
-                let model = &models[model_idx];
-                let base_path = self.download_path_input.value().to_string();
-
-                // Filter out directories - only download files
-                let files_to_download: Vec<_> = meta
-                    .siblings
-                    .iter()
-                    .filter(|f| {
-                        // Skip if it's likely a directory (no size or ends with /)
-                        f.size.is_some() && !f.rfilename.ends_with('/')
-                    })
-                    .collect();
-
-                if files_to_download.is_empty() {
-                    *self.error.write() =
-                        Some("No files to download in this repository".to_string());
-                    return;
-                }
-
-                // Files land under base/author/model, each file
-                // preserving its subdirectory structure.
-                let model_parts: Vec<&str> = model.id.split('/').collect();
-                let model_root = if model_parts.len() == 2 {
-                    PathBuf::from(&base_path)
-                        .join(model_parts[0])
-                        .join(model_parts[1])
-                } else {
-                    PathBuf::from(&base_path)
-                };
-
-                // Queue payload; the registry entries are derived from
-                // these same fields by the enqueue transaction below.
-                let queued: Vec<QueuedDownload> = files_to_download
-                    .iter()
-                    .map(|file| QueuedDownload {
-                        model_id: model.id.clone(),
-                        revision: crate::api::DEFAULT_REVISION.to_string(),
-                        filename: file.rfilename.clone(),
-                        base_path: model_root.clone(),
-                        expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
-                        hf_token: self.options.hf_token.clone(),
-                        total_size: file.size.unwrap_or(0),
-                    })
-                    .collect();
-
-                // Shared enqueue transaction, repository flavor: registry
-                // mirror upsert with queued-size entries, queue accounted
-                // before the sends, HUD mirror per successful send,
-                // failed-send tail rollback. Files whose path fails
-                // validation are skipped from the registry — and still
-                // queued, exactly as before.
-                let outcome = self
-                    .engine
-                    .enqueue(
-                        &self.download_tx,
-                        &queued,
-                        &EnqueuePolicy::tui_repository(&base_path),
-                    )
-                    .await;
-
-                for (filename, err) in &outcome.invalid {
-                    *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
-                }
-
-                if outcome.sent > 0 {
-                    *self.status.write() = format!(
-                        "Queued {} files from {} to {}",
-                        outcome.sent,
-                        model.id,
-                        model_root.display()
-                    );
-                } else {
-                    *self.error.write() = Some("Failed to start downloads".to_string());
-                }
-            }
-        }
+        self.confirm_scoped_repository_download(RepoScope::WholeModel)
+            .await;
     }
 
     /// Queue a download for a Standard-mode tree selection: a single file
@@ -470,6 +388,17 @@ impl App {
     /// (`path`, `is_dir == true`). Issue #25 P5: non-GGUF repos previously
     /// only offered whole-repo download.
     async fn confirm_tree_download(&mut self, path: &str, is_dir: bool) {
+        self.confirm_scoped_repository_download(RepoScope::Tree { path, is_dir })
+            .await;
+    }
+
+    /// The whole pipeline behind both non-GGUF confirm flows — gather the
+    /// repo files the scope selects, root them under base/author/model,
+    /// queue them through the repository-flavor enqueue transaction, and
+    /// run the shared post-enqueue tail. Only the scope differs: which
+    /// sibling files are picked and how the empty-selection and success
+    /// lines are worded.
+    async fn confirm_scoped_repository_download(&mut self, scope: RepoScope<'_>) {
         let models = self.models.read().clone();
         let metadata = self.model_metadata.read().clone();
 
@@ -487,37 +416,29 @@ impl App {
 
         let base_path = self.download_path_input.value().to_string();
 
-        // Select the file itself, or every file inside the directory
-        let prefix = format!("{}/", path.trim_end_matches('/'));
+        // Select the files the scope covers; skip likely directories (no
+        // size or trailing '/'). Each file keeps its subdirectory layout.
         let files_to_download: Vec<_> = meta
             .siblings
             .iter()
-            .filter(|f| {
-                f.size.is_some()
-                    && !f.rfilename.ends_with('/')
-                    && if is_dir {
-                        f.rfilename.starts_with(&prefix)
-                    } else {
-                        f.rfilename == path
-                    }
-            })
+            .filter(|f| f.size.is_some() && !f.rfilename.ends_with('/') && scope.selects(f))
             .collect();
 
         if files_to_download.is_empty() {
-            *self.error.write() = Some(format!("No downloadable files match {}", path));
-            *self.status.write() = "Download cancelled".to_string();
+            match scope {
+                RepoScope::WholeModel => {
+                    *self.error.write() =
+                        Some("No files to download in this repository".to_string());
+                }
+                RepoScope::Tree { path, .. } => {
+                    *self.error.write() = Some(format!("No downloadable files match {}", path));
+                    *self.status.write() = "Download cancelled".to_string();
+                }
+            }
             return;
         }
 
-        // Files land under base/author/model/<repo subpath>
-        let model_parts: Vec<&str> = model.id.split('/').collect();
-        let model_root = if model_parts.len() == 2 {
-            PathBuf::from(&base_path)
-                .join(model_parts[0])
-                .join(model_parts[1])
-        } else {
-            PathBuf::from(&base_path)
-        };
+        let model_root = model_root(&base_path, &model.id);
 
         // Queue payload; the registry entries are derived from these same
         // fields by the enqueue transaction below.
@@ -534,12 +455,11 @@ impl App {
             })
             .collect();
 
-        // Shared enqueue transaction, repository flavor (see
-        // confirm_repository_download): registry mirror upsert with
-        // queued-size entries, queue accounted before the sends, HUD mirror
-        // per successful send, failed-send tail rollback. Files whose path
-        // fails validation are skipped from the registry — and still
-        // queued, exactly as before.
+        // Shared enqueue transaction, repository flavor: registry mirror
+        // upsert with queued-size entries, queue accounted before the
+        // sends, HUD mirror per successful send, failed-send tail rollback.
+        // Files whose path fails validation are skipped from the registry —
+        // and still queued, exactly as before.
         let outcome = self
             .engine
             .enqueue(
@@ -549,21 +469,70 @@ impl App {
             )
             .await;
 
-        for (filename, err) in &outcome.invalid {
-            *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
-        }
-
-        if outcome.sent > 0 {
-            *self.status.write() = format!(
+        // Per-flow strings for the shared tail: the whole-repo line always
+        // says "files" and names the model id; the tree line spells the
+        // singular for a single file and names the selected path.
+        let success = match scope {
+            RepoScope::WholeModel => format!(
+                "Queued {} files from {} to {}",
+                outcome.sent,
+                model.id,
+                model_root.display()
+            ),
+            RepoScope::Tree { path, .. } => format!(
                 "Queued {} file{} from {} to {}",
                 outcome.sent,
                 if outcome.sent == 1 { "" } else { "s" },
                 path,
                 model_root.display()
-            );
-        } else {
-            *self.error.write() = Some("Failed to start downloads".to_string());
+            ),
+        };
+        self.finish_enqueue(&outcome, success, "Failed to start downloads");
+    }
+}
+
+/// Which repo files a non-GGUF confirm flow downloads: the entire
+/// repository, or one Standard-mode tree-pane selection (a single file or
+/// every file under a directory). Everything else in the flow — rooting,
+/// queue payload, enqueue transaction, post-enqueue strings — is shared.
+#[derive(Debug, Clone, Copy)]
+enum RepoScope<'a> {
+    WholeModel,
+    Tree { path: &'a str, is_dir: bool },
+}
+
+impl RepoScope<'_> {
+    /// Whether this scope selects the given sibling file. Callers pre-filter
+    /// directory markers; this adds the scope-specific predicate.
+    fn selects(&self, file: &RepoFile) -> bool {
+        match self {
+            RepoScope::WholeModel => true,
+            RepoScope::Tree { path, is_dir } => {
+                let prefix = format!("{}/", path.trim_end_matches('/'));
+                if *is_dir {
+                    file.rfilename.starts_with(&prefix)
+                } else {
+                    file.rfilename == *path
+                }
+            }
         }
+    }
+}
+
+/// The directory every file of `model_id` lands under:
+/// `base/author/model_name` for a standard two-part `author/name` id; any
+/// other shape falls back to `base` itself.
+fn model_root(base: &str, model_id: &str) -> PathBuf {
+    model_root_or(base, model_id, PathBuf::from(base))
+}
+
+/// [`model_root`] with a caller-chosen fallback for malformed model ids
+/// (the resume flow falls back to the recorded local_path's parent).
+fn model_root_or(base: &str, model_id: &str, fallback: PathBuf) -> PathBuf {
+    let parts: Vec<&str> = model_id.split('/').collect();
+    match parts[..] {
+        [author, name] => PathBuf::from(base).join(author).join(name),
+        _ => fallback,
     }
 }
 
@@ -1053,6 +1022,75 @@ mod tests {
         );
         assert_queue_accounting(&app, 0, 0, &[]).await;
         assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resume_incomplete_downloads_requeues_under_model_root_or_recorded_parent() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("app-resume-incomplete-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let default_dir = tmp.join("dl");
+        let mut app = App::new();
+        app.options.hf_token = None;
+        app.options.default_directory = default_dir.to_string_lossy().to_string();
+        app.incomplete_downloads = vec![
+            // Two-part model id → default_dir/author/model.
+            crate::models::DownloadMetadata {
+                model_id: "author/model".to_string(),
+                filename: "f.gguf".to_string(),
+                url: "https://example.invalid/a".to_string(),
+                local_path: "/elsewhere/f.gguf".to_string(),
+                total_size: 10,
+                downloaded_size: 0,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: Some("sha".to_string()),
+                revision: None,
+            },
+            // Malformed model id → the recorded local_path's parent.
+            crate::models::DownloadMetadata {
+                model_id: "not-a-model-id".to_string(),
+                filename: "g.gguf".to_string(),
+                url: "https://example.invalid/b".to_string(),
+                local_path: "/recorded/dir/g.gguf".to_string(),
+                total_size: 20,
+                downloaded_size: 5,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: None,
+                revision: Some("rev-x".to_string()),
+            },
+        ];
+
+        app.resume_incomplete_downloads().await;
+
+        assert_eq!(*app.status.read(), "Resuming 2 incomplete download(s)");
+        assert!(app.incomplete_downloads.is_empty());
+
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            drained[0].base_path,
+            default_dir.join("author").join("model")
+        );
+        assert_eq!(drained[0].revision, crate::api::DEFAULT_REVISION);
+        assert_eq!(drained[1].base_path, PathBuf::from("/recorded/dir"));
+        assert_eq!(drained[1].revision, "rev-x");
+
+        // Resume flavor: queue accounted AFTER the sends (all sent), no
+        // registry writes (mirror stays empty).
+        assert_queue_accounting(&app, 2, 30, &["f.gguf", "g.gguf"]).await;
         assert!(app
             .engine
             .download_registry
