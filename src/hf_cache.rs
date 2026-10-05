@@ -24,6 +24,7 @@
 //! Driven by `cli::hf_cache_cmd`; unit tests exercise the pipeline directly.
 
 use crate::models::RepoFile;
+use crate::utils::atomic_rename_with_retry;
 use sha1::{Digest, Sha1};
 use std::fs;
 use std::io::{self, Write};
@@ -389,12 +390,17 @@ pub fn ensure_snapshot_entry(
 /// `std::fs::rename` that replaces an existing destination file: Unix
 /// `rename(2)` already clobbers atomically; Windows refuses, so the
 /// destination is removed and the rename retried.
+///
+/// Each raw rename delegates to [`atomic_rename_with_retry`] with
+/// `retries = 0` — hub-cache publishing keeps its exact single-attempt
+/// semantics; the transient-lock retry policy belongs to the download
+/// pipeline's call site, not here.
 fn rename_replacing(from: &Path, to: &Path) -> io::Result<()> {
-    match fs::rename(from, to) {
+    match atomic_rename_with_retry(from, to, 0, std::time::Duration::ZERO) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             let _ = fs::remove_file(to);
-            fs::rename(from, to)
+            atomic_rename_with_retry(from, to, 0, std::time::Duration::ZERO)
         }
         Err(e) => Err(e),
     }

@@ -12,7 +12,7 @@ use crate::rate_limiter::RateLimiter;
 use crate::registry;
 use once_cell::sync::Lazy;
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -384,34 +384,6 @@ fn is_transient_error(e: &Box<dyn std::error::Error + Send + Sync>) -> bool {
     false
 }
 
-/// Rename with bounded retry for transient filesystem locks.
-///
-/// Windows antivirus/indexers can hold a just-written file open for a short
-/// window (ERROR_SHARING_VIOLATION = 32, ERROR_ACCESS_DENIED = 5); a single
-/// such window must not fail a fully-downloaded file.
-async fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
-    const ATTEMPTS: u32 = 5;
-    for attempt in 1..=ATTEMPTS {
-        match tokio::fs::rename(from, to).await {
-            Ok(()) => return Ok(()),
-            Err(e) if attempt < ATTEMPTS && is_transient_fs_lock(&e) => {
-                tokio::time::sleep(std::time::Duration::from_millis(100 * u64::from(attempt)))
-                    .await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    unreachable!("retry loop always returns")
-}
-
-/// Whether an IO error looks like a transient lock by another process
-/// (sharing violation or access denied). On Unix these kinds usually
-/// indicate real permission problems, but a handful of retries is
-/// harmless there.
-fn is_transient_fs_lock(e: &std::io::Error) -> bool {
-    matches!(e.kind(), std::io::ErrorKind::PermissionDenied) || e.raw_os_error() == Some(32)
-}
-
 // Global download configuration (thread-safe, runtime-modifiable)
 pub struct DownloadConfig {
     pub concurrent_threads: AtomicUsize,
@@ -735,8 +707,14 @@ async fn download_chunked(
     // with backoff: antivirus and search indexers can briefly hold the
     // freshly-written `.incomplete` file open on Windows (sharing
     // violation / access denied), which would otherwise fail an otherwise
-    // complete download (incident #37 symptom B).
-    rename_with_retry(incomplete_path, final_path).await?;
+    // complete download (incident #37 symptom B). Policy: 1 initial try +
+    // 4 retries, 100ms base delay with linear backoff (100/200/300/400ms).
+    crate::utils::atomic_rename_with_retry(
+        incomplete_path,
+        final_path,
+        4,
+        std::time::Duration::from_millis(100),
+    )?;
 
     // Prepare verification data if hash is available
     let verification_item = expected_sha256

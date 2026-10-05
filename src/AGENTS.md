@@ -92,6 +92,7 @@ Key modules
 
 9) utils.rs
 - format_number, format_size helpers for UI
+- atomic_rename_with_retry(src, dst, retries, delay): shared final-rename primitive; retry policy is per-site (download: 4 retries, 100ms linear backoff; hf_cache: retries=0 single attempt)
 
 10) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
 - `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::spawn_manager
