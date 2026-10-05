@@ -11,7 +11,10 @@ header at the top of the file.
 
 ## Active proposals
 
-(none — see Shipped below)
+| Plan | Status | Summary |
+|---|---|---|
+| [hf-cache-sync.md](hf-cache-sync.md) | proposal (L1 implementation plan) | `hf-cache sync`/`path`: populate the real HuggingFace hub cache (`blobs`/`snapshots`/`refs`) via the existing engine with a staging→publish pipeline, `--for vllm` preset, hub interop matrix, container patterns |
+| [hf-cache-vllm-dropin.md](hf-cache-vllm-dropin.md) | proposal (research & strategy) | How vLLM downloads models through huggingface_hub; L0/L1/L2 comparison; L2 `serve` proxy risk register; container deployment patterns. L1 detail lives in hf-cache-sync.md |
 
 ## Shipped (kept as history)
 
