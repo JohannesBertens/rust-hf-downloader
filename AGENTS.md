@@ -52,7 +52,16 @@ src/
     │   ├── downloads.rs  # Download management (trigger, confirm, resume/delete)
     │   └── verification.rs # Verification UI (manual verify action)
     ├── tree.rs       # File-tree navigation model (flatten_tree_for_navigation / toggle_node_expansion / count_tree_files), shared by render + app/events + app/downloads
-    └── render.rs     # UI rendering functions
+    └── render/       # UI rendering functions (W3.4b: facade over one file per panel)
+        ├── mod.rs         # render_ui shell + RenderParams + the snap_ui helper (insta names hang off this module)
+        ├── models_list.rs # Results list item spans
+        ├── standard.rs    # Standard mode: model metadata + file tree
+        ├── gguf.rs        # GGUF mode: quantization groups + their files
+        ├── hud.rs         # Activity HUD (row builders, column math, state glyphs)
+        ├── popups.rs      # resume / search / download-path / auth-error overlays
+        ├── options_popup.rs # 16-field options dialog
+        ├── toolbar.rs     # filter & sort toolbar, hit areas, version badge
+        └── *_tests.rs     # snapshot_tests / hud_tests / style_size_tests / tests — snaps in render/snapshots/
 ```
 
 ### Frontends share one engine (v-unreleased)
@@ -133,7 +142,7 @@ Check `README.md` for more information.
 ### Filter & Sort System (v1.0.0)
 - **Filter State**: `src/ui/app/state.rs` - sort_field, sort_direction, filter_min_*
 - **Filter Logic**: `src/ui/app/events.rs` - keyboard controls and presets
-- **Filter UI**: `src/ui/render.rs` - toolbar rendering with focus highlighting
+- **Filter UI**: `src/ui/render/toolbar.rs` - toolbar rendering with focus highlighting
 - **Filter API**: `src/api.rs` - fetch_models_filtered() with client-side filtering
 - **Filter Config**: `src/config.rs` - default_sort_*, default_min_* persistence
 
@@ -153,7 +162,7 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - `update_hover_state(column, row)` - update hovered panel for border effects
 - Event coalescing: drains pending events, coalesces mouse moves into single hover update
 
-**Rendering** (`src/ui/render.rs`):
+**Rendering** (`src/ui/render/` — the panel areas register themselves in `mod.rs`/`standard.rs`/`gguf.rs`):
 - `RenderParams` includes `panel_areas`, `filter_areas`, `hovered_panel`
 - Each panel stores its area in `panel_areas` during render
 - `render_filter_toolbar()` calculates and stores `filter_areas`

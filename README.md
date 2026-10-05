@@ -746,7 +746,7 @@ rust-hf-downloader/
         │   ├── downloads.rs    # Download management
         │   └── verification.rs # Verification UI
         ├── tree.rs         # File-tree navigation model (flatten/toggle/count)
-        └── render.rs       # TUI rendering logic
+        └── render/         # TUI rendering logic (facade + one file per panel)
 ```
 
 **Version 0.7.0** introduces a modular architecture with clear separation of concerns:

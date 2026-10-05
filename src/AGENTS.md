@@ -86,8 +86,9 @@ Key modules
 - queue_verification: append to queue and increment size
 
 8) ui/ (see nested AGENTS.md for details)
-- mod.rs: exports app and render modules and App type re-export
-- render.rs: all UI drawing; panes for models, GGUF, standard metadata + file tree, status, popups, progress bars
+- mod.rs: exports app and render modules, re-exports App, declares the private tree module
+- render/: all UI drawing — mod.rs holds the render_ui shell + RenderParams and delegates to models_list / standard / gguf / hud / popups / options_popup / toolbar; panes for models, GGUF, standard metadata + file tree, status, popups, progress bars
+- tree.rs: file-tree navigation model (flatten_tree_for_navigation, toggle_node_expansion, count_tree_files) shared by render and app/*
 - app.rs: run loop; spawns verification worker and download manager; defers network loads to avoid blocking draws
 - app/*: state, events, model and download flows
 

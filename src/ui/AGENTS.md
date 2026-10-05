@@ -5,9 +5,12 @@ title: Agents Guide — src/ui
 # Agents Guide (src/ui)
 
 UI is split into:
-- render.rs: all drawing; pure functions consuming App state
+- render/: all drawing; pure functions consuming App state — a facade (mod.rs)
+  over one file per panel: models_list, standard, gguf, hud, popups,
+  options_popup, toolbar
 - app.rs: runtime loop; spawns background workers and manages frame redraw cadence
 - app/ submodule: state container, event handling, search/download flows
+- tree.rs: file-tree navigation model (not drawing) — see Tree operations
 
 Terminal stack: ratatui for rendering, crossterm for input, tui-input for text fields.
 
@@ -27,8 +30,9 @@ app.rs
   • needs_load_quantizations → App::spawn_load_quantizations() and prefetch_adjacent_models()
 - handle_crossterm_events polls key events and status messages, updates popup mode and status
 
-render.rs
-- render_ui(Frame, RenderParams): renders toolbar → results → bottom panels → status + both progress overlays
+render/ (mod.rs is the facade)
+- render_ui(Frame, RenderParams) lives in mod.rs: renders toolbar → results → bottom panels → status + both progress overlays
+- mod.rs also keeps the cfg(test) snap_ui helper: insta derives the snapshot name from the module path *and* stores the file next to the macro call site, so the test modules are direct children (render/snapshot_tests.rs, hud_tests.rs, style_size_tests.rs, tests.rs) and the .snap files live in render/snapshots/
 - Toolbar shows and highlights current sort and filters; indicates active preset
 - GGUF path: render_gguf_panels → left groups (size, type, [downloaded]), right files with downloaded mark
 - Standard path: render_standard_panels → left metadata summary, right file tree (flattened with expansion)
@@ -43,9 +47,9 @@ Design notes
   • render draws the flattened list; app/events + app/downloads consume the same helpers
 
 Where to add UI features
-- New pane/section → add pure renderer in render.rs and pass data via RenderParams
+- New pane/section → add a pure renderer in the owning render/<panel>.rs (new panel = new submodule) and pass data via RenderParams
 - New status or badges → augment spans in list or right panels
-- New popup → add render_* in render.rs and event handler in events.rs and popup state in models.rs
+- New popup → add render_* in render/popups.rs (options dialog: render/options_popup.rs) and event handler in events.rs and popup state in models.rs
 
 Quality
 - Keep draws quick; long ops go to spawned tasks with progress tracked in shared state
