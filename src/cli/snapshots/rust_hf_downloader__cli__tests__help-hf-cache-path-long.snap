@@ -1,0 +1,24 @@
+---
+source: src/cli/tests.rs
+expression: help
+---
+Print the snapshot path for a model/revision (refs/ lookup with an online fallback; scripting helper)
+
+Usage: path [OPTIONS] <MODEL_ID>
+
+Arguments:
+  <MODEL_ID>
+          Model ID, e.g. "Qwen/Qwen2.5-7B-Instruct"
+
+Options:
+      --revision <REV>
+          Git revision to look up: branch, tag, or commit SHA [default: main]
+
+      --cache-dir <DIR>
+          HuggingFace hub cache directory [default: $HF_HUB_CACHE, then $HF_HOME/hub, then the platform default]
+
+      --token <TOKEN>
+          HuggingFace token for the online revision fallback [default: $HF_TOKEN, then config]
+
+  -h, --help
+          Print help

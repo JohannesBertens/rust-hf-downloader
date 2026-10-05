@@ -1,0 +1,20 @@
+---
+source: src/cli/tests.rs
+expression: "long_help(|c| c.find_subcommand_mut(\"update\"))"
+---
+Update the installed binary to the newest release
+
+Usage: update [OPTIONS]
+
+Options:
+      --check
+          Only check for a newer release; exits 70 when one exists
+
+      --force
+          Reinstall even if the newest version is already installed
+
+      --json
+          Emit JSON Lines events instead of human text
+
+  -h, --help
+          Print help

@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use std::path::Path;
 
 use crate::models::{ModelMetadata, QuantizationGroup};
@@ -1305,6 +1305,209 @@ fn plain_verification_heartbeat_emits_once_per_interval() {
     // swallowed.
     reporter.plain_verification(3, 42);
     assert_eq!(sink.take(), "");
+}
+
+// --- H2: full long-help snapshots ---------------------------------------
+// Byte-identical enforcement for the upcoming args-flatten refactor
+// (W4.1): any change to flag order, grouping, or help text of any command
+// surface fails these snapshots. Regenerate deliberately via
+// `cargo insta accept` after reviewing the diff.
+
+/// Render the long help of a command selected from the root `Cli`.
+fn long_help(
+    select: impl for<'c> FnOnce(&'c mut clap::Command) -> Option<&'c mut clap::Command>,
+) -> String {
+    let mut cmd = Cli::command();
+    select(&mut cmd)
+        .unwrap_or_else(|| panic!("selected subcommand not found in the Cli tree"))
+        .render_long_help()
+        .to_string()
+}
+
+#[test]
+fn snapshot_help_root_long() {
+    insta::assert_snapshot!(
+        "help-root-long",
+        Cli::command().render_long_help().to_string()
+    );
+}
+
+#[test]
+fn snapshot_help_download_long() {
+    insta::assert_snapshot!(
+        "help-download-long",
+        long_help(|c| c.find_subcommand_mut("download"))
+    );
+}
+
+#[test]
+fn snapshot_help_search_long() {
+    insta::assert_snapshot!(
+        "help-search-long",
+        long_help(|c| c.find_subcommand_mut("search"))
+    );
+}
+
+#[test]
+fn snapshot_help_update_long() {
+    insta::assert_snapshot!(
+        "help-update-long",
+        long_help(|c| c.find_subcommand_mut("update"))
+    );
+}
+
+#[test]
+fn snapshot_help_hf_cache_long() {
+    insta::assert_snapshot!(
+        "help-hf-cache-long",
+        long_help(|c| c.find_subcommand_mut("hf-cache"))
+    );
+}
+
+#[test]
+fn snapshot_help_hf_cache_sync_long() {
+    let help = long_help(|c| {
+        c.find_subcommand_mut("hf-cache")
+            .and_then(|hf| hf.find_subcommand_mut("sync"))
+    });
+    insta::assert_snapshot!("help-hf-cache-sync-long", help);
+}
+
+#[test]
+fn snapshot_help_hf_cache_path_long() {
+    let help = long_help(|c| {
+        c.find_subcommand_mut("hf-cache")
+            .and_then(|hf| hf.find_subcommand_mut("path"))
+    });
+    insta::assert_snapshot!("help-hf-cache-path-long", help);
+}
+
+#[test]
+fn cli_command_tree_passes_clap_debug_assert() {
+    // clap's internal consistency check: flag conflicts, arg groups,
+    // subcommand wiring. Panics on any inconsistency.
+    Cli::command().debug_assert();
+}
+
+// --- H6: error-event wire contract table ---------------------------------
+// Additive-only NDJSON contract (plan H6). Every `code: "…"` literal in
+// src/cli/*.rs (26 construction sites: download_cmd 11, hf_cache_cmd 13,
+// search_cmd 2) collapses to the 13 distinct codes below; each entry pins
+// the exact serialized bytes of `Event::Error` with that code. A new code
+// MUST be added here; renaming or dropping one fails this table.
+
+#[test]
+fn error_event_code_wire_contract_table() {
+    const EXPECTED: &[(&str, &str)] = &[
+        // download_cmd.rs
+        ("usage", r#"{"type":"error","code":"usage","message":"m"}"#),
+        (
+            "invalid_path",
+            r#"{"type":"error","code":"invalid_path","message":"m"}"#,
+        ),
+        (
+            "interrupted",
+            r#"{"type":"error","code":"interrupted","message":"m"}"#,
+        ),
+        (
+            "download_failed",
+            r#"{"type":"error","code":"download_failed","message":"m"}"#,
+        ),
+        (
+            "hash_mismatch",
+            r#"{"type":"error","code":"hash_mismatch","message":"m"}"#,
+        ),
+        (
+            "auth_required",
+            r#"{"type":"error","code":"auth_required","message":"m"}"#,
+        ),
+        (
+            "verification_error",
+            r#"{"type":"error","code":"verification_error","message":"m"}"#,
+        ),
+        // hf_cache_cmd.rs
+        (
+            "plan_failed",
+            r#"{"type":"error","code":"plan_failed","message":"m"}"#,
+        ),
+        ("io", r#"{"type":"error","code":"io","message":"m"}"#),
+        (
+            "publish_failed",
+            r#"{"type":"error","code":"publish_failed","message":"m"}"#,
+        ),
+        (
+            "sync_lock",
+            r#"{"type":"error","code":"sync_lock","message":"m"}"#,
+        ),
+        // search_cmd.rs
+        (
+            "internal",
+            r#"{"type":"error","code":"internal","message":"m"}"#,
+        ),
+        (
+            "network",
+            r#"{"type":"error","code":"network","message":"m"}"#,
+        ),
+    ];
+    assert_eq!(EXPECTED.len(), 13, "distinct error codes drifted");
+    for (code, expected) in EXPECTED {
+        let event = Event::Error {
+            code: (*code).to_string(),
+            message: "m".to_string(),
+            available: None,
+        };
+        let actual = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            &actual, *expected,
+            "error code {code:?} changed its wire bytes"
+        );
+    }
+}
+
+#[test]
+fn error_event_available_variant_wire_contract() {
+    // Real usage shape (download_cmd.rs ambiguity path): `available` lists
+    // FileDtos of the repo; `sha256: null` is serialized, not omitted.
+    let event = Event::Error {
+        code: "ambiguous".to_string(),
+        message: "model has 2 downloadable file(s)".to_string(),
+        available: Some(vec![FileDto {
+            filename: "model-Q4_K_M.gguf".to_string(),
+            size_bytes: 4_947_802_324,
+            sha256: None,
+        }]),
+    };
+    assert_eq!(
+        serde_json::to_string(&event).unwrap(),
+        r#"{"type":"error","code":"ambiguous","message":"model has 2 downloadable file(s)","available":[{"filename":"model-Q4_K_M.gguf","size_bytes":4947802324,"sha256":null}]}"#
+    );
+}
+
+#[test]
+fn file_complete_status_wire_contract() {
+    // The `status` field is a &'static str with exactly two literals at
+    // download_cmd.rs — pin their serialized bytes.
+    for (status, expected) in [
+        (
+            "downloaded",
+            r#"{"type":"file_complete","filename":"model-Q4_K_M.gguf","status":"downloaded","bytes":4947802324}"#,
+        ),
+        (
+            "already_exists",
+            r#"{"type":"file_complete","filename":"model-Q4_K_M.gguf","status":"already_exists","bytes":4947802324}"#,
+        ),
+    ] {
+        let event = Event::FileComplete {
+            filename: "model-Q4_K_M.gguf".to_string(),
+            status,
+            bytes: 4_947_802_324,
+        };
+        let actual = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            actual, expected,
+            "FileComplete status {status:?} changed its wire bytes"
+        );
+    }
 }
 
 #[tokio::test]
