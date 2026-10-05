@@ -6,6 +6,10 @@
 mod downloads;
 mod events;
 mod filters;
+#[cfg(test)]
+mod mouse_tests;
+#[cfg(test)]
+mod options_tests;
 mod search;
 mod state;
 mod verification;
