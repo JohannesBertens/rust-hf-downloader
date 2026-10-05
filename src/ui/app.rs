@@ -449,8 +449,6 @@ impl App {
 
     /// Update hover state based on mouse position (called once per frame with coalesced position)
     fn update_hover_state(&mut self, column: u16, row: u16) {
-        self.mouse_position = Some((column, row));
-
         // Skip if popup is open
         if self.popup_mode != crate::models::PopupMode::None {
             self.hovered_panel = None;

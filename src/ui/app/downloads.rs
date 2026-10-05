@@ -47,8 +47,7 @@ impl App {
             FocusedPane::Models => {
                 // Download entire model repository (non-GGUF models in Standard mode)
                 if *self.display_mode.read() == crate::models::ModelDisplayMode::Standard {
-                    let metadata =
-                        futures::executor::block_on(async { self.model_metadata.read().clone() });
+                    let metadata = self.model_metadata.read().clone();
 
                     if let Some(meta) = metadata {
                         let file_count = meta.siblings.len();
@@ -63,7 +62,7 @@ impl App {
             FocusedPane::FileTree => {
                 // Download the selected file (or every file under the selected
                 // directory) from the Standard-mode tree — issue #25 P5
-                let tree = futures::executor::block_on(async { self.file_tree.read().clone() });
+                let tree = self.file_tree.read().clone();
                 let Some(tree) = tree else {
                     return;
                 };
@@ -89,8 +88,7 @@ impl App {
             }
             FocusedPane::QuantizationGroups => {
                 // Download entire quantization group
-                let quantizations =
-                    futures::executor::block_on(async { self.quantizations.read().clone() });
+                let quantizations = self.quantizations.read().clone();
 
                 if let Some(selected) = self.quant_list_state.selected() {
                     if selected < quantizations.len() {

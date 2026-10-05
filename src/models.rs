@@ -234,8 +234,6 @@ pub enum FilterPreset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
     Normal,
-    #[allow(dead_code)] // Kept for potential future use (inline editing)
-    Editing,
 }
 
 /// Sort field options for model search

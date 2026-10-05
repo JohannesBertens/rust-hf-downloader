@@ -102,10 +102,6 @@ impl MockRepo {
         }
         serde_json::to_vec(&entries).unwrap()
     }
-
-    fn tree_json(&self) -> Vec<u8> {
-        self.tree_json_for("")
-    }
 }
 
 fn sha256_hex(data: &[u8]) -> String {

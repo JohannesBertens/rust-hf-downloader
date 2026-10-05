@@ -365,15 +365,11 @@ impl App {
     /// Clear model details immediately (for instant UI feedback during navigation)
     pub fn clear_model_details(&mut self) {
         // Clear quantizations (GGUF mode)
-        futures::executor::block_on(async {
-            self.quantizations.write().clear();
-        });
+        self.quantizations.write().clear();
 
         // Clear metadata and file tree (Standard mode)
-        futures::executor::block_on(async {
-            *self.model_metadata.write() = None;
-            *self.file_tree.write() = None;
-        });
+        *self.model_metadata.write() = None;
+        *self.file_tree.write() = None;
 
         // Set loading state
         *self.loading_quants.write() = true;
@@ -383,9 +379,7 @@ impl App {
     /// Clear search results immediately (for instant UI feedback during search)
     pub fn clear_search_results(&mut self) {
         // Clear models list
-        futures::executor::block_on(async {
-            self.models.write().clear();
-        });
+        self.models.write().clear();
 
         // Clear model details
         self.clear_model_details();

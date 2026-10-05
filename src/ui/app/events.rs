@@ -28,7 +28,6 @@ impl App {
 
         match self.input_mode {
             InputMode::Normal => self.handle_normal_mode_input(key).await,
-            InputMode::Editing => self.handle_editing_mode_input(key).await,
         }
     }
 
@@ -299,26 +298,6 @@ impl App {
         }
     }
 
-    /// Handle keyboard input in Editing mode
-    async fn handle_editing_mode_input(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Enter => {
-                self.input_mode = InputMode::Normal;
-                // Clear results immediately before searching
-                self.clear_search_results();
-                // Set flag to search on next iteration (allows UI to render first)
-                self.needs_search_models = true;
-            }
-            KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                *self.status.write() = "Press '/' to search, Tab to switch lists, 'd' to download, 'v' to verify, 'o' for options, 'q' to quit".to_string();
-            }
-            _ => {
-                self.input.handle_event(&Event::Key(key));
-            }
-        }
-    }
-
     /// Handle keyboard input in Options popup
     async fn handle_options_popup_input(&mut self, key: KeyEvent) {
         // If editing token, handle text input
@@ -461,7 +440,7 @@ impl App {
 
     /// Navigate to next model in list
     pub fn next(&mut self) {
-        let models_len = futures::executor::block_on(async { self.models.read().len() });
+        let models_len = self.models.read().len();
 
         if models_len == 0 {
             return;
@@ -482,7 +461,7 @@ impl App {
 
     /// Navigate to previous model in list
     pub fn previous(&mut self) {
-        let models_len = futures::executor::block_on(async { self.models.read().len() });
+        let models_len = self.models.read().len();
 
         if models_len == 0 {
             return;
@@ -593,8 +572,7 @@ impl App {
             FocusedPane::QuantizationGroups => {
                 // When switching to quantization files, select first file if available
                 if let Some(selected_group) = self.quant_list_state.selected() {
-                    let quantizations =
-                        futures::executor::block_on(async { self.quantizations.read().clone() });
+                    let quantizations = self.quantizations.read().clone();
                     if selected_group < quantizations.len()
                         && !quantizations[selected_group].files.is_empty()
                     {
@@ -612,7 +590,7 @@ impl App {
 
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
-        let quants_len = futures::executor::block_on(async { self.quantizations.read().len() });
+        let quants_len = self.quantizations.read().len();
 
         if quants_len == 0 {
             return;
@@ -633,7 +611,7 @@ impl App {
 
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
-        let quants_len = futures::executor::block_on(async { self.quantizations.read().len() });
+        let quants_len = self.quantizations.read().len();
 
         if quants_len == 0 {
             return;
@@ -655,8 +633,7 @@ impl App {
     /// Navigate to next file in quantization files list
     pub fn next_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
-            let quantizations =
-                futures::executor::block_on(async { self.quantizations.read().clone() });
+            let quantizations = self.quantizations.read().clone();
 
             if selected_group < quantizations.len() {
                 let files_len = quantizations[selected_group].files.len();
@@ -683,8 +660,7 @@ impl App {
     /// Navigate to previous file in quantization files list
     pub fn previous_file(&mut self) {
         if let Some(selected_group) = self.quant_list_state.selected() {
-            let quantizations =
-                futures::executor::block_on(async { self.quantizations.read().clone() });
+            let quantizations = self.quantizations.read().clone();
 
             if selected_group < quantizations.len() {
                 let files_len = quantizations[selected_group].files.len();
@@ -948,7 +924,7 @@ impl App {
 
     /// Navigate to next item in file tree
     pub fn next_file_tree_item(&mut self) {
-        let tree = futures::executor::block_on(async { self.file_tree.read().clone() });
+        let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
@@ -974,7 +950,7 @@ impl App {
 
     /// Navigate to previous item in file tree
     pub fn previous_file_tree_item(&mut self) {
-        let tree = futures::executor::block_on(async { self.file_tree.read().clone() });
+        let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
@@ -1005,7 +981,7 @@ impl App {
             None => return,
         };
 
-        let mut tree = futures::executor::block_on(async { self.file_tree.read().clone() });
+        let mut tree = self.file_tree.read().clone();
 
         if let Some(ref mut tree) = tree {
             let flat = crate::ui::render::flatten_tree_for_navigation(tree);
@@ -1017,9 +993,7 @@ impl App {
                 toggle_node_expansion(tree, &selected_path);
 
                 // Update the tree
-                futures::executor::block_on(async {
-                    *self.file_tree.write() = Some(tree.clone());
-                });
+                *self.file_tree.write() = Some(tree.clone());
             }
         }
     }

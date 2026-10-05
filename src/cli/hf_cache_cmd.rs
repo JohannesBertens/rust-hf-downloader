@@ -705,6 +705,12 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         .collect();
     let mut published: Vec<String> = Vec::new();
     let mut publish_failures: Vec<String> = Vec::new();
+    // Sweep point is post-drain / pre-publish: the engine records this
+    // run's fetches with staging paths during the drain, and the bootstrap
+    // purge above only covers staging entries left by previous runs.
+    if !plan.fetch.is_empty() {
+        purge_staging_registry_entries();
+    }
     for item in &plan.fetch {
         let Some(outcome) = tally
             .outcomes
@@ -723,12 +729,6 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             continue;
         }
         let staged = staging.join(&item.repo_path);
-        // Registry hygiene (§4.6): the engine records every fetch in the
-        // flat-download registry with staging paths; sweep those entries
-        // so the TUI's resume/complete views stay clean. Done here — after
-        // the verification drain — because verification updates land in
-        // the registry too.
-        purge_staging_registry_entries();
         // Verification gate (R5): publish only with no hub digest,
         // verification deliberately skipped, or an explicit Ok.
         match &item.sha256 {
