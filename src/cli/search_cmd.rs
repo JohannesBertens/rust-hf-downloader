@@ -2,9 +2,10 @@
 
 use std::io::Write;
 
-use super::args::{merge_token, ModelDto, SearchArgs};
+use super::args::{ModelDto, SearchArgs};
 use super::events::{ErrorCode, Event};
 use super::report::{ProgressMode, Reporter};
+use super::run::resolve_run_token;
 use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
@@ -74,11 +75,9 @@ fn render_search_table(models: &[ModelDto]) {
 pub(super) async fn run_search(args: SearchArgs) -> i32 {
     let mut reporter = Reporter::new(args.json, false, ProgressMode::Auto);
     let options = crate::config::load_config();
-    let token = merge_token(
-        args.token.clone(),
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    );
+    // Runner partial bootstrap: token by the run precedence (flag >
+    // $HF_TOKEN > config); the options stay for the search defaults.
+    let token = resolve_run_token(args.token.clone(), &options);
 
     let (sort, direction, min_downloads, min_likes) = effective_search_params(&args, &options);
 

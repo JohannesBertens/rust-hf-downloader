@@ -1,50 +1,36 @@
 //! Download orchestration: config → resolve → engine bootstrap → event
 //! drain. `engine::bootstrap` owns the startup sequence; the shared
-//! drain loop and run tally live in [`super::run`] (Runner).
+//! config fold, queue handoff, drain loop, and run-tail emissions live in
+//! [`super::run`] (Runner).
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 
-use super::args::{apply_rate_limit_overrides, merge_token, valid_model_id, DownloadArgs};
+use super::args::{valid_model_id, DownloadArgs};
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, Selector};
-use super::run::{monitor, RunTally};
+use super::run::{
+    effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
+    queue_run, RunTally,
+};
 use super::{EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
 
 pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
 
-    // --- 1. Configuration ------------------------------------------------
-    let mut options = crate::config::load_config();
-    if let Some(dir) = &args.output {
-        options.default_directory = dir.clone();
-    }
-    apply_rate_limit_overrides(
-        &mut options,
+    // --- 1. Configuration (Runner fold: run::load_run_config) ------------
+    let (options, token) = load_run_config(
+        args.token.clone(),
+        args.output.as_deref(),
         args.rate_limit,
         args.no_rate_limit,
         args.rate_limit_mbps,
+        args.no_verify,
     );
-    let token = merge_token(
-        args.token.clone(),
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    );
-    options.hf_token = token.clone();
-    crate::config::apply_options(&options);
-    if args.no_verify {
-        crate::download::DOWNLOAD_CONFIG
-            .enable_verification
-            .store(false, Ordering::Relaxed);
-    }
 
     // --- 2. Validate usage ------------------------------------------------
-    let revision = args
-        .revision
-        .clone()
-        .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
+    let revision = effective_revision(&args.revision);
     if !valid_model_id(&args.model_id) {
         reporter.emit(&Event::error(
             ErrorCode::Usage,
@@ -67,19 +53,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     let metadata =
         match crate::api::fetch_model_metadata(&args.model_id, &revision, token.as_ref()).await {
             Ok(metadata) => metadata,
-            Err(e) => {
-                let not_found = e.status() == Some(reqwest::StatusCode::NOT_FOUND);
-                reporter.emit(&Event::Error {
-                    code: if not_found {
-                        "not_found".to_string()
-                    } else {
-                        "network".to_string()
-                    },
-                    message: format!("failed to fetch model info for {}: {}", args.model_id, e),
-                    available: None,
-                });
-                return if not_found { EXIT_USAGE } else { EXIT_FAILURE };
-            }
+            Err(e) => return emit_metadata_error(&mut reporter, &args.model_id, &e),
         };
 
     // Quantization groups derive (pure) from the recursive tree already
@@ -113,8 +87,6 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
 
     // --- 4. Register + queue through the shared engine ---------------------
     let base = options.default_directory.clone();
-    let (state, download_tx, manager) = crate::engine::bootstrap().await;
-
     // Model files land under base/author/model-name (same layout as the TUI)
     let parts: Vec<&str> = args.model_id.split('/').collect();
     let model_path = PathBuf::from(&base).join(parts[0]).join(parts[1]);
@@ -135,21 +107,15 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     // validate-first DISK upsert (the first invalid filename aborts with
     // nothing queued or sent), queue accounted before the sends, HUD
     // summaries pushed up front, no failed-send rollback. Reordering
-    // note: register_pending used to run before bootstrap; moving it
-    // inside enqueue (after bootstrap) is output-identical — bootstrap
-    // emits nothing, and the CLI never reads the (now unseeded-with-
-    // pending) registry mirror: disk is the source of truth.
-    let outcome = state
-        .enqueue(&download_tx, &queued, &EnqueuePolicy::cli_download(&base))
-        .await;
+    // notes (both proven output-identical): register_pending used to run
+    // before bootstrap — bootstrap emits nothing and the CLI reads the
+    // registry from disk only; queue_run builds nothing between
+    // bootstrap, the enqueue, and the sender drop (see run::queue_run).
+    let (state, manager, outcome) = queue_run(&queued, &EnqueuePolicy::cli_download(&base)).await;
     if let Some(err) = outcome.aborted {
         reporter.emit(&Event::error(ErrorCode::InvalidPath, err.to_string()));
         return EXIT_FAILURE;
     }
-
-    // Dropping the sender closes the channel — the manager drains, then its
-    // join handle resolves. This is the deterministic completion signal.
-    drop(download_tx);
 
     // --- 5. Monitor until drained ------------------------------------------
     let mut tally = RunTally {
@@ -183,27 +149,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         ));
         return EXIT_INTERRUPTED;
     }
-    if !tally.failures.is_empty() {
-        reporter.emit(&Event::error(
-            ErrorCode::DownloadFailed,
-            tally.failures.join("; "),
-        ));
-    }
-    if !tally.mismatches.is_empty() {
-        reporter.emit(&Event::error(
-            ErrorCode::HashMismatch,
-            tally.mismatches.join("; "),
-        ));
-    }
-    if tally.auth_required {
-        reporter.emit(&Event::error(
-            ErrorCode::AuthRequired,
-            format!(
-                "authentication required for {} (pass --token or set $HF_TOKEN)",
-                args.model_id
-            ),
-        ));
-    }
+    emit_run_failures(&mut reporter, &tally, &args.model_id, &[]);
 
     tally.exit_code()
 }

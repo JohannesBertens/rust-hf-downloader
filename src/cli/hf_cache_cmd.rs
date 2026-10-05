@@ -1,14 +1,14 @@
 //! `hf-cache` subcommand group (plans/hf-cache-sync.md §2, §5.2): the
 //! hub-cache sync pipeline and pure path helper.
 
-use super::args::{
-    apply_rate_limit_overrides, merge_token, valid_model_id, HfCacheArgs, HfCacheCommand,
-    HfCachePathArgs, HfCacheSyncArgs,
-};
+use super::args::{valid_model_id, HfCacheArgs, HfCacheCommand, HfCachePathArgs, HfCacheSyncArgs};
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::FileSpec;
-use super::run::{monitor, RunTally};
+use super::run::{
+    effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
+    queue_run, resolve_run_token, RunTally,
+};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
 use crate::models::{FileOutcome, ModelMetadata, VerifyOutcome};
@@ -358,27 +358,16 @@ fn print_sync_dry_run(
 async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
 
-    // --- 1. Configuration (mirrors run_download, minus the output-dir
-    //        override: the destination is the hub cache, §4.1) -------------
-    let mut options = crate::config::load_config();
-    apply_rate_limit_overrides(
-        &mut options,
+    // --- 1. Configuration (Runner fold: run::load_run_config, no output
+    //        override — the destination is the hub cache, §4.1) ------------
+    let (_options, token) = load_run_config(
+        args.token.clone(),
+        None,
         args.rate_limit,
         args.no_rate_limit,
         args.rate_limit_mbps,
+        args.no_verify,
     );
-    let token = merge_token(
-        args.token.clone(),
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    );
-    options.hf_token = token.clone();
-    crate::config::apply_options(&options);
-    if args.no_verify {
-        crate::download::DOWNLOAD_CONFIG
-            .enable_verification
-            .store(false, Ordering::Relaxed);
-    }
 
     // --- 2. Validate usage (§5.2 step 1: revision already parsed by
     //        clap's parse_revision) ----------------------------------------
@@ -392,10 +381,7 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         ));
         return EXIT_USAGE;
     }
-    let revision = args
-        .revision
-        .clone()
-        .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
+    let revision = effective_revision(&args.revision);
 
     // --- 3. Tree + commit SHA in parallel (§5.2 step 2) --------------------
     let (metadata_res, sha_res) = tokio::join!(
@@ -404,15 +390,7 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     );
     let metadata = match metadata_res {
         Ok(metadata) => metadata,
-        Err(e) => {
-            let not_found = e.status() == Some(reqwest::StatusCode::NOT_FOUND);
-            reporter.emit(&Event::Error {
-                code: if not_found { "not_found" } else { "network" }.to_string(),
-                message: format!("failed to fetch model info for {}: {}", args.model_id, e),
-                available: None,
-            });
-            return if not_found { EXIT_USAGE } else { EXIT_FAILURE };
-        }
+        Err(e) => return emit_metadata_error(&mut reporter, &args.model_id, &e),
     };
     let sha = match sha_res {
         Ok(sha) => sha,
@@ -614,7 +592,7 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         return EXIT_FAILURE;
     }
 
-    // --- 10. Engine bootstrap, exactly like run_download (§5.2 step 7) -------
+    // --- 10. Engine bootstrap + enqueue (§5.2 step 7; Runner queue_run) -----
     // Note: no pending registry entries are deliberately registered — the
     // flat-download registry is TUI-resume state (§4.6). The engine still
     // writes registry entries for files it fetches (staging paths); those
@@ -622,7 +600,6 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     // TUI's resume/complete views stay clean. The no-register choice is
     // named by EnqueuePolicy::hf_cache_sync, not just this comment.
     purge_staging_registry_entries();
-    let (state, download_tx, manager) = crate::engine::bootstrap().await;
 
     let files: Vec<FileSpec> = plan
         .fetch
@@ -653,12 +630,7 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     // before the sends, HUD summaries pushed up front, no failed-send
     // rollback — and NOTHING registered pending (the staging-sweep
     // policy; this policy cannot abort).
-    let _ = state
-        .enqueue(&download_tx, &queued, &EnqueuePolicy::hf_cache_sync())
-        .await;
-    // Dropping the sender closes the channel — the manager drains, then
-    // its join handle resolves. This is the deterministic completion signal.
-    drop(download_tx);
+    let (state, manager, _outcome) = queue_run(&queued, &EnqueuePolicy::hf_cache_sync()).await;
 
     // --- 11. Monitor until drained (§5.2 step 8, reusing run_download's
     //         monitor/verification-idle machinery) ---------------------------
@@ -809,32 +781,11 @@ async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         // command's scripted output.
         return EXIT_OK;
     }
-    if !tally.failures.is_empty() {
-        reporter.emit(&Event::error(
-            ErrorCode::DownloadFailed,
-            tally.failures.join("; "),
-        ));
-    }
-    if !publish_failures.is_empty() {
-        reporter.emit(&Event::error(
-            ErrorCode::PublishFailed,
-            publish_failures.join("; "),
-        ));
-    }
-    if !tally.mismatches.is_empty() {
-        reporter.emit(&Event::error(
-            ErrorCode::HashMismatch,
-            tally.mismatches.join("; "),
-        ));
-    }
+    // Shared run-tail order: failures → publish_failed → mismatches →
+    // auth (run::emit_run_failures; per-command events and exit-code
+    // arithmetic stay here).
+    emit_run_failures(&mut reporter, &tally, &args.model_id, &publish_failures);
     if tally.auth_required {
-        reporter.emit(&Event::error(
-            ErrorCode::AuthRequired,
-            format!(
-                "authentication required for {} (pass --token or set $HF_TOKEN)",
-                args.model_id
-            ),
-        ));
         return EXIT_AUTH;
     }
     EXIT_FAILURE
@@ -883,10 +834,7 @@ async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
         );
         return EXIT_USAGE;
     }
-    let revision = args
-        .revision
-        .clone()
-        .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
+    let revision = effective_revision(&args.revision);
     let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
     let repo_dir = cache_dir.join(crate::hf_cache::repo_dir_name(&args.model_id));
 
@@ -910,13 +858,10 @@ async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
         }
     }
 
-    // Online fallback: resolve the revision to a commit SHA.
-    let options = crate::config::load_config();
-    let token = merge_token(
-        args.token.clone(),
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    );
+    // Online fallback: resolve the revision to a commit SHA (Runner
+    // partial bootstrap: load config, resolve the token by the run
+    // precedence — no engine, no apply_options).
+    let token = resolve_run_token(args.token.clone(), &crate::config::load_config());
     match crate::api::resolve_revision_sha(&args.model_id, &revision, token.as_ref()).await {
         Ok(sha) => {
             let snapshot = absolute_path(&crate::hf_cache::snapshot_dir(

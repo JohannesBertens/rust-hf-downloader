@@ -74,8 +74,6 @@ impl RunTally {
 /// → token writeback → `apply_options` → `--no-verify` store. The tail
 /// order is load-bearing: the no-verify store must run AFTER
 /// `apply_options`, which re-enables verification from the config value.
-#[allow(dead_code)] // Runner step-2 bridge (dated 2026-10-05): adopted by
-                    // download_cmd.rs + hf_cache_cmd.rs in the immediately following commit.
 pub(super) fn load_run_config(
     token_flag: Option<String>,
     output: Option<&str>,
@@ -105,16 +103,18 @@ pub(super) fn load_run_config(
 }
 
 /// The partial bootstrap the query-only subcommands share (`hf-cache
-/// path`'s online fallback, `search`): load config, resolve the token by
-/// the same precedence — no engine, no rate-limit flags, no
-/// `apply_options`. §8.8: `AppOptions::default()` itself reads
-/// `$HF_TOKEN`, so the no-config-file path already carries the env token;
-/// the env axis wins over the file axis either way (pinned by the
-/// token-matrix tests — the dual read is unobservable here).
-#[allow(dead_code)] // Runner step-2 bridge (dated 2026-10-05): adopted by
-                    // hf_cache_cmd.rs (path) + search_cmd.rs in the immediately following commit.
-pub(super) fn resolve_run_token(token_flag: Option<String>) -> Option<String> {
-    let options = crate::config::load_config();
+/// path`'s online fallback, `search`): resolve the token by the run
+/// precedence from already-loaded options (`--token` > `$HF_TOKEN` >
+/// config) — no engine, no rate-limit flags, no `apply_options`. The
+/// caller keeps the loaded options for its own defaults (search params,
+/// or nothing). §8.8: `AppOptions::default()` itself reads `$HF_TOKEN`,
+/// so the no-config-file path already carries the env token; the env axis
+/// wins over the file axis either way (pinned by the token-matrix tests —
+/// the dual read is unobservable here).
+pub(super) fn resolve_run_token(
+    token_flag: Option<String>,
+    options: &AppOptions,
+) -> Option<String> {
     merge_token(
         token_flag,
         std::env::var("HF_TOKEN").ok(),
@@ -124,8 +124,6 @@ pub(super) fn resolve_run_token(token_flag: Option<String>) -> Option<String> {
 
 /// `--revision` value or the hub default (`main`) — the shared defaulting
 /// step of `download`, `hf-cache sync`, and `hf-cache path`.
-#[allow(dead_code)] // Runner step-2 bridge (dated 2026-10-05): adopted by
-                    // download_cmd.rs + hf_cache_cmd.rs (sync and path) in the next commit.
 pub(super) fn effective_revision(revision: &Option<String>) -> String {
     revision
         .clone()
@@ -138,8 +136,6 @@ pub(super) fn effective_revision(revision: &Option<String>) -> String {
 /// `EXIT_FAILURE`. `not_found` is deliberately outside the [`ErrorCode`]
 /// wire set (dynamic code, W1.3 decision) — the raw construction below is
 /// what both sites did.
-#[allow(dead_code)] // Runner step-2 bridge (dated 2026-10-05): adopted by
-                    // download_cmd.rs + hf_cache_cmd.rs (sync) in the immediately following commit.
 pub(super) fn emit_metadata_error(
     reporter: &mut Reporter,
     model_id: &str,
@@ -168,8 +164,6 @@ pub(super) fn emit_metadata_error(
 /// auth-required. The interrupted event and the exit-code arithmetic stay
 /// at the call sites (their messages and interleavings differ per
 /// command).
-#[allow(dead_code)] // Runner step-2 bridge (dated 2026-10-05): adopted by
-                    // download_cmd.rs + hf_cache_cmd.rs (sync) in the immediately following commit.
 pub(super) fn emit_run_failures(
     reporter: &mut Reporter,
     tally: &RunTally,
@@ -218,8 +212,6 @@ pub(super) fn emit_run_failures(
 /// was queued or sent on abort, the manager emits nothing, and the join
 /// handle is simply dropped (detached). Enforced end-to-end by the exit
 /// code matrix (H3), human goldens (H4), and the NDJSON e2e suite.
-#[allow(dead_code)] // Runner step-2 bridge (dated 2026-10-05): adopted by
-                    // download_cmd.rs + hf_cache_cmd.rs (sync) in the immediately following commit.
 pub(super) async fn queue_run(
     queued: &[QueuedDownload],
     policy: &EnqueuePolicy,
