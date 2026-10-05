@@ -215,6 +215,18 @@ Group 1 (P0 + harness) complete at 298/0. Known residual: ~1% pre-existing e2e f
 - Opus design debt folded into remaining queue: EnqueuePolicy sealing (private fields + discipline-enum collapse + explicit on_invalid + RegistryMode::None rename), engine.rs split, register_pending -> registry.rs, mark_complete merge, ui/app/app.rs inception fix, hf_cache.rs/utils.rs naming pass, events.rs W3.9 split. Deferred #5 (atomic registry save) surfaced as the cheapest now-enabled defect fix — owner decision at wrap-up.
 - Gemini verified-clean (with equivalence arguments): all 6 enqueue policies, registry op isolation/ordering, 18 block_on removals, RenderCache, ErrorCode + 5 dynamic sites, PathError strings, http_client, multipart corpus, filter/sort oracle, EventStream move, token precedence, poll drain ordering.
 
+**Phases 3-5 executed (slices 19-24), all gated 375->409/0, zero .snap changes:**
+| Commits | Items | Notes |
+|---|---|---|
+| ea30afe/d3140b5/5947fec | W4.5/W4.6/W4.8 | FilterState (divergences preserved: step(0,-1) direction-toggle, status-write order); advance() with per-fn tables green pre+post; popup helpers (no rounding variants; options height-clamp + border divergence kept); accepts_* predicates |
+| 865f7de/3c1dd29/58532c8 | W4.7/W4.10/W4.11 | 8.13 NOT a defect (< 15 == len-1); HUD single-source w/ threshold proof; get_or_fetch (no-lock-during-fetch + no-error-caching pinned; one race-window insert-order deviation documented) |
+| 3c6c32e/96bcfff | W4.1/W4.9 | flatten-at-position reproduces clap display-order (verified vs clap_builder 4.5.60) — help bytes IDENTICAL, zero help-snap changes; SelectionError trait + FileSpec::from with fixture pin |
+| (3 commits) | policy/registry/engine + W5.6 | SendDiscipline collapse (48 combos -> sealed ctors); on_invalid discovered a THIRD variant SkipValidation (resume/hf-cache validate nothing); RegistryMode::None -> AlreadyRecorded+StagingSweep; register_pending -> registry.rs; Completion enum; engine/{mod,enqueue,workers,bootstrap}; W5.6: single u64 counter -> AtomicU64, compound pacing stays mutexed; 8 policy tests passed with ZERO edits |
+| 3fa0f42/262d1fd/fc177a2 | W5.1/W3.8/W3.9+inception | failure-injection FIRST (500-mid-chunk + size-mismatch covered; 416-resume GAP: transport has NO resume path — .incomplete always deleted); start_download 309->46+3 phases; download/ + events/ splits; ui/app/app.rs -> ui/app/mod.rs (pure git mv) |
+| 58163f6/e19591d/e929d30 | W5.2/W5.3/8.9/naming | RenderParams -> 8 ctx groups, hit-rects RETURNED (render pass pure), registration order pinned by test; MouseState grouped, ListStates deliberately left; AppOptions transients -> OptionsDialogState + TOML golden; hf_cache.rs -> cache_layout.rs (20 refs); mark_mismatch mirror patch moved to verification caller (layering restored); utils slimmed to digests+rename, 22 call sites -> fmt |
+
+**W5.5 (RuntimeConfig) DEFERRED by owner decision:** highest-risk plan item (globals -> carried config touches every spawn site + both frontends' options flow), independently skippable by plan, design review did not require it, live-option-effect smoke not exercisable headless. The three statics keep working with pinned test save/restore (engine tests). Revisit as a standalone follow-up.
+
 Group 2 (Phase 1 foundations) complete at 326/0:**
 | Commit | Items | Notes |
 |---|---|---|
