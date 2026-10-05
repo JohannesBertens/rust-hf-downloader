@@ -3,6 +3,7 @@ mod cli;
 mod config;
 mod download;
 mod engine;
+mod fmt;
 mod hf_cache;
 mod http_client;
 mod models;

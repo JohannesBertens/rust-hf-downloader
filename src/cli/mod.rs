@@ -25,7 +25,9 @@ mod args;
 mod download_cmd;
 mod events;
 mod hf_cache_cmd;
-mod report;
+// W1.4 oracle window: `report` is `pub(crate)` only so `fmt`'s differential
+// tests can call the live legacy helpers; reverted in W1.4b.
+pub(crate) mod report;
 mod resolve;
 mod search_cmd;
 mod update_cmd;

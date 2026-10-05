@@ -403,7 +403,10 @@ pub(super) fn verification_heartbeat_line(active: usize, done: usize) -> String 
     format!("verifying: {active} in flight, {done} verified")
 }
 
-pub(super) fn render_bar(done: u64, total: u64) -> String {
+// W1.4 oracle window: `render_bar`/`format_eta`/`truncate_path` below are
+// `pub(crate)` only so `fmt`'s differential tests can call the live legacy
+// helpers; they are deleted in W1.4b once the oracles are frozen.
+pub(crate) fn render_bar(done: u64, total: u64) -> String {
     let filled = if total == 0 {
         PROGRESS_BAR_WIDTH
     } else {
@@ -428,7 +431,7 @@ fn eta_suffix(speed_mbps: f64, remaining: u64) -> String {
     }
 }
 
-pub(super) fn format_eta(secs: f64) -> String {
+pub(crate) fn format_eta(secs: f64) -> String {
     if !secs.is_finite() || secs < 0.0 {
         return "?".to_string();
     }
@@ -444,7 +447,7 @@ pub(super) fn format_eta(secs: f64) -> String {
 
 /// Truncate a path-like string for single-line display, keeping the
 /// (differing) tail.
-pub(super) fn truncate_path(s: &str, max: usize) -> String {
+pub(crate) fn truncate_path(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

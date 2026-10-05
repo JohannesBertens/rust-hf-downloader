@@ -759,7 +759,7 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
 /// the tail (shard index, extension) stays visible — the identifying part
 /// of multipart names like `model-00002-of-00003.gguf`. Names that already
 /// fit are returned unchanged.
-fn truncate_filename(name: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_filename(name: &str, max_chars: usize) -> String {
     let count = name.chars().count();
     if max_chars == 0 {
         return String::new();
@@ -778,7 +778,7 @@ fn truncate_filename(name: &str, max_chars: usize) -> String {
 }
 
 /// Format bytes as GB, rounding up. Returns empty string for 0 bytes.
-fn format_remaining_gb(bytes: u64) -> String {
+pub(crate) fn format_remaining_gb(bytes: u64) -> String {
     const GB: u64 = 1_073_741_824;
     if bytes == 0 {
         String::new()
@@ -1198,8 +1198,13 @@ fn right_block_spans(
     Span::raw(s)
 }
 
+// W1.4 oracle window: the six HUD/files-panel formatting helpers directly
+// below (`format_bytes_hud`, `format_speed_hud`, `format_eta_hud`,
+// `format_remaining_gb`, `truncate_filename`, `truncate_name_middle`) are
+// `pub(crate)` only so `fmt`'s differential tests can call the live legacy
+// helpers; they are deleted in W1.4b once the oracles are frozen.
 /// Compact byte size for HUD columns, e.g. "38.2GB", "512MB".
-fn format_bytes_hud(bytes: u64) -> String {
+pub(crate) fn format_bytes_hud(bytes: u64) -> String {
     const MB: f64 = 1_048_576.0;
     const GB: f64 = 1_073_741_824.0;
     let b = bytes as f64;
@@ -1215,7 +1220,7 @@ fn format_bytes_hud(bytes: u64) -> String {
 }
 
 /// Compact throughput, e.g. "32.8MB/s" or "1.9GB/s".
-fn format_speed_hud(mbps: f64) -> String {
+pub(crate) fn format_speed_hud(mbps: f64) -> String {
     if mbps >= 1024.0 {
         format!("{:.1}GB/s", mbps / 1024.0)
     } else {
@@ -1225,7 +1230,7 @@ fn format_speed_hud(mbps: f64) -> String {
 
 /// Compact ETA bounded to the HUD eta column (7 cells), e.g. "~1h05m",
 /// "~12m21s", "~42s".
-fn format_eta_hud(secs: u64) -> String {
+pub(crate) fn format_eta_hud(secs: u64) -> String {
     if secs >= 3600 {
         format!("~{}h{:02}m", secs / 3600, (secs % 3600) / 60)
     } else if secs >= 60 {
@@ -1237,7 +1242,7 @@ fn format_eta_hud(secs: u64) -> String {
 
 /// Middle-truncate a name to `max` chars (char-based, UTF-8 safe), keeping
 /// head and tail with a `~` marker: "model~.gguf".
-fn truncate_name_middle(name: &str, max: usize) -> String {
+pub(crate) fn truncate_name_middle(name: &str, max: usize) -> String {
     let chars: Vec<char> = name.chars().collect();
     if chars.len() <= max || max < 3 {
         return name.chars().take(max).collect();
