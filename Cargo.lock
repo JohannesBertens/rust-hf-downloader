@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "rust-hf-downloader"
-version = "2.13.0"
+version = "2.13.1"
 dependencies = [
  "backtrace",
  "clap",

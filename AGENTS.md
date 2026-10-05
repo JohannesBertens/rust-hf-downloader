@@ -16,7 +16,7 @@ The application follows a modular architecture with clear separation of concerns
 ```
 src/
 ├── main.rs           # Entry point (~60 lines): `download`/`search` subcommand → cli::run; no args → TUI
-├── cli/              # One-shot CLI (`download` + `search` + `update` + `hf-cache` subcommands), split by section (v2.14.0):
+├── cli/              # One-shot CLI (`download` + `search` + `update` + `hf-cache` subcommands), split by section (v2.13.1):
 │   ├── mod.rs        # Cli/Command clap roots, EXIT_* consts, run() dispatcher, re-exports
 │   ├── args.rs       # All *Args structs + parse/merge helpers (parse_preset, merge_token, …)
 │   ├── resolve.rs    # File resolution (FileSpec/Selector/parse_selector/resolve_files) — pure
