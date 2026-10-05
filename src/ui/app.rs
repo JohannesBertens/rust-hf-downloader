@@ -79,78 +79,55 @@ impl App {
         let model_metadata = self.model_metadata.read().clone();
         let file_tree = self.file_tree.read().clone();
 
-        // For tokio Mutex, use try_lock() to avoid blocking/deadlock
-        // Fall back to cached values if lock is held by another task
-        let complete_downloads = self
-            .engine
-            .complete_downloads
-            .try_lock()
-            .map(|guard| {
-                // Update cache when we successfully get the lock
-                self.cached_complete_downloads = guard.clone();
-                guard.clone()
-            })
-            .unwrap_or_else(|_| self.cached_complete_downloads.clone());
+        // For tokio Mutex, snapshot() refreshes the render cache when the
+        // lock is free and falls back to the cached value when the lock is
+        // held by another task (the render path never blocks).
+        let complete_downloads = state::snapshot(
+            &self.engine.complete_downloads,
+            &mut self.render_cache.complete_downloads,
+        );
 
         // Activity HUD data is fetched BEFORE render_ui so the reserved
         // strip height is known when the main layout is split.
-        let download_progress = self
-            .engine
-            .download_progress
-            .try_lock()
-            .map(|guard| {
-                self.cached_download_progress = guard.clone();
-                guard.clone()
-            })
-            .unwrap_or_else(|_| self.cached_download_progress.clone());
+        let download_progress = state::snapshot(
+            &self.engine.download_progress,
+            &mut self.render_cache.download_progress,
+        );
 
-        let download_queue = self
-            .engine
-            .download_queue
-            .try_lock()
-            .map(|guard| {
-                self.cached_download_queue = guard.clone();
-                (guard.size, guard.bytes)
-            })
-            .unwrap_or_else(|_| {
-                (
-                    self.cached_download_queue.size,
-                    self.cached_download_queue.bytes,
-                )
-            });
+        let download_queue = {
+            // Cache the full QueueState; project the (size, bytes) pair.
+            let queue = state::snapshot(
+                &self.engine.download_queue,
+                &mut self.render_cache.download_queue,
+            );
+            (queue.size, queue.bytes)
+        };
 
-        let download_queue_items = self
-            .engine
-            .download_queue_items
-            .try_lock()
-            .map(|guard| {
-                self.cached_download_queue_items = guard.clone();
-                guard.clone()
-            })
-            .unwrap_or_else(|_| self.cached_download_queue_items.clone());
+        let download_queue_items = state::snapshot(
+            &self.engine.download_queue_items,
+            &mut self.render_cache.download_queue_items,
+        );
 
-        let verification_progress = self
-            .engine
-            .verification_progress
-            .try_lock()
-            .map(|guard| {
-                self.cached_verification_progress = guard.clone();
-                guard.clone()
-            })
-            .unwrap_or_else(|_| self.cached_verification_progress.clone());
+        let verification_progress = state::snapshot(
+            &self.engine.verification_progress,
+            &mut self.render_cache.verification_progress,
+        );
 
         let verification_queue_size = self.engine.verification_queue_size.load(Ordering::Relaxed);
 
+        // Derived variant of the snapshot pattern: the cache stores the
+        // summed bytes, not a clone of the queue — the sum is computed
+        // under the guard so the queue Vec is never cloned per frame.
         let verification_queue_bytes = self
             .engine
             .verification_queue
             .try_lock()
             .map(|guard| {
                 let bytes = guard.iter().map(|i| i.total_size).sum();
-                self.cached_verification_queue_bytes = bytes;
+                self.render_cache.verification_queue_bytes = bytes;
                 bytes
             })
-            .unwrap_or(self.cached_verification_queue_bytes);
+            .unwrap_or(self.render_cache.verification_queue_bytes);
 
         let verified_ok = self.engine.verification_results.ok.load(Ordering::Relaxed);
         let verified_fail = self

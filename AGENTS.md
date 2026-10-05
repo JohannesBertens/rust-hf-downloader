@@ -158,9 +158,9 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - Border styles: yellow for focused, cyan for hovered, default otherwise
 
 **Non-blocking design**:
-- Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks
+- Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks (`ui::app::state::snapshot` helper + `RenderCache` on App: refresh cache when free, render cached snapshot when held)
 - Uses `parking_lot::RwLock` which doesn't have poisoning (no `.unwrap()` needed)
-- Cached render fields provide fallback when locks unavailable
+- Cached render fields (App.render_cache) provide fallback when locks unavailable
 - Mouse handler is synchronous to avoid blocking issues
 
 ### Mutex Lock Ordering (Critical for Deadlock Prevention)

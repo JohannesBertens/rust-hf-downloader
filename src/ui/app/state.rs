@@ -2,7 +2,6 @@ use crate::models::*;
 use parking_lot::RwLock;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::Input;
@@ -71,13 +70,11 @@ pub struct App {
     pub hovered_panel: Option<FocusedPane>,    // Currently hovered panel for visual feedback
     pub last_mouse_event_time: std::time::Instant, // Track time of last processed mouse event
     pub filter_areas: Vec<(usize, Rect)>, // Store filter field areas (0=sort, 1=downloads, 2=likes)
-    // Cached values for non-blocking render (used when tokio Mutex is locked)
-    pub cached_complete_downloads: CompleteDownloads,
-    pub cached_download_progress: Option<DownloadProgress>,
-    pub cached_download_queue: crate::models::QueueState, // Combined cache
-    pub cached_download_queue_items: Vec<crate::models::QueueItemSummary>,
-    pub cached_verification_queue_bytes: u64,
-    pub cached_verification_progress: Vec<VerificationProgress>,
+    // Last-known-good snapshots of the engine's tokio::Mutex state for
+    // non-blocking rendering: draw() refreshes each field via `snapshot`
+    // when the lock is free and falls back to the previous snapshot when
+    // the lock is held by another task.
+    pub render_cache: RenderCache,
 }
 
 impl Default for App {
@@ -161,12 +158,7 @@ impl App {
             last_mouse_event_time: std::time::Instant::now(),
             filter_areas: Vec::new(),
             // Cached values for non-blocking render
-            cached_complete_downloads: HashMap::new(),
-            cached_download_progress: None,
-            cached_download_queue: crate::models::QueueState::new(0, 0),
-            cached_download_queue_items: Vec::new(),
-            cached_verification_queue_bytes: 0,
-            cached_verification_progress: Vec::new(),
+            render_cache: RenderCache::default(),
         }
     }
 
@@ -178,5 +170,84 @@ impl App {
     /// Terminate application
     pub fn quit(&mut self) {
         self.running = false;
+    }
+}
+
+/// Last-known-good snapshots of the engine's `tokio::Mutex` state, used by
+/// `App::draw` for non-blocking rendering. Each field mirrors one engine
+/// mutex; `draw` refreshes it through [`snapshot`] when the lock is free
+/// and renders the previous snapshot when the lock is held by another
+/// task. Defaults equal the engine's fresh-state initial values.
+#[derive(Debug, Default)]
+pub struct RenderCache {
+    pub complete_downloads: CompleteDownloads,
+    pub download_progress: Option<DownloadProgress>,
+    /// Combined cache for the queue summary (`size`, `bytes`).
+    pub download_queue: crate::models::QueueState,
+    pub download_queue_items: Vec<crate::models::QueueItemSummary>,
+    /// Derived under the verification-queue lock (summed `total_size`),
+    /// not a clone of the queue itself.
+    pub verification_queue_bytes: u64,
+    pub verification_progress: Vec<VerificationProgress>,
+}
+
+/// Non-blocking snapshot of an engine `tokio::Mutex<T>` for rendering:
+/// when the lock is free, copy the guarded value into `cache` and return
+/// the fresh clone; when the lock is held by another task, return the
+/// last-good `cache` value instead. The guard is scoped inside this
+/// helper only — no lock is ever held beyond the copy (W0.8 rule).
+pub(super) fn snapshot<T: Clone>(m: &Mutex<T>, cache: &mut T) -> T {
+    match m.try_lock() {
+        Ok(guard) => {
+            *cache = guard.clone();
+            guard.clone()
+        }
+        Err(_) => cache.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_refreshes_cache_when_lock_is_free() {
+        let m = Mutex::new(vec![1u64, 2]);
+        let mut cache = Vec::new();
+
+        let got = snapshot(&m, &mut cache);
+
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(cache, vec![1, 2], "cache must be refreshed on success");
+    }
+
+    #[test]
+    fn snapshot_falls_back_to_cache_when_lock_is_held() {
+        let m = Mutex::new(vec![9u64]);
+        let mut cache = vec![7u64];
+
+        // Hold the lock across the call — try_lock must fail and the
+        // helper must yield the cached value without touching the cache.
+        let guard = m.try_lock().unwrap();
+        let got = snapshot(&m, &mut cache);
+        drop(guard);
+
+        assert_eq!(got, vec![7], "held lock must yield the cached value");
+        assert_eq!(cache, vec![7], "cache must be untouched on fallback");
+    }
+
+    #[test]
+    fn render_cache_defaults_match_fresh_engine_state() {
+        // Per-field defaults must equal the pre-RenderCache initial values
+        // (HashMap::new(), None, QueueState::new(0, 0), Vec::new(), 0,
+        // Vec::new()) so a fresh App renders exactly as before.
+        let c = RenderCache::default();
+        assert!(c.complete_downloads.is_empty());
+        assert!(c.download_progress.is_none());
+        assert_eq!(c.download_queue.size, 0);
+        assert_eq!(c.download_queue.bytes, 0);
+        assert!(c.download_queue_items.is_empty());
+        assert_eq!(c.verification_queue_bytes, 0);
+        assert!(c.verification_progress.is_empty());
     }
 }
