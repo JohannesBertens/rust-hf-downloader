@@ -10,23 +10,27 @@ use ratatui::{
     Frame,
 };
 
+use super::centered_rect;
+
 pub fn render_options_popup(
     frame: &mut Frame,
     options: &crate::models::AppOptions,
     directory_input: &tui_input::Input,
     token_input: &tui_input::Input,
 ) {
-    let popup_width = 64.min(frame.area().width.saturating_sub(4));
-    let popup_height = 31.min(frame.area().height.saturating_sub(4));
-    let popup_area = Rect {
-        x: (frame.area().width.saturating_sub(popup_width)) / 2,
-        y: (frame.area().height.saturating_sub(popup_height)) / 2,
-        width: popup_width,
-        height: popup_height,
-    };
+    // Centered popup area. Divergence kept on purpose (W4.8 diff): this is
+    // the ONLY popup that also clamps its HEIGHT against terminal - 4.
+    let popup_area = centered_rect(
+        64,
+        31.min(frame.area().height.saturating_sub(4)),
+        frame.area(),
+    );
 
     frame.render_widget(Clear, popup_area);
 
+    // border_style (borders only, title unstyled) — NOT the whole-block
+    // .style() the other four popups use; a visible difference pinned by
+    // the options-popup snapshots.
     let block = Block::default()
         .borders(Borders::ALL)
         .title("Options (ESC to close)")

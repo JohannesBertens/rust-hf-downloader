@@ -22,6 +22,7 @@ Files and roles
 
 - events.rs
   • App::on_key_event → dispatch by PopupMode and InputMode
+  • 'd'/'v' key guards use FocusedPane::accepts_download()/accepts_verify() (defined next to the enum in models/ui.rs; pane sets pinned by unit test there)
   • Normal mode keys:
     - '/' open Search popup; 'o' Options; 'd' Download; 'v' Verify (on selection); 'q' Quit
     - 's' cycle SortField; 'S' (Shift+s) toggle sort direction

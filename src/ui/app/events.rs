@@ -47,18 +47,12 @@ impl App {
             (_, KeyCode::Char('d')) => {
                 // Allow download from Models pane (for non-GGUF), QuantizationGroups,
                 // QuantizationFiles, or the Standard-mode FileTree
-                if self.focused_pane == FocusedPane::Models
-                    || self.focused_pane == FocusedPane::QuantizationGroups
-                    || self.focused_pane == FocusedPane::QuantizationFiles
-                    || self.focused_pane == FocusedPane::FileTree
-                {
+                if self.focused_pane.accepts_download() {
                     self.trigger_download();
                 }
             }
             (_, KeyCode::Char('v')) => {
-                if self.focused_pane == FocusedPane::QuantizationGroups
-                    || self.focused_pane == FocusedPane::QuantizationFiles
-                {
+                if self.focused_pane.accepts_verify() {
                     self.verify_downloaded_file().await;
                 }
             }

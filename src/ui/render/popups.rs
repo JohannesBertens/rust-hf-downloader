@@ -6,38 +6,31 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 use tui_input::Input;
+
+use super::{centered_rect, popup_shell};
 
 pub fn render_resume_popup(
     frame: &mut Frame,
     incomplete_downloads: &[crate::models::DownloadMetadata],
 ) {
-    // Calculate centered popup area
-    let popup_width = 70.min(frame.area().width.saturating_sub(4));
-    let popup_height = 10 + incomplete_downloads.len().min(5) as u16;
-    let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
-    let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    // Centered popup area (width clamped to terminal - 4 by centered_rect)
+    let popup_area = centered_rect(
+        70,
+        10 + incomplete_downloads.len().min(5) as u16,
+        frame.area(),
+    );
 
     // Clear the popup area first to remove any underlying content
-    frame.render_widget(Clear, popup_area);
-
-    // Render popup background
-    let popup_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Resume Incomplete Downloads?")
-        .style(Style::default().fg(Color::Yellow).bg(Color::Black));
-
-    frame.render_widget(popup_block, popup_area);
+    popup_shell(
+        frame,
+        popup_area,
+        "Resume Incomplete Downloads?",
+        Style::default().fg(Color::Yellow).bg(Color::Black),
+    );
 
     // Render message
     let message_area = Rect {
@@ -137,27 +130,14 @@ pub fn render_resume_popup(
 
 /// Render search popup dialog
 pub fn render_search_popup(frame: &mut Frame, input: &Input) {
-    let popup_width = 60.min(frame.area().width.saturating_sub(4));
-    let popup_height = 8;
-    let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
-    let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-    let area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    let area = centered_rect(60, 8, frame.area());
 
-    // Clear the area
-    frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Search HuggingFace Models ")
-        .style(Style::default().fg(Color::Cyan));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = popup_shell(
+        frame,
+        area,
+        " Search HuggingFace Models ",
+        Style::default().fg(Color::Cyan),
+    );
 
     // Input field
     let input_area = Rect {
@@ -193,29 +173,16 @@ pub fn render_search_popup(frame: &mut Frame, input: &Input) {
 }
 
 pub fn render_download_path_popup(frame: &mut Frame, download_path_input: &Input) {
-    // Calculate centered popup area
-    let popup_width = 60.min(frame.area().width.saturating_sub(4));
-    let popup_height = 7;
-    let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
-    let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    // Centered popup area (width clamped to terminal - 4 by centered_rect)
+    let popup_area = centered_rect(60, 7, frame.area());
 
     // Clear the popup area first to remove any underlying content
-    frame.render_widget(Clear, popup_area);
-
-    // Render popup background
-    let popup_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Download Model")
-        .style(Style::default().fg(Color::White).bg(Color::Black));
-
-    frame.render_widget(popup_block, popup_area);
+    popup_shell(
+        frame,
+        popup_area,
+        "Download Model",
+        Style::default().fg(Color::White).bg(Color::Black),
+    );
 
     // Render input label
     let label_area = Rect {
@@ -267,29 +234,16 @@ pub fn render_download_path_popup(frame: &mut Frame, download_path_input: &Input
 }
 
 pub fn render_auth_error_popup(frame: &mut Frame, model_url: &str, has_token: bool) {
-    // Calculate centered popup area
-    let popup_width = 70.min(frame.area().width.saturating_sub(4));
-    let popup_height = if has_token { 13 } else { 17 };
-    let popup_x = (frame.area().width.saturating_sub(popup_width)) / 2;
-    let popup_y = (frame.area().height.saturating_sub(popup_height)) / 2;
-
-    let popup_area = Rect {
-        x: popup_x,
-        y: popup_y,
-        width: popup_width,
-        height: popup_height,
-    };
+    // Centered popup area (width clamped to terminal - 4 by centered_rect)
+    let popup_area = centered_rect(70, if has_token { 13 } else { 17 }, frame.area());
 
     // Clear the popup area first to remove any underlying content
-    frame.render_widget(Clear, popup_area);
-
-    // Render popup background
-    let popup_block = Block::default()
-        .borders(Borders::ALL)
-        .title("Authentication Required")
-        .style(Style::default().fg(Color::Yellow).bg(Color::Black));
-
-    frame.render_widget(popup_block, popup_area);
+    popup_shell(
+        frame,
+        popup_area,
+        "Authentication Required",
+        Style::default().fg(Color::Yellow).bg(Color::Black),
+    );
 
     // Render message
     let message_area = Rect {

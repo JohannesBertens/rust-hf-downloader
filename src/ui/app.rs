@@ -11,7 +11,7 @@ pub use state::App;
 
 use crate::models::PopupMode;
 use color_eyre::Result;
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, EventStream};
 use futures::{FutureExt, StreamExt};
 use ratatui::{DefaultTerminal, Frame};
 use std::sync::atomic::Ordering;
@@ -388,11 +388,50 @@ impl App {
             .map(|(pane, _)| *pane);
     }
 
+    /// Dispatch one terminal event (W4.8 — the select! branch and the
+    /// drain loop dispatched verbatim-duplicated matches): key events go
+    /// through `on_key_event` on Press only; left-clicks and scrolls act
+    /// immediately with their position; mouse moves accumulate (overwrite)
+    /// into `last_mouse_position` for the coalesced hover update.
+    async fn process_terminal_event(
+        &mut self,
+        event: Event,
+        last_mouse_position: &mut Option<(u16, u16)>,
+    ) {
+        use crossterm::event::{KeyEventKind, MouseButton, MouseEventKind};
+
+        match event {
+            Event::Key(key) => {
+                if key.kind == KeyEventKind::Press {
+                    self.on_key_event(key).await;
+                }
+            }
+            Event::Mouse(mouse_event) => {
+                match mouse_event.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.handle_mouse_click(mouse_event.column, mouse_event.row);
+                    }
+                    MouseEventKind::ScrollUp => {
+                        self.handle_mouse_scroll(true, mouse_event.column, mouse_event.row);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.handle_mouse_scroll(false, mouse_event.column, mouse_event.row);
+                    }
+                    MouseEventKind::Moved => {
+                        // Queue for coalesced processing — only the latest
+                        // position survives
+                        *last_mouse_position = Some((mouse_event.column, mouse_event.row));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Handle crossterm events with event coalescing
     /// Drains all pending events, processing keys immediately but coalescing mouse moves
     async fn handle_crossterm_events(&mut self, event_stream: &mut EventStream) -> Result<()> {
-        use crossterm::event::{MouseButton, MouseEventKind};
-
         // Check for status messages from download tasks (non-blocking)
         if let Ok(mut rx) = self.engine.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
@@ -414,35 +453,7 @@ impl App {
         tokio::select! {
             maybe_event = event_stream.next().fuse() => {
                 if let Some(Ok(event)) = maybe_event {
-                    match event {
-                        Event::Key(key) => {
-                            if key.kind == KeyEventKind::Press {
-                                self.on_key_event(key).await;
-                            }
-                        }
-                        Event::Mouse(mouse_event) => {
-                            match mouse_event.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    // Process clicks immediately
-                                    self.handle_mouse_click(mouse_event.column, mouse_event.row);
-                                }
-                                MouseEventKind::ScrollUp => {
-                                    // Process scroll immediately with position
-                                    self.handle_mouse_scroll(true, mouse_event.column, mouse_event.row);
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    // Process scroll immediately with position
-                                    self.handle_mouse_scroll(false, mouse_event.column, mouse_event.row);
-                                }
-                                MouseEventKind::Moved => {
-                                    // Queue for coalesced processing
-                                    last_mouse_position = Some((mouse_event.column, mouse_event.row));
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.process_terminal_event(event, &mut last_mouse_position).await;
                 }
             }
             _ = delay => {
@@ -457,41 +468,8 @@ impl App {
             use futures::stream::StreamExt;
             match futures::poll!(event_stream.next()) {
                 std::task::Poll::Ready(Some(Ok(event))) => {
-                    match event {
-                        Event::Key(key) => {
-                            if key.kind == KeyEventKind::Press {
-                                self.on_key_event(key).await;
-                            }
-                        }
-                        Event::Mouse(mouse_event) => {
-                            match mouse_event.kind {
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    self.handle_mouse_click(mouse_event.column, mouse_event.row);
-                                }
-                                MouseEventKind::ScrollUp => {
-                                    self.handle_mouse_scroll(
-                                        true,
-                                        mouse_event.column,
-                                        mouse_event.row,
-                                    );
-                                }
-                                MouseEventKind::ScrollDown => {
-                                    self.handle_mouse_scroll(
-                                        false,
-                                        mouse_event.column,
-                                        mouse_event.row,
-                                    );
-                                }
-                                MouseEventKind::Moved => {
-                                    // Overwrite - only keep the latest position
-                                    last_mouse_position =
-                                        Some((mouse_event.column, mouse_event.row));
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.process_terminal_event(event, &mut last_mouse_position)
+                        .await;
                 }
                 std::task::Poll::Ready(Some(Err(_))) => {
                     // Error reading event, skip

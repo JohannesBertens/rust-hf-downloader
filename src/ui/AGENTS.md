@@ -9,7 +9,7 @@ UI is split into:
   over one file per panel: models_list, standard, gguf, hud, popups,
   options_popup, toolbar
 - app.rs: runtime loop; spawns background workers and manages frame redraw cadence
-- app/ submodule: state container, event handling, search/download flows
+- app/ submodule: state container, event handling, search/download flows; ui/app/filters.rs single-homes the filter/sort values and their cycle/step mutation rules
 - tree.rs: file-tree navigation model (not drawing) — see Tree operations
 
 Terminal stack: ratatui for rendering, crossterm for input, tui-input for text fields.
@@ -28,7 +28,7 @@ app.rs
 - Main loop draws, then conditionally calls async loaders flagged by state:
   • needs_search_models → App::search_models()
   • needs_load_quantizations → App::spawn_load_quantizations() and prefetch_adjacent_models()
-- handle_crossterm_events polls key events and status messages, updates popup mode and status
+- handle_crossterm_events polls key events and status messages, updates popup mode and status; both event branches (select! + drain loop) dispatch through one process_terminal_event helper (W4.8): Press-only keys, immediate click/scroll, mouse moves coalesced into the latest position for the throttled hover update
 
 render/ (mod.rs is the facade)
 - render_ui(Frame, RenderParams) lives in mod.rs: renders toolbar → results → bottom panels → status + both progress overlays
@@ -37,7 +37,7 @@ render/ (mod.rs is the facade)
 - GGUF path: render_gguf_panels → left groups (size, type, [downloaded]), right files with downloaded mark
 - Standard path: render_standard_panels → left metadata summary, right file tree (flattened with expansion)
 - Progress: render_activity_hud overlays queue/download/verification activity in a reserved HUD strip (height from activity_hud_height, hidden when idle)
-- Popups: search input, download path chooser, resume list, auth error steps, options dialog with 16 fields
+- Popups: search input, download path chooser, resume list, auth error steps, options dialog with 16 fields; all five share the centered_rect geometry (width clamped to terminal - 4, /2 integer centering) and the four non-options overlays share popup_shell (Clear + whole-block-styled Block returning the inner area). The options dialog intentionally diverges: it clamps its height against terminal - 4 and styles borders only (border_style) — pinned by snapshots (W4.8)
 
 Design notes
 - Rendering functions never mutate App; they read params built in app.rs run loop

@@ -33,7 +33,7 @@ use crate::models::{
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use std::collections::HashMap;
@@ -316,6 +316,40 @@ pub(super) fn panel_list<'a>(items: Vec<ListItem<'a>>, title: &'a str, style: St
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(">> ")
+}
+
+/// Centered popup Rect over `area` (W4.8 — the five popup prologues'
+/// shared geometry). Width is clamped to `area.width - 4` exactly as every
+/// historical site did; height is taken as given (only the options dialog
+/// ever clamped its height against `area.height - 4` — it does so before
+/// calling). Both axes center with plain integer division: every site used
+/// `/ 2`, so odd remainders truncate — no rounding variants existed.
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width.saturating_sub(4));
+    Rect {
+        x: area.width.saturating_sub(width) / 2,
+        y: area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+/// Shared popup prologue (W4.8): clear `area`, render the bordered titled
+/// block, and return the block's inner area. `style` styles the WHOLE
+/// block (borders + title) — the convention of the four `popups.rs`
+/// overlays. The options dialog deliberately does NOT use this helper's
+/// styling: it applies `border_style` (borders only, title unstyled) — a
+/// visible difference pinned by the options-popup snapshots — and keeps
+/// its own Clear + Block construction.
+pub(super) fn popup_shell(frame: &mut Frame, area: Rect, title: &str, style: Style) -> Rect {
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
 }
 
 // =====================================================================
