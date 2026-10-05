@@ -206,7 +206,6 @@ fn mouse_areas_register_in_lookup_order() {
 
 #[test]
 fn options_fields_table_pins_dialog_shape() {
-    use crate::fmt::size_full;
     use crate::models::AppOptions;
 
     // The table is the options dialog's single source (W4.7): 16 rows in
@@ -282,8 +281,13 @@ fn options_fields_table_pins_dialog_shape() {
         (OPTIONS_FIELDS[12].value)(&options, &dialog, &empty, &empty),
         "Disabled"
     );
+    // T5 (test-hardening): byte-size value accessor pinned against the
+    // LITERAL string — the former `size_full(options.min_chunk_size)`
+    // compared the renderer to its own input function (self-referential:
+    // any change to size_full passed vacuously). The default
+    // min_chunk_size is 5 × 1 MiB → binary-threshold "5.00 MB".
     assert_eq!(
         (OPTIONS_FIELDS[4].value)(&options, &dialog, &empty, &empty),
-        size_full(options.min_chunk_size)
+        "5.00 MB"
     );
 }

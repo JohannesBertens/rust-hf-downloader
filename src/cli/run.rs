@@ -657,9 +657,13 @@ mod tests {
         assert_eq!(streamed.done_bytes, recounted.done_bytes);
         assert_eq!(streamed.auth_required, recounted.auth_required);
         assert_eq!(streamed.failures, recounted.failures);
-        assert_eq!(streamed.hash_mismatch, recounted.hash_mismatch);
-        assert_eq!(streamed.verified, recounted.verified);
-        assert_eq!(streamed.mismatches, recounted.mismatches);
+        // (hash_mismatch / verified / mismatches are NOT compared here:
+        // this fixture streams download outcomes only, so both sides are
+        // trivially 0/empty — a vacuous 0 == 0. The verification counters
+        // are pinned against literals by `apply_verify_outcome_counters_`
+        // `and_human_lines_are_literal` below; they are not part of the
+        // streaming-vs-recount agreement because only `apply_verify_outcome`
+        // ever touches them.)
         // The recount additionally installs the authoritative list (the
         // publish gate's input) — streaming never populates it.
         assert_eq!(recounted.outcomes.len(), outcomes.len());
@@ -668,6 +672,74 @@ mod tests {
         // One human line per streamed outcome (2 completes + 2 failures +
         // 1 auth error + 1 already-exists = 6).
         assert_eq!(sink.take().lines().count(), 6);
+    }
+
+    /// T2 (test-hardening): drive [`apply_verify_outcome`] over every
+    /// `VerifyOutcome` variant and pin BOTH the tally counters and the
+    /// exact human stderr bytes — literal expectations, no self-comparison.
+    #[test]
+    fn apply_verify_outcome_counters_and_human_lines_are_literal() {
+        let sink = Sink::default();
+        let mut reporter = super::super::report::Reporter::new_with_stderr(
+            false,
+            false,
+            super::super::report::ProgressMode::None,
+            Box::new(sink.clone()),
+        );
+        let mut tally = RunTally::default();
+
+        apply_verify_outcome(
+            &VerifyOutcome::Ok {
+                filename: "a.gguf".to_string(),
+            },
+            &mut reporter,
+            &mut tally,
+        );
+        apply_verify_outcome(
+            &VerifyOutcome::Mismatch {
+                filename: "b.gguf".to_string(),
+                expected_sha256: "dead".to_string(),
+                actual_sha256: "beef".to_string(),
+            },
+            &mut reporter,
+            &mut tally,
+        );
+        apply_verify_outcome(
+            &VerifyOutcome::Error {
+                filename: "c.gguf".to_string(),
+                reason: "read failed".to_string(),
+            },
+            &mut reporter,
+            &mut tally,
+        );
+        apply_verify_outcome(
+            &VerifyOutcome::Missing {
+                filename: "d.gguf".to_string(),
+            },
+            &mut reporter,
+            &mut tally,
+        );
+
+        // Literal counters: Ok bumps `verified`, Mismatch bumps
+        // `hash_mismatch` and records the filename, Error/Missing touch
+        // NEITHER counter (error-event only — the exit-code contribution
+        // of a failed verification run comes from the mismatch arm and the
+        // CLI's own summary, pinned in cli_exit_codes).
+        assert_eq!(tally.verified, 1);
+        assert_eq!(tally.hash_mismatch, 1);
+        assert_eq!(tally.mismatches, vec!["b.gguf".to_string()]);
+        assert_eq!(tally.verify_outcomes.len(), 4);
+
+        // Literal human lines, in emission order.
+        assert_eq!(
+            sink.take(),
+            concat!(
+                " ✓ verified: a.gguf\n",
+                " ✗ verified hash mismatch: b.gguf\n",
+                "error [verification_error]: c.gguf: read failed\n",
+                "error [verification_error]: d.gguf: file not found for verification\n",
+            )
+        );
     }
 
     #[test]

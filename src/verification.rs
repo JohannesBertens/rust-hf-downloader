@@ -388,7 +388,16 @@ mod tests {
     /// ~1% on multi-GB files). The counter must now track the true running
     /// total at every checkpoint.
     #[tokio::test]
+    // Holding the (std) env mutex across the awaits below is intentional:
+    // this test sets non-default VERIFICATION_CONFIG values and samples
+    // progress mid-flight, so it must be serialized against any test that
+    // runs `config::apply_options` (which writes the same globals) — the
+    // T1/W-final matrix and options-dialog tests all take this mutex.
+    #[allow(clippy::await_holding_lock)]
     async fn progress_counter_tracks_actual_bytes() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         const TOTAL: usize = 64 * 1024 * 1024; // 64 MiB
         let path = temp_file("progress", TOTAL, 0xCD);
 

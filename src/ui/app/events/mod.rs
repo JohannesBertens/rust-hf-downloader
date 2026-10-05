@@ -667,35 +667,9 @@ mod tests {
         assert_eq!(tree_nav(3, Some(5), false), Some(4));
     }
 
-    /// The three cursor families are table-identical — the property that
-    /// lets ONE advance() serve all of them.
-    #[test]
-    fn all_families_share_one_table() {
-        for len in [0usize, 1, 3] {
-            for initial in [None, Some(0), Some(len.saturating_sub(1)), Some(len + 2)] {
-                for forward in [true, false] {
-                    // Skip first/last variants that collapse onto other rows.
-                    if initial == Some(len + 2) && len == 0 {
-                        continue;
-                    }
-                    assert_eq!(
-                        quant_nav(len, initial, forward),
-                        file_nav(len, initial, forward),
-                        "quant vs file: len={} initial={:?} forward={}",
-                        len,
-                        initial,
-                        forward
-                    );
-                    assert_eq!(
-                        quant_nav(len, initial, forward),
-                        tree_nav(len, initial, forward),
-                        "quant vs tree: len={} initial={:?} forward={}",
-                        len,
-                        initial,
-                        forward
-                    );
-                }
-            }
-        }
-    }
+    // (T3, test-hardening: the former `all_families_share_one_table` —
+    // comparing the three navigation families' outputs to each other —
+    // was deleted: post-W4.6 all three drive the ONE `advance()`, so the
+    // comparison pinned nothing the per-family literal tables above
+    // don't already pin.)
 }

@@ -338,39 +338,41 @@ fn token_precedence_flag_env_then_file() {
     );
 }
 
-// --- Token-precedence matrix (Runner gate: W3.7+W4.2) ---------------------
+// --- Token-precedence matrix (Runner gate: W3.7+W4.2, rebound to the
+// PRODUCTION resolvers by the T1 test-hardening pass) -----------------
 //
 // The token precedence `--token` flag > `$HF_TOKEN` env > config file is
-// duplicated across four subcommand bootstrap sites:
+// consumed by exactly TWO production functions (post-W4.2 Runner):
 //
-// | site                                | composition (transcribed below)             |
-// |-------------------------------------|----------------------------------------------|
-// | `run_download` (download_cmd.rs ~60)| load_config → output override → rate-limit   |
-// |                                     | overrides → merge_token → writeback →        |
-// |                                     | apply_options → no-verify store              |
-// | `run_hf_cache_sync` (hf_cache/sync) | same minus the output-dir override           |
-// | `run_hf_cache_path` (hf_cache/path) | load_config → merge_token (partial variant)  |
-// | `run_search` (search_cmd.rs ~77)    | load_config → merge_token (partial variant)  |
+// | call sites                                    | production fn             |
+// |-----------------------------------------------|---------------------------|
+// | `run_download` (download_cmd.rs),             | `run::load_run_config`    |
+// | `run_hf_cache_sync` (hf_cache/sync.rs)        | (full bootstrap: load →   |
+// |                                               | output/rate overrides →   |
+// |                                               | merge → writeback →       |
+// |                                               | apply_options →           |
+// |                                               | no-verify store)          |
+// | `run_hf_cache_path` (hf_cache/path.rs ~51),   | `run::resolve_run_token`  |
+// | `run_search` (search_cmd.rs ~80)              | over config-loaded        |
+// |                                               | options                   |
 //
-// Each `*_site_token` fn below is a verbatim transcription of its site's
-// composition, reduced to the token-relevant statements: the output-dir
-// override touches `default_directory` only, `apply_rate_limit_overrides`
-// touches rate-limit fields only, and `apply_options`/the no-verify store
-// mutate engine atomics AFTER the merge without reading or writing the
-// token (those two steps are the documented elision — they need a tokio
-// runtime and pollute the global engine atomics). The four tests assert
-// the FULL matrix {flag set/empty/unset} × {env set/empty/unset} ×
-// {config file with token / file without token / no file}; the cross-site
-// test then proves all four compositions resolve IDENTICALLY on every
-// cell (the divergence detector the extraction gate needs).
+// The two tests below drive THOSE functions over the full 27-cell grid
+// {flag set/empty/unset} × {env set/empty/unset} × {config file with
+// token / file without token / no file} and assert the literal expected
+// value per cell (the expected-value table IS the falsifiable oracle —
+// no hand-copied composition is involved anywhere). They replace the
+// pre-T1 tests, which transcribed each site's composition by hand and
+// therefore could not fail on drift in the production call sites
+// themselves; the old cross-site "all four compositions agree" test was
+// unfalsifiable in the same way (it compared the hand copies to each
+// other) and is deleted — both families here compare against literals.
 //
 // §8.8 subtlety this matrix pins: `AppOptions::default()` itself reads
 // `HF_TOKEN`, so the "no config file" column carries the env token in
 // `options.hf_token` BEFORE `merge_token` runs. That dual read is
 // unobservable through the resolved token (the env axis wins over the
 // file axis either way), which is exactly why it is declared safe to keep
-// (removing it is a behavior change requiring sign-off, not this refactor).
-
+// (removing it is a behavior change requiring sign-off, not this pass).
 /// Restore one env var on drop (matrix cells mutate the ambient env; tests
 /// that do so share `paths::ENV_MUTEX`).
 struct VarGuard {
@@ -460,147 +462,124 @@ fn install_matrix_cell(
     (tmp, g1, g2)
 }
 
-/// Run one matrix cell: install the ambient state, resolve the token
-/// through `site`, and assert the expected value.
-fn assert_matrix_cell(
-    site: fn(Option<String>) -> Option<String>,
-    flag: Option<&str>,
-    env: Option<&str>,
-    config: ConfigFile,
-) {
+/// Iterate the full 27-cell matrix: {flag: "flag"/""/unset} ×
+/// {env: "env"/""/unset} × {config: token file / tokenless file / no file}.
+fn token_matrix_cells(
+) -> impl Iterator<Item = (Option<&'static str>, Option<&'static str>, ConfigFile)> {
+    [
+        (Some("flag"), Some("env"), ConfigFile::WithToken),
+        (Some("flag"), Some("env"), ConfigFile::WithoutToken),
+        (Some("flag"), Some("env"), ConfigFile::NoFile),
+        (Some("flag"), Some(""), ConfigFile::WithToken),
+        (Some("flag"), Some(""), ConfigFile::WithoutToken),
+        (Some("flag"), Some(""), ConfigFile::NoFile),
+        (Some("flag"), None, ConfigFile::WithToken),
+        (Some("flag"), None, ConfigFile::WithoutToken),
+        (Some("flag"), None, ConfigFile::NoFile),
+        (Some(""), Some("env"), ConfigFile::WithToken),
+        (Some(""), Some("env"), ConfigFile::WithoutToken),
+        (Some(""), Some("env"), ConfigFile::NoFile),
+        (Some(""), Some(""), ConfigFile::WithToken),
+        (Some(""), Some(""), ConfigFile::WithoutToken),
+        (Some(""), Some(""), ConfigFile::NoFile),
+        (Some(""), None, ConfigFile::WithToken),
+        (Some(""), None, ConfigFile::WithoutToken),
+        (Some(""), None, ConfigFile::NoFile),
+        (None, Some("env"), ConfigFile::WithToken),
+        (None, Some("env"), ConfigFile::WithoutToken),
+        (None, Some("env"), ConfigFile::NoFile),
+        (None, Some(""), ConfigFile::WithToken),
+        (None, Some(""), ConfigFile::WithoutToken),
+        (None, Some(""), ConfigFile::NoFile),
+        (None, None, ConfigFile::WithToken),
+        (None, None, ConfigFile::WithoutToken),
+        (None, None, ConfigFile::NoFile),
+    ]
+    .into_iter()
+}
+
+/// Family 1 — the query-only sites' PRODUCTION composition, run on every
+/// cell: `hf_cache/path.rs` is literally
+/// `resolve_run_token(args.token, &crate::config::load_config())`, and
+/// `search_cmd.rs` loads the same config then calls the same resolver.
+/// No hand-copied statements: this drives the real functions the real
+/// callers use.
+#[test]
+fn token_matrix_resolve_run_token_matches_precedence_table() {
+    for (flag, env, config) in token_matrix_cells() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (tmp, _g1, _g2) = install_matrix_cell(env, config, "resolve");
+
+        let options = crate::config::load_config();
+        let got = super::run::resolve_run_token(flag.map(|s| s.to_string()), &options);
+        let want = expected_token(flag, env, config);
+        assert_eq!(
+            got, want,
+            "resolve_run_token cell (flag={flag:?}, env={env:?}, config={config:?})"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+/// Family 2 — the engine-driving sites' PRODUCTION bootstrap, run on
+/// every cell: `run::load_run_config` is exactly what `run_download`
+/// (with no output/rate/no-verify flags) and `run_hf_cache_sync` call,
+/// and it returns the token pair (options.hf_token writeback, resolved
+/// token) both sites consume. Assertions are literal per cell, so the
+/// writeback (`options.hf_token == token`) is pinned too.
+///
+/// Full-bootstrap side effects are real but contained: `apply_options`
+/// needs a tokio runtime (hence `#[tokio::test]`) and writes the shared
+/// engine atomics — the pre-test snapshot is restored afterwards, and
+/// every other atomics-mutating unit test shares `ENV_MUTEX` (see
+/// `config::EngineGlobalsSnapshot`), so nothing leaks. The spawned
+/// rate-limiter update task targets values the snapshot restores; no
+/// in-process unit test reads the limiter.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn token_matrix_load_run_config_returns_written_back_pair() {
     let _env_lock = crate::paths::ENV_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (tmp, _g1, _g2) = install_matrix_cell(env, config, "matrix");
+    let globals = crate::config::EngineGlobalsSnapshot::capture();
 
-    let got = site(flag.map(|s| s.to_string()));
-    let want = expected_token(flag, env, config);
-    assert_eq!(
-        got, want,
-        "cell (flag={flag:?}, env={env:?}, config={config:?})"
-    );
+    for (flag, env, config) in token_matrix_cells() {
+        let (tmp, _g1, _g2) = install_matrix_cell(env, config, "loadrun");
 
+        let (options, token) = super::run::load_run_config(
+            flag.map(|s| s.to_string()),
+            None, // no --output (neither token- nor engine-relevant here)
+            false,
+            false,
+            None,
+            false,
+        );
+        let want = expected_token(flag, env, config);
+        assert_eq!(
+            token, want,
+            "load_run_config token cell (flag={flag:?}, env={env:?}, config={config:?})"
+        );
+        assert_eq!(
+            options.hf_token, want,
+            "load_run_config writeback cell (flag={flag:?}, env={env:?}, config={config:?})"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Spot cell: `--no-verify` runs the post-merge engine store but must
+    // not touch the token pair (the historically documented elision, now
+    // actually executed and pinned).
+    let (tmp, _g1, _g2) = install_matrix_cell(None, ConfigFile::WithToken, "noverify");
+    let (options, token) = super::run::load_run_config(None, None, false, false, None, true);
+    assert_eq!(token.as_deref(), Some("cfg"));
+    assert_eq!(options.hf_token.as_deref(), Some("cfg"));
     let _ = std::fs::remove_dir_all(&tmp);
-}
 
-/// The full 27-cell matrix through one site composition.
-fn assert_token_matrix(site: fn(Option<String>) -> Option<String>) {
-    for flag in [Some("flag"), Some(""), None] {
-        for env in [Some("env"), Some(""), None] {
-            for config in [
-                ConfigFile::WithToken,
-                ConfigFile::WithoutToken,
-                ConfigFile::NoFile,
-            ] {
-                assert_matrix_cell(site, flag, env, config);
-            }
-        }
-    }
-}
-
-/// `run_download`'s config bootstrap (download_cmd.rs step 1), verbatim
-/// transcription reduced to the token-relevant statements (see the section
-/// comment for the elisions). Non-token flag args take their no-flag
-/// defaults; the token axis is the matrix variable.
-fn download_site_token(flag: Option<String>) -> Option<String> {
-    let mut options = crate::config::load_config();
-    if let Some(dir) = None::<&String> {
-        options.default_directory = dir.clone(); // site: `if let Some(dir) = &args.output`
-    }
-    apply_rate_limit_overrides(&mut options, false, false, None);
-    merge_token(
-        flag,
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    )
-}
-
-/// `run_hf_cache_sync`'s config bootstrap (hf_cache/sync.rs step 1) — the
-/// download composition minus the output-dir override.
-fn hf_cache_sync_site_token(flag: Option<String>) -> Option<String> {
-    let mut options = crate::config::load_config();
-    apply_rate_limit_overrides(&mut options, false, false, None);
-    merge_token(
-        flag,
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    )
-}
-
-/// `run_hf_cache_path`'s partial bootstrap (hf_cache/path.rs, online
-/// fallback): load + merge only — no rate-limit flags, no `apply_options`.
-fn hf_cache_path_site_token(flag: Option<String>) -> Option<String> {
-    let options = crate::config::load_config();
-    merge_token(
-        flag,
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    )
-}
-
-/// `run_search`'s partial bootstrap (search_cmd.rs) — same shape as the
-/// hf-cache path variant.
-fn search_site_token(flag: Option<String>) -> Option<String> {
-    let options = crate::config::load_config();
-    merge_token(
-        flag,
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    )
-}
-
-#[test]
-fn token_matrix_download_flag_env_config() {
-    assert_token_matrix(download_site_token);
-}
-
-#[test]
-fn token_matrix_hf_cache_sync_flag_env_config() {
-    assert_token_matrix(hf_cache_sync_site_token);
-}
-
-#[test]
-fn token_matrix_hf_cache_path_flag_env_config() {
-    assert_token_matrix(hf_cache_path_site_token);
-}
-
-#[test]
-fn token_matrix_search_flag_env_config() {
-    assert_token_matrix(search_site_token);
-}
-
-#[test]
-fn token_matrix_all_four_sites_agree_on_every_cell() {
-    // The extraction gate's divergence detector: if any site's composition
-    // resolved a different token for any cell, unifying them would change
-    // behavior. All four must agree cell-by-cell (and each already matches
-    // the expected-value table above).
-    for flag in [Some("flag"), Some(""), None] {
-        for env in [Some("env"), Some(""), None] {
-            for config in [
-                ConfigFile::WithToken,
-                ConfigFile::WithoutToken,
-                ConfigFile::NoFile,
-            ] {
-                let _env_lock = crate::paths::ENV_MUTEX
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                let (tmp, _g1, _g2) = install_matrix_cell(env, config, "xsite");
-                let flag_owned = flag.map(|s| s.to_string());
-                let results = [
-                    download_site_token(flag_owned.clone()),
-                    hf_cache_sync_site_token(flag_owned.clone()),
-                    hf_cache_path_site_token(flag_owned.clone()),
-                    search_site_token(flag_owned),
-                ];
-                let _ = std::fs::remove_dir_all(&tmp);
-                assert!(
-                    results.windows(2).all(|w| w[0] == w[1]),
-                    "site divergence at (flag={flag:?}, env={env:?}, config={config:?}): {results:?}"
-                );
-            }
-        }
-    }
+    globals.restore();
 }
 
 // --- CLI parsing --------------------------------------------------------
