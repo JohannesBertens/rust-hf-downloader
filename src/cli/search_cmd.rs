@@ -6,8 +6,9 @@ use super::args::ModelDto;
 use super::args::{merge_token, SearchArgs};
 use super::events::Event;
 use super::report::truncate_path;
+use super::report::ProgressMode;
 use super::report::Reporter;
-use super::{ProgressMode, EXIT_FAILURE, EXIT_OK};
+use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
 /// defaults the TUI's filter toolbar starts with).

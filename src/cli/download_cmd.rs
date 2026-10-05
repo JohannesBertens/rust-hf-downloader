@@ -4,17 +4,16 @@
 //! production sites (TUI + download + hf-cache sync).
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::args::{apply_rate_limit_overrides, merge_token, valid_model_id, DownloadArgs};
 use super::events::{Event, FileDto, OverallProgress, Summary};
-use super::report::{ProgressMode, Reporter};
+use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, FileSpec, Selector};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
-use crate::engine::{self, EngineState, ManagerHandle};
+use crate::engine::{EngineState, ManagerHandle};
 use crate::models::{FileOutcome, VerifyOutcome};
 
 /// Everything the monitor loop accumulates for the summary and exit code.
