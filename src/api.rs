@@ -85,7 +85,8 @@ pub async fn fetch_models_filtered(
         direction
     );
 
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    let response =
+        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
     let mut models: Vec<ModelInfo> = response.json().await?;
 
     // Client-side filtering (API doesn't support these filters)
@@ -119,7 +120,8 @@ pub async fn fetch_model_metadata(
 ) -> Result<ModelMetadata, reqwest::Error> {
     let url = format!("{}/api/models/{}", api_base(), model_id);
 
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    let response =
+        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
     // Surface HTTP errors (unknown repo, auth) as status errors so callers
     // can distinguish not_found/auth from decode failures.
     let response = response.error_for_status()?;
@@ -174,7 +176,8 @@ pub async fn resolve_revision_sha(
     token: Option<&String>,
 ) -> Result<String, reqwest::Error> {
     let url = revision_url(model_id, revision);
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    let response =
+        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
     // Unknown revision → 404 → not_found for the caller (issue #28).
     let response = response.error_for_status()?;
     let info: RevisionInfo = response.json().await?;
@@ -203,7 +206,9 @@ fn fetch_recursive_tree<'a>(
             )
         };
 
-        let response = crate::http_client::get_with_optional_token(&tree_url, token).await?;
+        let response =
+            crate::http_client::get_with_optional_token(&tree_url, token.map(String::as_str))
+                .await?;
         // Unknown revision → 404 → not_found for the caller (issue #28).
         let response = response.error_for_status()?;
         let items: Vec<ModelFile> = response.json().await?;
@@ -508,7 +513,8 @@ pub async fn fetch_multipart_sha256s(
     // Single API call to get all files
     let url = format!("{}/api/models/{}/tree/{}", api_base(), model_id, revision);
 
-    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    let response =
+        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
     let files: Vec<ModelFile> = response.json().await?;
 
     // Create lookup map for fast matching

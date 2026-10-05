@@ -7,7 +7,7 @@ use std::time::Duration;
 
 /// Build an HTTP client with optional token
 pub fn build_client_with_token(
-    token: Option<&String>,
+    token: Option<&str>,
     timeout: Option<Duration>,
 ) -> Result<Client, reqwest::Error> {
     let mut builder = Client::builder();
@@ -35,7 +35,7 @@ pub fn build_client_with_token(
 /// If token is None or empty string, makes unauthenticated request
 pub async fn get_with_optional_token(
     url: &str,
-    token: Option<&String>,
+    token: Option<&str>,
 ) -> Result<reqwest::Response, reqwest::Error> {
     // Check if token is provided AND non-empty
     let has_token = token.is_some_and(|t| !t.is_empty());

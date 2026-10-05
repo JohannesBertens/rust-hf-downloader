@@ -461,7 +461,7 @@ async fn download_chunked(
         .download_timeout_secs
         .load(Ordering::Relaxed);
     let client = crate::http_client::build_client_with_token(
-        hf_token.as_ref(),
+        hf_token.as_deref(),
         Some(std::time::Duration::from_secs(timeout_secs)),
     )?;
 
