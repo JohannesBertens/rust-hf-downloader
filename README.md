@@ -710,7 +710,16 @@ rust-hf-downloader/
 ├── changelog/              # Release notes for all versions
 └── src/
     ├── main.rs             # Entry point (TUI by default; `download` subcommand dispatch)
-    ├── cli.rs              # One-shot download CLI (args, resolution, reporters)
+    ├── cli/                # One-shot download CLI, split by section:
+    │   ├── mod.rs          # Cli/Command clap roots, run() dispatcher
+    │   ├── args.rs         # Argument structs + parse/merge helpers
+    │   ├── resolve.rs      # File selection/resolution (pure)
+    │   ├── events.rs       # NDJSON event schema
+    │   ├── report.rs       # Human/JSON reporters, --progress modes
+    │   ├── download_cmd.rs # download orchestration + drain
+    │   ├── search_cmd.rs   # search subcommand
+    │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline
+    │   └── update_cmd.rs   # self-update subcommand
     ├── engine.rs           # Shared download engine (manager + verification bootstrap)
     ├── models.rs           # Data structures & types
     ├── config.rs           # Configuration persistence (v0.9.0)

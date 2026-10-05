@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Internal**: `src/cli.rs` (4.4k lines) split into a `src/cli/` module
+  directory (mod/args/resolve/events/report/download_cmd/search_cmd/
+  hf_cache_cmd/update_cmd/tests) — pure move, no behavior change; public
+  paths (`cli::Cli`, `cli::run`, `cli::EXIT_*`) unchanged, help output
+  byte-identical, insta snapshots moved to `src/cli/snapshots/` with
+  names intact.
 - **Fixed**: `--progress` no longer renders `[default: auto]` twice in
   `--help`; doc examples of the aggregate progress line now match the real
   output format (two-decimal sizes, one-decimal speed); the
