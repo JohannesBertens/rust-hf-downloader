@@ -15,7 +15,7 @@ A new `--progress <MODE>` flag on `download` and `hf-cache sync`
   rewrites in piped output):
 
   ```text
-  [3/36 files 43% │ 71.5/166.3 GB │ 88 MB/s eta 18m12s] ▸ tensors/model-00021-of-00036.safetensors 61%
+  [3/36 files 43% │ 71.51 GB/166.31 GB │ 88.0 MB/s eta 18m23s] ▸ tensors/model-00021-of-00036.safetensors 61%
   verifying: 2 in flight, 41 verified
   ```
 

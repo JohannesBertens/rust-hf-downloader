@@ -16,7 +16,17 @@ The application follows a modular architecture with clear separation of concerns
 ```
 src/
 ├── main.rs           # Entry point (~60 lines): `download`/`search` subcommand → cli::run; no args → TUI
-├── cli.rs            # One-shot CLI: `download` + `search` + `update` + `hf-cache` subcommands (clap), file resolution, human/JSON reporters
+├── cli/              # One-shot CLI (`download` + `search` + `update` + `hf-cache` subcommands), split by section (v2.13.1):
+│   ├── mod.rs        # Cli/Command clap roots, EXIT_* consts, run() dispatcher, re-exports
+│   ├── args.rs       # All *Args structs + parse/merge helpers (parse_preset, merge_token, …)
+│   ├── resolve.rs    # File resolution (FileSpec/Selector/parse_selector/resolve_files) — pure
+│   ├── events.rs     # Stable additive-only NDJSON event schema (Event/OverallProgress)
+│   ├── report.rs     # Reporter (human/NDJSON), --progress modes, progress-line formatters
+│   ├── download_cmd.rs # run_download + RunTally + monitor/poll_once drain (lock ordering!)
+│   ├── search_cmd.rs # Query-only search (no engine)
+│   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline (selection, sync lock, publish)
+│   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
+│   └── tests.rs      # cli::tests — insta snapshots in src/cli/snapshots/
 ├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, drain signals
 ├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.

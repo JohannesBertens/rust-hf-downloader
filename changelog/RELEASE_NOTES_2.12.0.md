@@ -13,7 +13,7 @@ single rewritten line — aggregate first, active file demoted to name +
 percent:
 
 ```text
-[3/17 files 43% │ 12.6/29.1 GB │ 88 MB/s eta 2m41s] ▸ model-00004-of-00017.safetensors 61%
+[3/17 files 43% │ 12.63 GB/29.06 GB │ 88.0 MB/s eta 3m11s] ▸ model-00004-of-00017.safetensors 61%
 ```
 
 - The aggregate percent is clamped at 100 %, and the line is now erased
@@ -36,9 +36,6 @@ downloaded_bytes`.
   per-file outcome counters; `poll_once` derives `OverallProgress` while
   holding only its pre-existing `try_lock`s, so the AGENTS.md lock
   hierarchy is untouched.
-- Verified by a dual-model review pass (accounting/locking audit +
-  cross-model rendering review); the one review blocker (a percent
-  double-rounding regression) was fixed before release.
 - UI render snapshots are now **version-stable**: an insta filter
   normalizes the footer version to `v<VERSION>`, so version bumps no
   longer rewrite 7+ TUI snapshots — the version lives only in

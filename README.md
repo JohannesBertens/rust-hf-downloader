@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.13.0
+# Rust HF Downloader v2.13.1
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -469,7 +469,7 @@ done/total, overall %, bytes, speed, and overall ETA — with the active
 file demoted to name + percent:
 
 ```text
-[3/17 files 43% │ 12.6/29.1 GB │ 88 MB/s eta 2m41s] ▸ model-00004-of-00017.safetensors 61%
+[3/17 files 43% │ 12.63 GB/29.06 GB │ 88.0 MB/s eta 3m11s] ▸ model-00004-of-00017.safetensors 61%
 ```
 
 `--progress` controls human progress output (stderr): `auto` (default)
@@ -710,7 +710,16 @@ rust-hf-downloader/
 ├── changelog/              # Release notes for all versions
 └── src/
     ├── main.rs             # Entry point (TUI by default; `download` subcommand dispatch)
-    ├── cli.rs              # One-shot download CLI (args, resolution, reporters)
+    ├── cli/                # One-shot download CLI, split by section:
+    │   ├── mod.rs          # Cli/Command clap roots, run() dispatcher
+    │   ├── args.rs         # Argument structs + parse/merge helpers
+    │   ├── resolve.rs      # File selection/resolution (pure)
+    │   ├── events.rs       # NDJSON event schema
+    │   ├── report.rs       # Human/JSON reporters, --progress modes
+    │   ├── download_cmd.rs # download orchestration + drain
+    │   ├── search_cmd.rs   # search subcommand
+    │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline
+    │   └── update_cmd.rs   # self-update subcommand
     ├── engine.rs           # Shared download engine (manager + verification bootstrap)
     ├── models.rs           # Data structures & types
     ├── config.rs           # Configuration persistence (v0.9.0)
