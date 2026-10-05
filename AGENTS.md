@@ -51,6 +51,7 @@ src/
     │   ├── models.rs     # Model browsing logic (search, details, quantizations)
     │   ├── downloads.rs  # Download management (trigger, confirm, resume/delete)
     │   └── verification.rs # Verification UI (manual verify action)
+    ├── tree.rs       # File-tree navigation model (flatten_tree_for_navigation / toggle_node_expansion / count_tree_files), shared by render + app/events + app/downloads
     └── render.rs     # UI rendering functions
 ```
 

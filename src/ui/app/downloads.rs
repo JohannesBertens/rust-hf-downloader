@@ -4,6 +4,7 @@ use crate::engine::{EnqueueOutcome, EnqueuePolicy, QueuedDownload};
 use crate::models::*;
 use crate::paths::sanitize::validate_and_sanitize_path;
 use crate::registry;
+use crate::ui::tree::count_tree_files;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tui_input::Input;
@@ -82,7 +83,7 @@ impl App {
                 let Some(selected) = self.file_tree_state.selected() else {
                     return;
                 };
-                let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
+                let flat = crate::ui::tree::flatten_tree_for_navigation(&tree);
                 let Some(node) = flat.get(selected) else {
                     return;
                 };
@@ -533,16 +534,6 @@ fn model_root_or(base: &str, model_id: &str, fallback: PathBuf) -> PathBuf {
     match parts[..] {
         [author, name] => PathBuf::from(base).join(author).join(name),
         _ => fallback,
-    }
-}
-
-/// Recursively count file nodes under a tree node (for the download popup
-/// label).
-fn count_tree_files(node: &FileTreeNode) -> usize {
-    if node.is_dir {
-        node.children.iter().map(count_tree_files).sum()
-    } else {
-        1
     }
 }
 

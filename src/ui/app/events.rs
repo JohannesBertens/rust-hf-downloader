@@ -1,5 +1,6 @@
 use super::state::App;
 use crate::models::*;
+use crate::ui::tree::toggle_node_expansion;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 
@@ -927,7 +928,7 @@ impl App {
         let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
-            let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
+            let flat = crate::ui::tree::flatten_tree_for_navigation(&tree);
             let items_len = flat.len();
 
             if items_len == 0 {
@@ -953,7 +954,7 @@ impl App {
         let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
-            let flat = crate::ui::render::flatten_tree_for_navigation(&tree);
+            let flat = crate::ui::tree::flatten_tree_for_navigation(&tree);
             let items_len = flat.len();
 
             if items_len == 0 {
@@ -984,7 +985,7 @@ impl App {
         let mut tree = self.file_tree.read().clone();
 
         if let Some(ref mut tree) = tree {
-            let flat = crate::ui::render::flatten_tree_for_navigation(tree);
+            let flat = crate::ui::tree::flatten_tree_for_navigation(tree);
 
             if selected_idx < flat.len() {
                 let selected_path = flat[selected_idx].path.clone();
@@ -997,21 +998,4 @@ impl App {
             }
         }
     }
-}
-
-/// Helper function to toggle a node's expansion state by path
-fn toggle_node_expansion(node: &mut crate::models::FileTreeNode, target_path: &str) -> bool {
-    for child in &mut node.children {
-        if child.path == target_path {
-            if child.is_dir {
-                child.expanded = !child.expanded;
-            }
-            return true;
-        }
-
-        if child.is_dir && toggle_node_expansion(child, target_path) {
-            return true;
-        }
-    }
-    false
 }

@@ -38,7 +38,9 @@ render.rs
 Design notes
 - Rendering functions never mutate App; they read params built in app.rs run loop
 - Large lists: keep allocations local; format helpers in utils.rs
-- Tree operations: render flattens FileTreeNode; navigation uses matching helper in app/events
+- Tree operations: ui/tree.rs is the single home for the navigation model
+  • flatten_tree_for_navigation, toggle_node_expansion, count_tree_files
+  • render draws the flattened list; app/events + app/downloads consume the same helpers
 
 Where to add UI features
 - New pane/section → add pure renderer in render.rs and pass data via RenderParams

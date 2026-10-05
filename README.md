@@ -745,6 +745,7 @@ rust-hf-downloader/
         │   ├── models.rs       # Model browsing logic
         │   ├── downloads.rs    # Download management
         │   └── verification.rs # Verification UI
+        ├── tree.rs         # File-tree navigation model (flatten/toggle/count)
         └── render.rs       # TUI rendering logic
 ```
 

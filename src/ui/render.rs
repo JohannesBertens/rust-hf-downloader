@@ -2,6 +2,7 @@ use crate::models::{
     DownloadProgress, FileTreeNode, FocusedPane, InputMode, ModelDisplayMode, ModelInfo,
     ModelMetadata, QuantizationGroup, QuantizationInfo, QueueItemSummary, VerificationProgress,
 };
+use crate::ui::tree::{count_tree_files, flatten_tree};
 use crate::utils::{format_number, format_size};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -511,7 +512,7 @@ fn render_file_tree_panel(
                         .size
                         .map(format_size)
                         .unwrap_or_else(|| String::from("-"));
-                    let file_count = count_files(&node);
+                    let file_count = count_tree_files(&node);
 
                     spans.push(Span::raw(format!("  {}", size_str)));
                     spans.push(Span::styled(
@@ -552,36 +553,6 @@ fn render_file_tree_panel(
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::FileTree, area));
     frame.render_stateful_widget(tree_list, area, file_tree_state);
-}
-
-/// Count total number of files within a node (recursive)
-fn count_files(node: &FileTreeNode) -> usize {
-    if node.is_dir {
-        node.children.iter().map(count_files).sum()
-    } else {
-        1
-    }
-}
-
-/// Flatten tree into a list for rendering
-fn flatten_tree(node: &FileTreeNode) -> Vec<FileTreeNode> {
-    let mut result = Vec::new();
-    flatten_tree_recursive(node, &mut result);
-    result
-}
-
-fn flatten_tree_recursive(node: &FileTreeNode, result: &mut Vec<FileTreeNode>) {
-    for child in &node.children {
-        result.push(child.clone());
-        if child.is_dir && child.expanded {
-            flatten_tree_recursive(child, result);
-        }
-    }
-}
-
-/// Public helper for flattening tree (used by events.rs for navigation)
-pub fn flatten_tree_for_navigation(node: &FileTreeNode) -> Vec<FileTreeNode> {
-    flatten_tree(node)
 }
 
 struct GgufPanelContext<'a> {
