@@ -208,3 +208,15 @@ All work lands as sequential commits on `refactor/readability-maintainability-re
 | 7dc6129 | H5 | style_run signatures pin focus/hover/selection/popup styles (previously unpinned: TestBackend Display is symbols-only); 4-size matrix; HUD threshold clamp pinned; +11 tests (298/0) |
 
 Group 1 (P0 + harness) complete at 298/0. Known residual: ~1% pre-existing e2e flake (unattributed; guard = name-and-rerun policy). Workers: local big-ai GLM-5.3-Flash (slices 1-6), remote zai glm-5.3 (H5 onward, after big-ai retirement).
+
+**Group 2 (Phase 1 foundations) complete at 326/0:**
+| Commit | Items | Notes |
+|---|---|---|
+| 7f48993 | W1.1 | paths::sanitize; 8 tests moved; importers repointed (engine.rs, ui/app/downloads.rs only — CLI/hf_cache importers were speculative); hf_cache wrapper documented |
+| 2dc3ef9 | W1.5 | utils::atomic_rename_with_retry(retries, delay); download=4x100ms == old ATTEMPTS=5; hf_cache delegates retries=0 (byte-identical); update.rs untouched (self_replace) |
+| c094dba | W1.2 | QueuedDownload struct; 7 sites incl. engine test; hf-cache slot-2=revision resolved from site comment; alias deleted; roundtrip test pins sha/token distinction |
+| (2 commits) | W1.3, W1.8 | ErrorCode(13)+Event::error routed 26 sites; FileStatus enum (1 internal reader updated); DISCOVERY: dynamic codes beyond the 13 (unknown_revision, ambiguous, no_files_match, unknown_preset, empty_selection) stay String; error_with_available dead-but-tested; http_client Option<&str> x2 fns, 6 call sites |
+| (2 commits) | W1.4 | fmt.rs: 12 helpers, 433 differential oracle comparisons, oracle algorithms inlined into tests; format_size/format_number remain as delegates (21/10 call sites); zero old-vs-old disagreements beyond documented surface split |
+| fb3c597 | W1.6 | stream_file_digest core; verification.rs adopts; update.rs NOT (hashes network chunks while writing — different shape); git_blob_sha1 streaming + stat-len mismatch -> UnexpectedEof (documented amendment); hello\n vector corrected to ce013625030ba8dba906f756967f9e9ca394464a |
+| 80ab5a7 | W1.7 | parse_multipart_info (string slicing, once_cell Lazy — repo rustc-1.75 idiom); 47-entry corpus differential test permanent; 9 site divergences PRESERVED via per-site rules (divergence table in commit msg) |
+| 1333857 | W1.9 | PathError (8 variants, Display verbatim, no source); register_pending shares PathError; zero .contains( callers found; Display goldens |
