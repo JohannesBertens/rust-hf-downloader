@@ -9,6 +9,7 @@ This submodule holds application state, event handling, and async orchestration 
 Files and roles
 - state.rs
   • struct App: central state with Arc<RwLock>/Arc<Mutex> fields for lists, caches, queues, progress
+  • App::new is headless-safe (no EventStream field — the terminal event stream is constructed once at the top of App::run, after the caller's ratatui::init, and passed into handle_crossterm_events; crossterm's source eagerly opens a tty fd, so eager construction made App::new panic in test environments)
   • `engine: EngineState` owns the engine-side shared state (download/status/verify/outcome channels, queue/registry/progress Arcs, verification counters); App::new constructs it once via `EngineState::new()`; every TUI access goes through explicit `self.engine.<field>` reads (no Deref, no flattened mirrors)
   • `download_tx` is the only channel endpoint kept on App: the frontend-owned sender half of the engine's download queue (dropping it ends the manager loop once drained)
   • engine_state() snapshot method is gone — App::run passes `self.engine.clone()` directly to engine::spawn_verification_worker / spawn_manager
@@ -45,7 +46,9 @@ Files and roles
   • trigger_download: decides scope based on focused pane (group/file/repo)
   • confirm_download: validates paths, fetches multipart SHA256s (the failure warning is observable), then queues through EngineState::enqueue with EnqueuePolicy::tui_quant — registry bookkeeping, queue accounting, HUD mirror, and failed-send rollback live in the engine; per-file user messages stay at this call site
   • resume/delete incomplete downloads: resume re-queues through engine.enqueue (EnqueuePolicy::tui_resume — no registry writes, queue accounted after sends); delete operates on registry + filesystem
-  • confirm_repository_download / confirm_tree_download: non-GGUF repo/tree cases; preserve folder structure under base/author/model; queue through engine.enqueue (EnqueuePolicy::tui_repository)
+  • confirm_repository_download / confirm_tree_download are thin entry points over one shared pipeline, confirm_scoped_repository_download(RepoScope) (W4.4): gather siblings per scope → model_root → payload → EngineState::enqueue (EnqueuePolicy::tui_repository) → shared tail. RepoScope is the only divergence (selection predicate + empty-selection/success wording); everything else is shared
+  • shared helpers: `model_root(base, model_id)` / `model_root_or(base, id, fallback)` = base/author/model for a two-part id (fallback otherwise) — do not re-inline the split/join; `App::finish_enqueue(outcome, success, failure)` = the post-enqueue tail (invalid-filename errors + success/failure string) every confirm flow ends with
+  • the flows' observable behavior (status/error strings, queue accounting, HUD items order, registry entries, channel messages, popup clear via on_key_event) is pinned byte-for-byte by the characterization tests in downloads.rs `#[cfg(test)]` — behavior-preserving refactors must keep them unchanged
 
 Important queues and channels (all on `app.engine` except download_tx)
 - download_tx (on App): sends QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size } into the engine queue
