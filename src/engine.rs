@@ -217,7 +217,7 @@ pub fn register_pending(
 
     for (filename, size, sha256) in files {
         let validated_path =
-            crate::download::validate_and_sanitize_path(base_path, model_id, filename)?;
+            crate::paths::sanitize::validate_and_sanitize_path(base_path, model_id, filename)?;
 
         let url = crate::api::resolve_url(model_id, filename, revision);
         let local_path_str = validated_path.to_string_lossy().to_string();

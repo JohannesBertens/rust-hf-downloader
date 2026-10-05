@@ -646,6 +646,11 @@ pub fn cleanup_staging(repo_dir: &Path, published: &[String]) -> io::Result<()> 
 /// determinism, E1 in §9). The engine's staging validation already covers
 /// downloads; this guards the snapshot and refs paths this module creates
 /// itself.
+///
+/// Deliberately stricter than `paths::sanitize` (backslashes rejected
+/// outright, plain components only) because hub-cache layout paths must be
+/// identical on every platform; shared per-component sanitization concepts
+/// live in `paths::sanitize` where they overlap.
 fn validate_relative_path(path: &str) -> io::Result<()> {
     if path.is_empty() {
         return Err(invalid_input("path must not be empty".to_string()));

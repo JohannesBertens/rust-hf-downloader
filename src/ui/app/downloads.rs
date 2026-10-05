@@ -1,7 +1,7 @@
 use super::state::App;
 use crate::api::fetch_multipart_sha256s;
-use crate::download::validate_and_sanitize_path;
 use crate::models::*;
+use crate::paths::sanitize::validate_and_sanitize_path;
 use crate::registry;
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -53,7 +53,7 @@ Caching strategy
 - Always check cache first; keep UI responsive and avoid repeated HTTP calls
 
 Safety and correctness notes
-- Always use download::validate_and_sanitize_path for any user-provided path/filename
+- Always use paths::sanitize::validate_and_sanitize_path for any user-provided path/filename
 - Keep selection indices consistent with list lengths; guard against empty vectors
 - When toggling modes, clear the complementary state to avoid stale UI
 - AUTH errors push a special message handled to show AuthError popup

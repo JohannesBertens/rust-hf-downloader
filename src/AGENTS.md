@@ -75,7 +75,7 @@ Key modules
   • Preallocates file; spawns chunk workers limited by DOWNLOAD_CONFIG.concurrent_threads
   • Updates DownloadProgress and registry continuously; renames .incomplete -> final on success
   • Queues verification when enabled and hash known
-- validate_and_sanitize_path(base_path, model_id, filename) -> PathBuf; blocks traversal
+- Path security: paths::sanitize::{sanitize_path_component, validate_and_sanitize_path} (see 12)) — start_download applies them to user-supplied filenames; blocks traversal
 - DownloadConfig (global atomics) controls chunking, retries, timeouts, and UI update cadence
 
 7) verification.rs
@@ -103,9 +103,11 @@ Key modules
 - EngineState bundle + spawn_manager / spawn_verification_worker
 - Consumed by BOTH the TUI and cli::run_download — never duplicate this logic
 
-12) paths.rs — cross-platform path resolution (v2.6.0)
+12) paths.rs — cross-platform path resolution (v2.6.0) + path-security policy (paths::sanitize)
 - Precedence: env overrides > portable mode (config.toml next to exe) > dirs
   defaults > temp fallback; never hardcode $HOME or format! paths elsewhere
+- sanitize: per-component sanitization (traversal, control/Windows-illegal chars,
+  reserved device names) + containment-checked validate_and_sanitize_path
 
 13) rate_limiter.rs — token-bucket limiter (v1.2.0)
 - Global VERIFICATION/DownloadConfig atomics; single consolidated state lock
