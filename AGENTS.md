@@ -166,7 +166,7 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - `RenderParams` includes `panel_areas`, `filter_areas`, `hovered_panel`
 - Each panel stores its area in `panel_areas` during render
 - `render_filter_toolbar()` calculates and stores `filter_areas`
-- Border styles: yellow for focused, cyan for hovered, default otherwise
+- Border styles: `render/mod.rs::border_style` (single guard: yellow focused, cyan hovered, default otherwise); `render/mod.rs::panel_list` is the shared list-panel shape (title + border + selection highlight)
 
 **Non-blocking design**:
 - Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks (`ui::app::state::snapshot` helper + `RenderCache` on App: refresh cache when free, render cached snapshot when held)

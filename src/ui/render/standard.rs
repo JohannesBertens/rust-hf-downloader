@@ -1,6 +1,7 @@
 //! Standard display mode: the model-metadata panel and the repository
 //! file tree (plan W3.4b split out of `render.rs`; bodies byte-identical).
 
+use super::{border_style, panel_list};
 use crate::models::{FileTreeNode, FocusedPane, InputMode, ModelMetadata};
 use crate::ui::tree::{count_tree_files, flatten_tree};
 use crate::utils::format_size;
@@ -8,7 +9,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -39,16 +40,6 @@ pub(super) fn render_standard_panels(
         panel_areas,
     } = ctx;
 
-    // Helper to determine border style based on focus and hover state
-    let get_border_style = |pane: FocusedPane| -> Style {
-        if input_mode == InputMode::Normal && focused_pane == pane {
-            Style::default().fg(Color::Yellow)
-        } else if hovered_panel.as_ref() == Some(&pane) {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        }
-    };
     // Left side: Model metadata
     let meta_title = if loading {
         "Model Information [Loading...]"
@@ -132,7 +123,12 @@ pub(super) fn render_standard_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(meta_title)
-                .border_style(get_border_style(FocusedPane::ModelMetadata)),
+                .border_style(border_style(
+                    FocusedPane::ModelMetadata,
+                    input_mode,
+                    focused_pane,
+                    hovered_panel,
+                )),
         )
         .wrap(Wrap { trim: false });
 
@@ -164,16 +160,6 @@ fn render_file_tree_panel(
     hovered_panel: &Option<FocusedPane>,
     panel_areas: &mut Vec<(FocusedPane, Rect)>,
 ) {
-    // Helper to determine border style based on focus and hover state
-    let get_border_style = |pane: FocusedPane| -> Style {
-        if input_mode == InputMode::Normal && focused_pane == pane {
-            Style::default().fg(Color::Yellow)
-        } else if hovered_panel.as_ref() == Some(&pane) {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        }
-    };
     let tree_title = if file_tree.is_none() {
         "Repository Files [Select a model to view]"
     } else {
@@ -237,19 +223,16 @@ fn render_file_tree_panel(
         vec![]
     };
 
-    let tree_list = List::new(tree_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(tree_title)
-                .border_style(get_border_style(FocusedPane::FileTree)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+    let tree_list = panel_list(
+        tree_items,
+        tree_title,
+        border_style(
+            FocusedPane::FileTree,
+            input_mode,
+            focused_pane,
+            hovered_panel,
+        ),
+    );
 
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::FileTree, area));

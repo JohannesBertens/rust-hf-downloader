@@ -33,7 +33,7 @@ use crate::models::{
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use std::collections::HashMap;
@@ -159,17 +159,6 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         filter_areas,
     );
 
-    // Helper to determine border style based on focus and hover state
-    let get_border_style = |pane: FocusedPane| -> Style {
-        if input_mode == InputMode::Normal && focused_pane == pane {
-            Style::default().fg(Color::Yellow)
-        } else if hovered_panel.as_ref() == Some(&pane) {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        }
-    };
-
     // Results list (chunks[1])
     let items = model_list_items(models);
 
@@ -183,19 +172,11 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         "Results"
     };
 
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(list_title)
-                .border_style(get_border_style(FocusedPane::Models)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+    let list = panel_list(
+        items,
+        list_title,
+        border_style(FocusedPane::Models, input_mode, focused_pane, hovered_panel),
+    );
 
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::Models, chunks[1]));
@@ -295,6 +276,46 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(status_widget, chunks[4]);
+}
+
+/// Border style of a panel: yellow while the pane holds keyboard focus
+/// (Normal mode only), cyan while the mouse hovers it, default otherwise.
+/// Single home for the guard the four panel renderers repeated verbatim
+/// (W3.4c); the H5 style-signature snapshots pin the precedence
+/// focus > hover > plain.
+pub(super) fn border_style(
+    pane: FocusedPane,
+    input_mode: InputMode,
+    focused_pane: FocusedPane,
+    hovered_panel: &Option<FocusedPane>,
+) -> Style {
+    if input_mode == InputMode::Normal && focused_pane == pane {
+        Style::default().fg(Color::Yellow)
+    } else if hovered_panel.as_ref() == Some(&pane) {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
+}
+
+/// The shared list-panel shape: bordered block, pane title, pane border
+/// style and one selection highlight everywhere (W3.4c — the Results list,
+/// the file tree and both GGUF lists built this by hand). Callers still
+/// register their area in `panel_areas` for click/hover detection.
+pub(super) fn panel_list<'a>(items: Vec<ListItem<'a>>, title: &'a str, style: Style) -> List<'a> {
+    List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(style),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ")
 }
 
 // =====================================================================

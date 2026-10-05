@@ -287,7 +287,7 @@ fn style_unfocused_models_pane_border_is_plain() {
 fn style_hovered_pane_border_is_cyan() {
     // Mouse hover on the quantization-groups pane while keyboard
     // focus stays on Models: hovered border renders fg=Cyan (see
-    // get_border_style in render_ui — hover beats plain, focus beats
+    // border_style in render/mod.rs — hover beats plain, focus beats
     // hover).
     let mut fixture = UiFixture::quant_view();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();

@@ -1,13 +1,14 @@
 //! GGUF display mode: quantization groups and the files of the selected
 //! group (plan W3.4b split out of `render.rs`; bodies byte-identical).
 
+use super::{border_style, panel_list};
 use crate::models::{FocusedPane, InputMode, QuantizationGroup, QuantizationInfo};
 use crate::utils::format_size;
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{ListItem, ListState},
     Frame,
 };
 use std::collections::HashMap;
@@ -41,16 +42,6 @@ pub(super) fn render_gguf_panels(
         panel_areas,
     } = ctx;
 
-    // Helper to determine border style based on focus and hover state
-    let get_border_style = |pane: FocusedPane| -> Style {
-        if input_mode == InputMode::Normal && focused_pane == pane {
-            Style::default().fg(Color::Yellow)
-        } else if hovered_panel.as_ref() == Some(&pane) {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        }
-    };
     // Left side: Quantization types
     let quant_title = if loading_quants {
         "Quantization Types [Loading...]"
@@ -98,19 +89,16 @@ pub(super) fn render_gguf_panels(
         })
         .collect();
 
-    let quant_list = List::new(quant_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(quant_title)
-                .border_style(get_border_style(FocusedPane::QuantizationGroups)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+    let quant_list = panel_list(
+        quant_items,
+        quant_title,
+        border_style(
+            FocusedPane::QuantizationGroups,
+            input_mode,
+            focused_pane,
+            hovered_panel,
+        ),
+    );
 
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::QuantizationGroups, chunks[0]));
@@ -168,19 +156,16 @@ pub(super) fn render_gguf_panels(
         })
         .collect();
 
-    let file_list = List::new(file_items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(file_title)
-                .border_style(get_border_style(FocusedPane::QuantizationFiles)),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol(">> ");
+    let file_list = panel_list(
+        file_items,
+        file_title,
+        border_style(
+            FocusedPane::QuantizationFiles,
+            input_mode,
+            focused_pane,
+            hovered_panel,
+        ),
+    );
 
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::QuantizationFiles, chunks[1]));
