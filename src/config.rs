@@ -1,17 +1,15 @@
+//! Configuration persistence: load/save [`AppOptions`] as TOML at the
+//! canonical config path (`crate::paths::config_path()` — writes must
+//! always use that path; reads go through
+//! `crate::paths::read_config_path()` to honour the legacy layout), plus
+//! `apply_options` to push engine tuning into the shared atomics.
+
 use crate::models::AppOptions;
 use std::fs;
-use std::path::PathBuf;
-
-/// Get the canonical path to the configuration file.
-/// Writes must always use this path; reads go through
-/// [`crate::paths::read_config_path`] to honour the legacy layout.
-pub fn get_config_path() -> PathBuf {
-    crate::paths::config_path()
-}
 
 /// Ensure the config directory exists
 fn ensure_config_dir() -> Result<(), std::io::Error> {
-    let config_path = get_config_path();
+    let config_path = crate::paths::config_path();
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -52,7 +50,7 @@ pub fn save_config(options: &AppOptions) -> Result<(), Box<dyn std::error::Error
     ensure_config_dir()?;
 
     let toml_string = toml::to_string_pretty(options)?;
-    fs::write(get_config_path(), toml_string)?;
+    fs::write(crate::paths::config_path(), toml_string)?;
 
     Ok(())
 }
@@ -132,7 +130,7 @@ mod tests {
         let _guard = crate::paths::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let path = get_config_path();
+        let path = crate::paths::config_path();
         // Separator-agnostic assertions (would fail on Windows if built
         // with hardcoded '/' separators).
         assert_eq!(

@@ -444,7 +444,7 @@ pub(super) fn format_eta(secs: f64) -> String {
 
 /// Truncate a path-like string for single-line display, keeping the
 /// (differing) tail.
-pub fn truncate_path(s: &str, max: usize) -> String {
+pub(super) fn truncate_path(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

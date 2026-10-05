@@ -1,3 +1,12 @@
+//! Shared data types used across the API, engine, CLI, and UI layers.
+//!
+//! Current content: HuggingFace API DTOs (`ModelInfo`, `ModelMetadata`,
+//! `RepoFile`, `FileTreeNode`, quantization types), download and
+//! verification progress/outcome types, download registry metadata, UI
+//! state enums (`PopupMode`, `SortField`, `FocusedPane`, …), and
+//! `AppOptions` for configuration persistence. This module is slated for
+//! a split into smaller modules (plan W3.1).
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;

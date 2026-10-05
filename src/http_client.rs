@@ -1,3 +1,7 @@
+//! Authenticated HTTP request helpers: client construction with an
+//! optional HuggingFace token plus GET helpers that attach the token
+//! header only when one is available.
+
 use reqwest::{header, Client};
 use std::time::Duration;
 

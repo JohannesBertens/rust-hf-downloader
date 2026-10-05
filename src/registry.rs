@@ -1,14 +1,14 @@
+//! Download-history registry persisted at
+//! `crate::paths::registry_path()` (`hf-downloads.toml`): load/save the
+//! [`DownloadRegistry`] and query it for incomplete or completed
+//! downloads.
+
 use crate::models::{DownloadRegistry, DownloadStatus};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
-
-pub fn get_registry_path() -> PathBuf {
-    crate::paths::registry_path()
-}
 
 pub fn load_registry() -> DownloadRegistry {
-    let path = get_registry_path();
+    let path = crate::paths::registry_path();
     if !path.exists() {
         return DownloadRegistry::default();
     }
@@ -20,7 +20,7 @@ pub fn load_registry() -> DownloadRegistry {
 }
 
 pub fn save_registry(registry: &DownloadRegistry) {
-    let path = get_registry_path();
+    let path = crate::paths::registry_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }

@@ -1,3 +1,8 @@
+//! Download transport: [`start_download`] orchestrates authenticated,
+//! chunked/resumable HTTP downloads with progress reporting, and the
+//! path validation/sanitization helpers guard against path traversal in
+//! user-supplied subdirectories.
+
 use crate::models::{
     ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus,
     FileOutcome, VerificationQueueItem,

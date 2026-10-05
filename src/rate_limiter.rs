@@ -1,3 +1,7 @@
+//! Token-bucket rate limiter shared by the download engine: [`acquire`]
+//! awaits until the bytes-per-second budget allows a transfer, and the
+//! rate can be changed or disabled at runtime.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

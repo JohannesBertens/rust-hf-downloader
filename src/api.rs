@@ -1,3 +1,9 @@
+//! HuggingFace Hub API client: model search with client-side
+//! filtering/sorting, metadata fetching, file-tree construction, multipart
+//! SHA256 lookups, and GGUF quantization classification.
+//!
+//! All base URLs route through [`api_base`], which honours `HF_ENDPOINT`.
+
 use crate::models::{
     FileTreeNode, ModelFile, ModelInfo, ModelMetadata, QuantizationGroup, QuantizationInfo,
     RepoFile,

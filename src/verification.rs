@@ -1,3 +1,8 @@
+//! SHA256 verification worker: drains the engine's verification queue,
+//! hashes files (bounded by a semaphore), reports typed
+//! [`VerifyOutcome`]s over the engine's outcome channel, and signals
+//! idle when the queue is exhausted.
+
 use crate::engine::EngineState;
 use crate::models::{DownloadStatus, VerificationProgress, VerificationQueueItem, VerifyOutcome};
 use sha2::{Digest, Sha256};

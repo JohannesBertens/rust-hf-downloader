@@ -1,3 +1,8 @@
+//! Small shared formatting helpers: [`format_size`] renders byte counts
+//! with B/KB/MB/GB units and [`format_number`] abbreviates counts as
+//! K/M. Broader consolidation of formatting code across the UI and CLI
+//! is planned (W1.4).
+
 pub fn format_number(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)

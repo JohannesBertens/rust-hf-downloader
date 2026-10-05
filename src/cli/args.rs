@@ -338,7 +338,7 @@ fn parse_preset(s: &str) -> Result<String, String> {
 }
 
 /// Token precedence: `--token` flag → `$HF_TOKEN` env → config file.
-pub fn merge_token(
+pub(super) fn merge_token(
     flag: Option<String>,
     env: Option<String>,
     file: Option<String>,
@@ -366,7 +366,7 @@ pub(super) fn parse_rate_limit_mbps(s: &str) -> Result<f64, String> {
 /// pipeline use without a config file). Explicit flags win over the config
 /// file; `--no-rate-limit` wins over `--rate-limit`; `--rate-limit-mbps`
 /// implies enabling.
-pub fn apply_rate_limit_overrides(
+pub(super) fn apply_rate_limit_overrides(
     options: &mut crate::models::AppOptions,
     rate_limit: bool,
     no_rate_limit: bool,
@@ -404,7 +404,7 @@ pub(super) fn parse_revision(s: &str) -> Result<String, String> {
 }
 
 /// A model ID must be exactly `author/name` with non-empty parts.
-pub fn valid_model_id(model_id: &str) -> bool {
+pub(super) fn valid_model_id(model_id: &str) -> bool {
     let parts: Vec<&str> = model_id.split('/').collect();
     parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty()
 }
