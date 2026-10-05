@@ -54,6 +54,15 @@ may be dropped — rely on `file_complete`, not a 100 % progress).
 | `total_bytes` | u64 | |
 | `speed_mbps` | f64 | MiB/s |
 | `percent` | f64 | rounded to 0.1 |
+| `overall` | object | **optional** — present on multi-file runs only |
+
+`overall` (aggregate run progress): `{ "files_done": usize,
+"files_total": usize, "downloaded_bytes": u64, "total_bytes": u64 }`.
+`files_done` counts fully processed files (downloaded + skipped +
+failed); `downloaded_bytes` adds the active file's partial bytes. Files
+are downloaded strictly serially, so `speed_mbps` is the aggregate wire
+rate and `total_bytes - downloaded_bytes` feeds an overall ETA. Absent
+(single-file runs) means omit the key entirely.
 
 ### `file_complete`
 

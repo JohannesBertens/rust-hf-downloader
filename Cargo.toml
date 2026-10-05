@@ -1,6 +1,6 @@
 [package]
 name = "rust-hf-downloader"
-version = "2.11.0"
+version = "2.12.0"
 description = "TUI for searching and downloading HuggingFace models"
 authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
@@ -48,7 +48,7 @@ backtrace = "=0.3.71"
 indexmap = "=2.2.6"
 
 [dev-dependencies]
-insta = "1.48.0"
+insta = { version = "1.48.0", features = ["filters"] }
 # Same version reqwest 0.11 already locks; used only by the integration-test
 # mock server (Range-aware) — ships nothing in the binary.
 hyper = { version = "0.14", features = ["full"] }
