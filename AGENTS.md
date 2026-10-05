@@ -15,7 +15,7 @@ The application follows a modular architecture with clear separation of concerns
 
 ```
 src/
-├── main.rs           # Entry point (~60 lines): `download`/`search` subcommand → cli::run; no args → TUI
+├── main.rs           # Entry point: `download`/`search` subcommand → cli::run; no args → TUI
 ├── cli/              # One-shot CLI (`download` + `search` + `update` + `hf-cache` subcommands), split by section (v2.13.1):
 │   ├── mod.rs        # Cli/Command clap roots, EXIT_* consts, run() dispatcher, re-exports
 │   ├── args.rs       # All *Args structs + parse/merge helpers (parse_preset, merge_token, …)
@@ -43,13 +43,13 @@ src/
 ├── utils.rs          # Helper functions
 └── ui/
     ├── mod.rs        # UI module exports
-    ├── app.rs        # Module re-exports (~48 lines, v0.9.5)
+    ├── app.rs        # Module re-exports (v0.9.5)
     ├── app/          # App submodules (v0.9.5)
-    │   ├── state.rs      # AppState and initialization (~158 lines)
-    │   ├── events.rs     # Event handling (~709 lines)
-    │   ├── models.rs     # Model browsing logic (~253 lines)
-    │   ├── downloads.rs  # Download management (~460 lines)
-    │   └── verification.rs # Verification UI (~77 lines)
+    │   ├── state.rs      # App state container and initialization
+    │   ├── events.rs     # Keyboard/popup event handling
+    │   ├── models.rs     # Model browsing logic (search, details, quantizations)
+    │   ├── downloads.rs  # Download management (trigger, confirm, resume/delete)
+    │   └── verification.rs # Verification UI (manual verify action)
     └── render.rs     # UI rendering functions
 ```
 
@@ -118,7 +118,6 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - `panel_areas: Vec<(FocusedPane, Rect)>` - clickable regions for each panel
 - `filter_areas: Vec<(usize, Rect)>` - clickable regions for filter fields (0=sort, 1=downloads, 2=likes)
 - `hovered_panel: Option<FocusedPane>` - currently hovered panel for border highlighting
-- `mouse_position: Option<(u16, u16)>` - last known mouse position
 
 **Event handling** (`src/ui/app.rs`):
 - `handle_mouse_click(column, row)` - focus panel or cycle filter on click
@@ -148,16 +147,15 @@ To prevent deadlocks, all async code must acquire locks in the following order. 
 Lock Hierarchy (acquire in this order):
 
 1. download_rx (Arc<Mutex<mpsc::UnboundedReceiver<DownloadMessage>>>)
-2. download_queue_size (Arc<Mutex<usize>>) — and download_queue / download_queue_items (consolidated QueueState + Vec<QueueItemSummary> mirrors; acquire separately, never nested with each other)
-3. download_queue_bytes (Arc<Mutex<u64>>)
-4. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
-5. complete_downloads (Arc<Mutex<CompleteDownloads>>)
-6. verification_queue (Arc<Mutex<Vec<VerificationQueueItem>>>)
-7. verification_queue_size (Arc<AtomicUsize>) - lock-free atomic counter
-8. verification_progress (Arc<Mutex<Vec<VerificationProgress>>>)
-9. download_registry (Arc<Mutex<DownloadRegistry>>)
-10. RateLimiter state (Arc<Mutex<RateLimiterState>>) - consolidated single lock
-11. status_rx (Arc<Mutex<mpsc::UnboundedReceiver<String>>>)
+2. download_queue (Arc<Mutex<QueueState>>) and download_queue_items (Arc<Mutex<Vec<QueueItemSummary>>>) — the consolidated queue accounting (size + bytes in one QueueState) and the Vec<QueueItemSummary> HUD mirror; acquire separately, never nested with each other
+3. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
+4. complete_downloads (Arc<Mutex<CompleteDownloads>>)
+5. verification_queue (Arc<Mutex<Vec<VerificationQueueItem>>>)
+6. verification_queue_size (Arc<AtomicUsize>) - lock-free atomic counter
+7. verification_progress (Arc<Mutex<Vec<VerificationProgress>>>)
+8. download_registry (Arc<Mutex<DownloadRegistry>>)
+9. RateLimiter state (Arc<Mutex<RateLimiterState>>) - consolidated single lock
+10. status_rx (Arc<Mutex<mpsc::UnboundedReceiver<String>>>)
 
 Key Rules:
 - ALWAYS acquire locks in the order above
@@ -179,10 +177,16 @@ loop {
         }
     }; // Lock level 1 released
 
-    // Now safe to acquire level 2 and 3
-    let mut queue_size = download_queue_size.lock().await;  // Lock level 2
-    let mut queue_bytes = download_queue_bytes.lock().await;  // Lock level 3
-    // ... process
+    // Now safe to acquire level 2 — each lock taken in its own scope,
+    // never nested with each other (same level)
+    {
+        let mut queue = download_queue.lock().await;  // Lock level 2
+        queue.remove(1, total_size);
+    } // Lock released
+    {
+        let mut items = download_queue_items.lock().await;  // Lock level 2
+        // ... update the queue-items mirror
+    } // Lock released
 }
 ```
 
@@ -191,7 +195,7 @@ loop {
 // ❌ WRONG: Holding level 1 while acquiring level 2
 let mut rx = download_rx.lock().await;  // Lock level 1
 while let Some(msg) = rx.recv().await {
-    let mut queue_size = download_queue_size.lock().await;  // Lock level 2
+    let mut queue = download_queue.lock().await;  // Lock level 2
     // DEADLOCK: If another task holds level 2 and needs level 1
 }
 ```

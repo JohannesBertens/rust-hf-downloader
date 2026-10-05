@@ -141,7 +141,7 @@ Fixes: #123
 
 - Update `src/config.rs` for persisted options
 - Update `src/models.rs` AppOptions struct
-- Update TUI options screen in `src/ui/app/downloads.rs`
+- Update TUI options screen: field handling in `src/ui/app/events.rs` (`modify_option`, `handle_options_popup_input`) and rendering in `src/ui/render.rs` (`render_options_popup`)
 
 ### Documentation
 

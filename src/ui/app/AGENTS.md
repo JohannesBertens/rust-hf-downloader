@@ -9,7 +9,7 @@ This submodule holds application state, event handling, and async orchestration 
 Files and roles
 - state.rs
   • struct App: central state with Arc<RwLock>/Arc<Mutex> fields for lists, caches, queues, progress
-  • App::new loads options from config; seeds filter defaults; prepares channels (download/status)
+  • App::new loads options from config; seeds filter defaults; prepares channels (download/status/verify/outcome)
   • App::sync_options_to_config maps AppOptions → global atomics (download & verification configs)
   • Display flags: needs_search_models, needs_load_quantizations to defer heavy work until after a frame draw
   • File tree state for Standard mode; display_mode is shared to switch GGUF vs Standard
@@ -44,7 +44,7 @@ Files and roles
   • confirm_repository_download: non-GGUF repo case; preserves folder structure under base/author/model
 
 Important queues and channels
-- download_tx/rx: (model_id, filename, base_path, expected_sha256, hf_token)
+- download_tx/rx: (model_id, revision, filename, base_path, expected_sha256, hf_token, total_size)
 - status_tx/rx: strings consumed by run loop to update status and popups (e.g., AUTH_ERROR:<model_id>)
 - verification_queue(+size) and verification_progress: shared with verification worker
 

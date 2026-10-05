@@ -719,9 +719,14 @@ rust-hf-downloader/
     │   ├── download_cmd.rs # download orchestration + drain
     │   ├── search_cmd.rs   # search subcommand
     │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline
-    │   └── update_cmd.rs   # self-update subcommand
+    │   ├── update_cmd.rs   # self-update subcommand
+    │   └── tests.rs        # cli::tests — insta snapshots in src/cli/snapshots/
     ├── engine.rs           # Shared download engine (manager + verification bootstrap)
     ├── models.rs           # Data structures & types
+    ├── paths.rs            # Cross-platform config/registry/download path resolution
+    ├── hf_cache.rs         # HuggingFace hub cache layout writer
+    ├── patterns.rs         # Python-fnmatch parity glob matcher (--include/--exclude)
+    ├── update.rs           # Self-update backend (latest.json manifest + verified swap)
     ├── config.rs           # Configuration persistence (v0.9.0)
     ├── utils.rs            # Formatting utilities
     ├── api.rs              # HuggingFace API client with auth (v0.9.5)
@@ -743,13 +748,12 @@ rust-hf-downloader/
 ```
 
 **Version 0.7.0** introduces a modular architecture with clear separation of concerns:
-- **6 top-level modules** for business logic
-- **2 UI submodules** for presentation layer
-- **~240 lines average** per file (previously 2,074 in one file)
+- **Focused top-level modules** for business logic
+- **Separate UI submodules** for presentation layer
 - **Improved maintainability, testability, and readability**
 
 **Version 0.9.5** further refines the architecture:
-- **Split app.rs** into 5 focused submodules (~250 lines each)
+- **Split app.rs** into 5 focused submodules
 - **New http_client module** for authentication
 - **Better code organization** with clear responsibility separation
 

@@ -19,9 +19,9 @@ Panes and focus
 - PopupMode overlays: Search, Options, ResumeDownload, DownloadPath, AuthError
 
 app.rs
-- App::run: sets running, syncs options to atomics, scans for incomplete downloads, spawns:
-  • verification::verification_worker (background)
-  • download manager task consuming download_rx and calling download::start_download
+- App::run: sets running, syncs options to atomics, scans for incomplete downloads, spawns the shared engine tasks via `engine_state()`:
+  • engine::spawn_verification_worker (background)
+  • engine::spawn_manager (download manager consuming download_rx and calling download::start_download)
 - Main loop draws, then conditionally calls async loaders flagged by state:
   • needs_search_models → App::search_models()
   • needs_load_quantizations → App::spawn_load_quantizations() and prefetch_adjacent_models()
@@ -32,8 +32,8 @@ render.rs
 - Toolbar shows and highlights current sort and filters; indicates active preset
 - GGUF path: render_gguf_panels → left groups (size, type, [downloaded]), right files with downloaded mark
 - Standard path: render_standard_panels → left metadata summary, right file tree (flattened with expansion)
-- Progress: render_progress_bars overlays download and verification gauges in right side
-- Popups: search input, download path chooser, resume list, auth error steps, options dialog with 14 fields
+- Progress: render_activity_hud overlays queue/download/verification activity in a reserved HUD strip (height from activity_hud_height, hidden when idle)
+- Popups: search input, download path chooser, resume list, auth error steps, options dialog with 16 fields
 
 Design notes
 - Rendering functions never mutate App; they read params built in app.rs run loop

@@ -54,13 +54,14 @@ Key modules
 - fetch_model_files(model_id, token) -> Vec<QuantizationGroup>
   • Compat wrapper: fetch_model_metadata + classify_quantizations; frontends
     holding metadata call classify_quantizations directly (no second fetch)
+- resolve_revision_sha(model_id, revision, token) -> Result<String> (revision commit SHA; unknown revision → 404)
 - fetch_multipart_sha256s(model_id, filenames[], token) -> map filename -> Option<sha256>
 - Helpers: extract_quantization_type, is_quantization_directory, parse_multipart_filename, get_multipart_base_name
 
 4) config.rs
-- get_config_path() -> ~/.config/jreb/config.toml
-- load_config() -> AppOptions (with env HF_TOKEN override)
-- save_config(&AppOptions)
+- load_config() -> AppOptions (reads crate::paths::read_config_path(); defaults on missing/unparseable file; env HF_TOKEN override lives in AppOptions::default)
+- save_config(&AppOptions) (writes crate::paths::config_path())
+- apply_options(&AppOptions) — maps persisted options onto the global DOWNLOAD_CONFIG/VERIFICATION_CONFIG atomics
   • Tests cover path and default load
 
 5) registry.rs
