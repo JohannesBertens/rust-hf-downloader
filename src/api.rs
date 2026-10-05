@@ -533,42 +533,116 @@ pub async fn fetch_multipart_sha256s(
     Ok(sha256_map)
 }
 
+/// Which of the two historical multipart-suffix grammars a filename
+/// carries. Recognition itself lives in [`parse_multipart_info`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MultipartKind {
+    /// `…-NNNNN-of-…` — part number exactly five ASCII digits
+    /// (`model-00003-of-00009.gguf`).
+    FiveDigit,
+    /// `….partNofM` — dot-prefixed `part`, digits, `of`, digits
+    /// (`model.Q4_K_M.gguf.part1of2`).
+    PartNofM,
+}
+
+/// A multipart suffix recognized by [`parse_multipart_info`] (or its
+/// partNofM-only sibling [`parse_multipart_part_suffix`]). The part and
+/// total texts are returned RAW: the historical call sites applied
+/// different digit validations, so each wrapper enforces its own rule
+/// instead of this core silently picking one (plan W1.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MultipartInfo<'a> {
+    /// Which grammar matched.
+    kind: MultipartKind,
+    /// Byte offset where the suffix starts: the `-` preceding a
+    /// five-digit part number, or the `.` of `.part`.
+    suffix_start: usize,
+    /// Part-number text (five digits for [`MultipartKind::FiveDigit`];
+    /// possibly empty for a degenerate `.partof…`, which the historical
+    /// digit checks accepted vacuously).
+    part: &'a str,
+    /// Total text after `of` to the end of the name —
+    /// [`MultipartKind::PartNofM`] only; empty for
+    /// [`MultipartKind::FiveDigit`], whose historical parsers never
+    /// inspected the total side.
+    total: &'a str,
+}
+
+/// Right-to-left scan for the five-digit grammar (historical rfind
+/// semantics): the LAST `-of-`, then the part number between it and the
+/// previous `-`. `Some(part_start)` only when that part number is exactly
+/// five ASCII digits — the total side is NOT validated, matching both
+/// historical inline parsers.
+fn five_digit_suffix_start(s: &str) -> Option<usize> {
+    let of_pos = s.rfind("-of-")?;
+    let part_start = s[..of_pos].rfind('-')?;
+    let part_num = &s[part_start + 1..of_pos];
+    if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
+        Some(part_start)
+    } else {
+        None
+    }
+}
+
+/// Right-to-left scan for the `.partNofM` grammar: the LAST `.part`,
+/// then the FIRST `of` after it. Returns the suffix start plus the raw
+/// part/total texts — digit validation is left to the caller's own
+/// historical rule.
+fn parse_multipart_part_suffix(s: &str) -> Option<MultipartInfo<'_>> {
+    let part_pos = s.rfind(".part")?;
+    let suffix = &s[part_pos + 5..]; // skip ".part"
+    let of_pos = suffix.find("of")?;
+    Some(MultipartInfo {
+        kind: MultipartKind::PartNofM,
+        suffix_start: part_pos,
+        part: &suffix[..of_pos],
+        total: &suffix[of_pos + 2..],
+    })
+}
+
+/// The ONE multipart scan shared by the former per-site copies: the
+/// five-digit grammar first, then `.partNofM` — the precedence of the
+/// historical `get_multipart_base_name`. Returns the recognized suffix;
+/// callers slice with `suffix_start` and apply their own historical
+/// digit validation (see the wrappers below and the W1.7 divergence
+/// table in the commit that introduced this).
+fn parse_multipart_info(s: &str) -> Option<MultipartInfo<'_>> {
+    if let Some(part_start) = five_digit_suffix_start(s) {
+        return Some(MultipartInfo {
+            kind: MultipartKind::FiveDigit,
+            suffix_start: part_start,
+            part: &s[part_start + 1..part_start + 6],
+            total: "",
+        });
+    }
+    parse_multipart_part_suffix(s)
+}
+
 pub fn get_multipart_base_name(filename: &str) -> String {
     // Extract base name from multi-part filename
     // E.g., "model-Q6_K-00003-of-00009.gguf" -> "model-Q6_K.gguf"
     // E.g., "model.Q4_K_M.gguf.part1of2" -> "model.Q4_K_M.gguf"
 
-    // Handle 5-digit format: -00003-of-00009
-    if let Some(multi_part_pos) = filename.rfind("-of-") {
-        if let Some(part_start) = filename[..multi_part_pos].rfind('-') {
-            let part_num = &filename[part_start + 1..multi_part_pos];
-            if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
-                return format!(
-                    "{}{}",
-                    &filename[..part_start],
-                    &filename[filename.rfind(".gguf").unwrap_or(filename.len())..]
-                );
-            }
+    match parse_multipart_info(filename) {
+        // 5-digit format: keep everything from the LAST ".gguf" of the
+        // ORIGINAL name onward (nothing when absent) — so a `.part…`
+        // tail after `.gguf` survives the strip (historical quirk, kept
+        // byte-for-byte).
+        Some(info) if info.kind == MultipartKind::FiveDigit => format!(
+            "{}{}",
+            &filename[..info.suffix_start],
+            &filename[filename.rfind(".gguf").unwrap_or(filename.len())..]
+        ),
+        // partNofM: both sides must be all digits — an empty side passes
+        // vacuously (`"".chars().all(..)`), matching the historical check.
+        Some(info)
+            if info.part.chars().all(|c| c.is_ascii_digit())
+                && info.total.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            filename[..info.suffix_start].to_string()
         }
+        _ => filename.to_string(),
     }
-
-    // Handle partNofM format: .part1of2, .part2of3, etc.
-    if let Some(part_pos) = filename.rfind(".part") {
-        // Check if it's followed by digits+of+digits
-        let suffix = &filename[part_pos + 5..]; // Skip ".part"
-        if let Some(of_pos) = suffix.find("of") {
-            let part_num = &suffix[..of_pos];
-            let total_num = &suffix[of_pos + 2..];
-            if part_num.chars().all(|c| c.is_ascii_digit())
-                && total_num.chars().all(|c| c.is_ascii_digit())
-            {
-                // Return filename without the .partNofM suffix
-                return filename[..part_pos].to_string();
-            }
-        }
-    }
-
-    filename.to_string()
 }
 
 #[cfg(test)]
@@ -607,36 +681,27 @@ pub fn extract_quantization_type(filename: &str) -> Option<String> {
     // "MiniMax-M2-REAP-162B-A10B.Q4_K_M.gguf.part1of2" (multi-part)
     let name = filename;
 
-    // Remove .partNofM suffix if present (must do this BEFORE removing .gguf)
-    let name = if let Some(part_pos) = name.rfind(".part") {
-        let suffix = &name[part_pos + 5..];
-        if let Some(of_pos) = suffix.find("of") {
-            let part_num = &suffix[..of_pos];
-            if part_num.chars().all(|c| c.is_ascii_digit()) {
-                &name[..part_pos]
-            } else {
-                name
-            }
-        } else {
-            name
-        }
-    } else {
-        name
+    // Remove .partNofM suffix if present (must do this BEFORE removing .gguf).
+    // Site-specific rule kept from the historical parser: only the PART
+    // number must be digits — the total side is unvalidated. This
+    // diverges from `get_multipart_base_name` (which requires both) and
+    // from `parse_multipart_filename` (which requires both AND the
+    // ranges); see the W1.7 divergence table.
+    let name = match parse_multipart_part_suffix(name) {
+        Some(info) if info.part.chars().all(|c| c.is_ascii_digit()) => &name[..info.suffix_start],
+        _ => name,
     };
 
     // Now remove .gguf extension
     let mut name = name.trim_end_matches(".gguf");
 
-    // Remove multi-part suffix if present (e.g., "-00003-of-00009")
-    if let Some(multi_part_pos) = name.rfind("-of-") {
-        // Find the start of the part number (should be format: -NNNNN-of-NNNNN)
-        if let Some(part_start) = name[..multi_part_pos].rfind('-') {
-            // Verify it looks like a part number (5 digits)
-            let part_num = &name[part_start + 1..multi_part_pos];
-            if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
-                // Remove the multi-part suffix
-                name = &name[..part_start];
-            }
+    // Remove multi-part suffix if present (e.g., "-00003-of-00009") — the
+    // five-digit grammar only: this stage historically never reconsidered
+    // a `.part` suffix (already handled above), so a PartNofM match here
+    // is ignored.
+    if let Some(info) = parse_multipart_info(name) {
+        if info.kind == MultipartKind::FiveDigit {
+            name = &name[..info.suffix_start];
         }
     }
 
@@ -742,29 +807,37 @@ pub fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
     // "Q2_K/MiniMax-M2-Q2_K-00001-of-00002.gguf" (5-digit format)
     // "MiniMax-M2-REAP-162B-A10B.Q4_K_M.gguf.part1of2" (partNofM format)
     // Returns (current_part, total_parts) if this is a multi-part file
-    use regex::Regex;
+    //
+    // Deliberately NOT built on `parse_multipart_info`: this parser's
+    // grammar materially diverges from the other two sites — leftmost
+    // match instead of rightmost scan, no dot required before `part`,
+    // BOTH sides required to be digits with range validation (total > 1,
+    // current <= total), and cross-grammar fallthrough. Unifying onto the
+    // shared core would change its outputs on the divergent corpus
+    // entries; it keeps its own regexes (compiled once — they used to be
+    // rebuilt on every call).
+    static FIVE_DIGIT: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"(\d{5})-of-(\d{5})").unwrap());
+    static PART_OF: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"part(\d+)of(\d+)").unwrap());
 
     // Try 5-digit format first: 00001-of-00002
-    if let Ok(re) = Regex::new(r"(\d{5})-of-(\d{5})") {
-        if let Some(caps) = re.captures(filename) {
-            let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
-            let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
+    if let Some(caps) = FIVE_DIGIT.captures(filename) {
+        let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
+        let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
 
-            if total_parts > 1 && current_part <= total_parts {
-                return Some((current_part, total_parts));
-            }
+        if total_parts > 1 && current_part <= total_parts {
+            return Some((current_part, total_parts));
         }
     }
 
     // Try partNofM format: part1of2, part2of3, etc.
-    if let Ok(re) = Regex::new(r"part(\d+)of(\d+)") {
-        if let Some(caps) = re.captures(filename) {
-            let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
-            let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
+    if let Some(caps) = PART_OF.captures(filename) {
+        let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
+        let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
 
-            if total_parts > 1 && current_part <= total_parts {
-                return Some((current_part, total_parts));
-            }
+        if total_parts > 1 && current_part <= total_parts {
+            return Some((current_part, total_parts));
         }
     }
 
@@ -1319,6 +1392,265 @@ mod tests {
     }
 
     // ---- mmproj helpers ----
+
+    // ---- multipart parser unification (W1.7) ----
+    //
+    // Characterization-first (plan H1): verbatim copies of the THREE
+    // historical multipart parsers live below as test oracles. The shared
+    // core (`parse_multipart_info` + grammar scanners) and its thin
+    // per-site wrappers must reproduce every oracle byte-for-byte on the
+    // whole corpus; any silent behavior change surfaces here as a failure.
+    mod legacy_multipart {
+        use crate::api::looks_like_quant_type;
+
+        /// Pre-W1.7 `get_multipart_base_name` (api.rs site 1), verbatim.
+        pub fn get_multipart_base_name(filename: &str) -> String {
+            // Handle 5-digit format: -00003-of-00009
+            if let Some(multi_part_pos) = filename.rfind("-of-") {
+                if let Some(part_start) = filename[..multi_part_pos].rfind('-') {
+                    let part_num = &filename[part_start + 1..multi_part_pos];
+                    if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
+                        return format!(
+                            "{}{}",
+                            &filename[..part_start],
+                            &filename[filename.rfind(".gguf").unwrap_or(filename.len())..]
+                        );
+                    }
+                }
+            }
+
+            // Handle partNofM format: .part1of2, .part2of3, etc.
+            if let Some(part_pos) = filename.rfind(".part") {
+                let suffix = &filename[part_pos + 5..]; // Skip ".part"
+                if let Some(of_pos) = suffix.find("of") {
+                    let part_num = &suffix[..of_pos];
+                    let total_num = &suffix[of_pos + 2..];
+                    if part_num.chars().all(|c| c.is_ascii_digit())
+                        && total_num.chars().all(|c| c.is_ascii_digit())
+                    {
+                        return filename[..part_pos].to_string();
+                    }
+                }
+            }
+
+            filename.to_string()
+        }
+
+        /// Pre-W1.7 `extract_quantization_type` (api.rs site 2), verbatim
+        /// (including its inline multipart re-parse).
+        pub fn extract_quantization_type(filename: &str) -> Option<String> {
+            let name = filename;
+
+            // Remove .partNofM suffix if present (must do this BEFORE removing .gguf)
+            let name = if let Some(part_pos) = name.rfind(".part") {
+                let suffix = &name[part_pos + 5..];
+                if let Some(of_pos) = suffix.find("of") {
+                    let part_num = &suffix[..of_pos];
+                    if part_num.chars().all(|c| c.is_ascii_digit()) {
+                        &name[..part_pos]
+                    } else {
+                        name
+                    }
+                } else {
+                    name
+                }
+            } else {
+                name
+            };
+
+            // Now remove .gguf extension
+            let mut name = name.trim_end_matches(".gguf");
+
+            // Remove multi-part suffix if present (e.g., "-00003-of-00009")
+            if let Some(multi_part_pos) = name.rfind("-of-") {
+                if let Some(part_start) = name[..multi_part_pos].rfind('-') {
+                    let part_num = &name[part_start + 1..multi_part_pos];
+                    if part_num.len() == 5 && part_num.chars().all(|c| c.is_ascii_digit()) {
+                        name = &name[..part_start];
+                    }
+                }
+            }
+
+            // Try splitting by '.' first (handles model.Q4_K_M.gguf)
+            let parts: Vec<&str> = name.split('.').collect();
+            if parts.len() > 1 {
+                if let Some(last_part) = parts.last() {
+                    if looks_like_quant_type(last_part) {
+                        return Some(last_part.to_uppercase());
+                    }
+                    if let Some(prefix) = last_part.split('_').next() {
+                        if looks_like_quant_type(prefix) {
+                            return Some(prefix.to_uppercase());
+                        }
+                    }
+                }
+            }
+
+            // If no dots, try splitting by '-'
+            let parts: Vec<&str> = name.split('-').collect();
+            for part in parts.iter().rev() {
+                if looks_like_quant_type(part) {
+                    return Some(part.to_uppercase());
+                }
+                if part.contains('_') {
+                    let subparts: Vec<&str> = part.split('_').collect();
+                    if let Some(first) = subparts.first() {
+                        if looks_like_quant_type(first) {
+                            return Some(first.to_uppercase());
+                        }
+                    }
+                }
+            }
+
+            None
+        }
+
+        /// Pre-W1.7 `parse_multipart_filename` (api.rs site 3), verbatim
+        /// (per-call Regex::new included).
+        pub fn parse_multipart_filename(filename: &str) -> Option<(u32, u32)> {
+            use regex::Regex;
+
+            if let Ok(re) = Regex::new(r"(\d{5})-of-(\d{5})") {
+                if let Some(caps) = re.captures(filename) {
+                    let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
+                    let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
+
+                    if total_parts > 1 && current_part <= total_parts {
+                        return Some((current_part, total_parts));
+                    }
+                }
+            }
+
+            if let Ok(re) = Regex::new(r"part(\d+)of(\d+)") {
+                if let Some(caps) = re.captures(filename) {
+                    let current_part = caps.get(1)?.as_str().parse::<u32>().ok()?;
+                    let total_parts = caps.get(2)?.as_str().parse::<u32>().ok()?;
+
+                    if total_parts > 1 && current_part <= total_parts {
+                        return Some((current_part, total_parts));
+                    }
+                }
+            }
+
+            None
+        }
+    }
+
+    /// Corpus for the multipart differential test: every multipart-ish
+    /// literal harvested from existing api.rs / cli / ui tests, plus the
+    /// plan-mandated edge cases and probes for every known divergence
+    /// between the three historical parsers.
+    const MULTIPART_CORPUS: &[&str] = &[
+        // harvested from api.rs unit tests
+        "model-Q6_K-00003-of-00009.gguf",
+        "model.Q4_K_M.gguf.part1of2",
+        "model.gguf",
+        "model.Q4_K_M-00002-of-00005.gguf",
+        "model-00002-of-00005.gguf",
+        "name-00002-of-00005.gguf",
+        "a-00003-of-00004",
+        "model-00001-of-00001.gguf",
+        "model-00006-of-00005.gguf",
+        "model.gguf.part1of2",
+        "Qwen3.5-122B-A10B-heretic.BF16-00001-of-00006.gguf",
+        "Qwen3.5-122B-A10B-heretic.mxfp4_moe-00001-of-00002.gguf",
+        "Qwen3.5-122B-A10B-heretic.mxfp4_moe-00002-of-00002.gguf",
+        "Q4_K_M/model.Q4_K_M-00001-of-00002.gguf",
+        "Q4_K_M/model.Q4_K_M-00002-of-00002.gguf",
+        "model-00001-of-00002.safetensors",
+        "Dynamic/Qwen3.5-122B-A10B-PRISM-LITE-Dynamic.gguf",
+        "Dynamic/mmproj-Qwen3.5-122B-A10B-PRISM-LITE.gguf",
+        "Qwen3.5-27B-heretic.Q8_0.gguf",
+        "mmproj-F32.gguf",
+        // harvested from cli / ui / e2e tests
+        "m-00001-of-00002.gguf",
+        "m-00002-of-00002.gguf",
+        "model-00004-of-00017.safetensors",
+        "model-00003-of-00017.safetensors",
+        "model.mxfp4_moe-00001-of-00002.gguf",
+        "Llama-3.1-8B-Q4_K_M-00002-of-00002.gguf",
+        // plan edge cases
+        "model-00003-of-00010.gguf",             // 10 parts
+        "model-5-of-9.gguf",                     // missing zero padding
+        "model.Q4_K_M.gguf.PART1OF2",            // uppercase .PART
+        "model.Q4_K_M.gguf.Part1Of2",            // mixed case
+        "cat-of-the-day.gguf",                   // "-of-" inside a name
+        "llama-of-the-ring-00001-of-00002.gguf", // "-of-" in name + real suffix
+        "00001-of-00002.safetensors",            // no base before the part
+        "model.Q4_K_M.bin-00001-of-00002.gguf",  // multiple extensions
+        "archive.tar.gz.part1of2",               // multiple extensions, partNofM
+        "",                                      // empty name
+        "模型-00001-of-00002.gguf",              // multi-byte UTF-8 base
+        // divergence probes (see the W1.7 commit's divergence table)
+        "model-00001-of-00002.gguf.part1of2", // both grammars present
+        "model.Q4_K_M.gguf.part1ofX",         // total not digits: site 2 strips, site 1 doesn't
+        "model.Q4_K_M.gguf.partXof2",         // part not digits: nobody strips
+        "model.Q4_K_M.gguf.partof5",          // empty part (vacuous digits)
+        "model.Q4_K_M.gguf.partof",           // both sides empty (vacuous)
+        "multipart1of2.gguf",                 // site 3 matches without the dot
+        "model-00001-of-2.gguf",              // total not 5 digits: sites 1+2 strip, site 3 doesn't
+        "model-12-of-00002.gguf",             // part not 5 digits
+        "model-00001-of-00002-00003-of-00004.gguf", // two groups: sites 1+2 rightmost, site 3 leftmost
+        "model.gguf.part1of2.part3of4",             // two .part suffixes: rightmost wins
+        "model-00001-of-00002",                     // 5-digit, no extension
+        "model.part1of2.gguf",                      // .part mid-name, .gguf after
+        "model.gguf.part2of1",                      // current > total: site 3 rejects
+    ];
+
+    #[test]
+    fn multipart_sites_match_legacy_oracles_on_the_corpus() {
+        for name in MULTIPART_CORPUS {
+            assert_eq!(
+                get_multipart_base_name(name),
+                legacy_multipart::get_multipart_base_name(name),
+                "get_multipart_base_name diverged for {name:?}"
+            );
+            assert_eq!(
+                extract_quantization_type(name),
+                legacy_multipart::extract_quantization_type(name),
+                "extract_quantization_type diverged for {name:?}"
+            );
+            assert_eq!(
+                parse_multipart_filename(name),
+                legacy_multipart::parse_multipart_filename(name),
+                "parse_multipart_filename diverged for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_multipart_info_recognizes_both_grammars() {
+        let info = parse_multipart_info("model.Q4_K_M-00002-of-00005.gguf").unwrap();
+        assert_eq!(info.kind, MultipartKind::FiveDigit);
+        assert_eq!(info.part, "00002");
+        assert_eq!(info.total, "");
+        assert_eq!(
+            &"model.Q4_K_M-00002-of-00005.gguf"[info.suffix_start..],
+            "-00002-of-00005.gguf"
+        );
+
+        let info = parse_multipart_info("model.Q4_K_M.gguf.part1of2").unwrap();
+        assert_eq!(info.kind, MultipartKind::PartNofM);
+        assert_eq!(info.part, "1");
+        assert_eq!(info.total, "2");
+        assert_eq!(
+            &"model.Q4_K_M.gguf.part1of2"[info.suffix_start..],
+            ".part1of2"
+        );
+
+        // Five-digit grammar wins when both are present (historical
+        // precedence of get_multipart_base_name).
+        let both = parse_multipart_info("model-00001-of-00002.gguf.part1of2").unwrap();
+        assert_eq!(both.kind, MultipartKind::FiveDigit);
+
+        // Non-5-digit part number is not the five-digit grammar; and a
+        // degenerate `.partof5` still scans as PartNofM with an empty
+        // (vacuously all-digit) part — the digit checks are the wrappers'
+        // historical rules, not the scanner's.
+        assert!(parse_multipart_info("model-5-of-9.gguf").is_none());
+        let degenerate = parse_multipart_part_suffix("model.gguf.partof5").unwrap();
+        assert_eq!((degenerate.part, degenerate.total), ("", "5"));
+    }
 
     #[test]
     fn mmproj_detection_variants() {
