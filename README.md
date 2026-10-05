@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.11.0
+# Rust HF Downloader v2.12.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -462,10 +462,20 @@ and `--no-rate-limit` disables it (both flags override the config file).
 ### Output and exit codes
 
 Human mode prints progress to **stderr** (single-line rewrites when
-interactive) and the summary to **stdout**. `--json` emits NDJSON events on
-**stdout** — `resolved`, `download_start`, `progress` (500 ms throttle),
-`file_complete`, `verification_start`, `verification_result`, `done` — and on
-failure the `error` event is **always the last line**:
+interactive) and the summary to **stdout**. Single-file runs show the
+file's bar, speed, and ETA; **multi-file runs** (several `--file`s,
+`--all`, or `hf-cache sync`) lead with one aggregate line — files
+done/total, overall %, bytes, speed, and overall ETA — with the active
+file demoted to name + percent:
+
+```text
+[3/17 files 43% │ 12.6/29.1 GB │ 88 MB/s eta 2m41s] ▸ model-00004-of-00017.safetensors 61%
+```
+
+`--json` emits NDJSON events on **stdout** — `resolved`, `download_start`,
+`progress` (500 ms throttle), `file_complete`, `verification_start`,
+`verification_result`, `done` — and on failure the `error` event is
+**always the last line**:
 
 ```json
 {"type":"error","code":"ambiguous","message":"model has 2 downloadable file(s); …","available":[{"filename":"model-Q4_K_M.gguf","size_bytes":4947802324,"sha256":"…"}, …]}

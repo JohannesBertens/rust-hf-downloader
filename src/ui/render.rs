@@ -2073,6 +2073,21 @@ pub fn render_filter_toolbar(
 // fully deterministic (no time, randomness, or environment reads).
 // =====================================================================
 
+/// Assert a named terminal snapshot with the crate version normalized to
+/// `v<VERSION>`, so UI footer snapshots stay byte-stable across version
+/// bumps — the version lives only in Cargo.toml. `env!` is compile-time,
+/// so the filter always matches the *current* build's rendered footer.
+/// (Regex filter — dots in the version are escaped.)
+#[cfg(test)]
+fn snap_ui(name: &str, terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) {
+    let pattern = format!("v{}", env!("CARGO_PKG_VERSION")).replace('.', r"\.");
+    let mut settings = insta::Settings::new();
+    settings.add_filter(&pattern, "v<VERSION>");
+    settings.bind(|| {
+        insta::assert_snapshot!(name, terminal.backend());
+    });
+}
+
 #[cfg(test)]
 mod hud_tests {
     use super::*;
@@ -2307,7 +2322,7 @@ mod hud_tests {
                 render_activity_hud(frame, area, &data);
             })
             .unwrap();
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_activity_hud_renders_matrix", &terminal);
     }
 }
 
@@ -2469,7 +2484,7 @@ mod snapshot_tests {
             "Press / to search",
             "",
         );
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_render_ui_empty_state", &terminal);
     }
 
     #[test]
@@ -2495,7 +2510,7 @@ mod snapshot_tests {
             "Press / to search",
             "Selection: 2 of 3",
         );
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_render_ui_model_list_selection", &terminal);
     }
 
     #[test]
@@ -2522,7 +2537,7 @@ mod snapshot_tests {
             "2 quantization groups available",
             "",
         );
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_render_ui_quantization_panels", &terminal);
     }
 
     #[test]
@@ -2532,7 +2547,7 @@ mod snapshot_tests {
         terminal
             .draw(|frame| render_search_popup(frame, &input))
             .expect("failed to draw search popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_search_popup", &terminal);
     }
 
     #[test]
@@ -2597,7 +2612,7 @@ mod snapshot_tests {
                 render_search_popup(frame, &input);
             })
             .expect("failed to draw UI + popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_search_popup_over_populated_ui", &terminal);
     }
 
     #[test]
@@ -2607,7 +2622,7 @@ mod snapshot_tests {
         terminal
             .draw(|frame| render_download_path_popup(frame, &input))
             .expect("failed to draw download path popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_download_path_popup", &terminal);
     }
 
     #[test]
@@ -2622,7 +2637,7 @@ mod snapshot_tests {
                 );
             })
             .expect("failed to draw auth error popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_auth_error_popup_no_token", &terminal);
     }
 
     #[test]
@@ -2637,7 +2652,7 @@ mod snapshot_tests {
                 );
             })
             .expect("failed to draw auth error popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_auth_error_popup_with_token", &terminal);
     }
 
     #[test]
@@ -2675,7 +2690,7 @@ mod snapshot_tests {
         terminal
             .draw(|frame| render_resume_popup(frame, &incomplete))
             .expect("failed to draw resume popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_resume_popup", &terminal);
     }
 
     #[test]
@@ -2695,7 +2710,7 @@ mod snapshot_tests {
                 render_options_popup(frame, &options, &directory_input, &token_input);
             })
             .expect("failed to draw options popup");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_options_popup", &terminal);
     }
 
     #[test]
@@ -2724,7 +2739,7 @@ mod snapshot_tests {
                 );
             })
             .expect("failed to draw filter toolbar");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_filter_toolbar_unfocused", &terminal);
     }
 
     #[test]
@@ -2750,7 +2765,7 @@ mod snapshot_tests {
                 );
             })
             .expect("failed to draw filter toolbar");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_filter_toolbar_sort_focused", &terminal);
     }
 
     #[test]
@@ -2776,7 +2791,7 @@ mod snapshot_tests {
                 );
             })
             .expect("failed to draw filter toolbar");
-        insta::assert_snapshot!(terminal.backend());
+        snap_ui("snapshot_filter_toolbar_downloads_focused", &terminal);
     }
 }
 

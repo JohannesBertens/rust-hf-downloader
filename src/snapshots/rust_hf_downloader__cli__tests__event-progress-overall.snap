@@ -1,0 +1,18 @@
+---
+source: src/cli.rs
+expression: json
+---
+{
+  "type": "progress",
+  "filename": "model-00003-of-00017.safetensors",
+  "downloaded_bytes": 1048576,
+  "total_bytes": 4947802324,
+  "speed_mbps": 62.4,
+  "percent": 0.021183,
+  "overall": {
+    "files_done": 2,
+    "files_total": 17,
+    "downloaded_bytes": 10485760,
+    "total_bytes": 84102439308
+  }
+}

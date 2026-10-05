@@ -666,6 +666,19 @@ pub struct Summary {
     pub total_bytes: u64,
 }
 
+/// Aggregate run progress for multi-file runs (engine downloads serially,
+/// so the active file's speed is the aggregate speed). Omitted on
+/// single-file runs and in JSON when absent.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct OverallProgress {
+    /// Files fully processed (downloaded + skipped + failed).
+    pub files_done: usize,
+    pub files_total: usize,
+    /// Bytes of finished files + the active file's partial bytes.
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -686,6 +699,9 @@ pub enum Event {
         total_bytes: u64,
         speed_mbps: f64,
         percent: f64,
+        /// Present when the run covers multiple files.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        overall: Option<OverallProgress>,
     },
     FileComplete {
         filename: String,
@@ -831,34 +847,68 @@ impl Reporter {
                 downloaded_bytes,
                 total_bytes,
                 speed_mbps,
+                overall,
                 ..
             } => {
                 if self.progress_to_tty {
-                    let bar = render_bar(*downloaded_bytes, *total_bytes);
-                    let eta = if *speed_mbps > 0.01 {
-                        let remaining = total_bytes.saturating_sub(*downloaded_bytes);
-                        let secs = remaining as f64 / (speed_mbps * 1_048_576.0);
-                        format!(" eta {}", format_eta(secs))
-                    } else {
-                        String::new()
-                    };
-                    let percent = if *total_bytes > 0 {
+                    // Percent is recomputed from the raw byte counts: the
+                    // event's `percent` field is pre-rounded to 0.1%, so
+                    // rounding it again would double-round.
+                    let file_pct = if *total_bytes > 0 {
                         (*downloaded_bytes as f64 / *total_bytes as f64) * 100.0
                     } else {
                         0.0
                     };
                     let mut stderr = std::io::stderr().lock();
-                    let _ = write!(
-                        stderr,
-                        "\r{} {}% {} {}/{} {:.1} MB/s{}",
-                        truncate_path(filename, 42),
-                        percent.round() as u64,
-                        bar,
-                        format_size(*downloaded_bytes),
-                        format_size(*total_bytes),
-                        speed_mbps,
-                        eta
-                    );
+                    if let Some(overall) = overall {
+                        // Multi-file run: one line, aggregate first; the
+                        // active file is demoted to name + percent (its
+                        // bar/bytes/eta are redundant with the aggregate).
+                        // Clamped: actual bytes can exceed the tree-reported
+                        // total (Content-Range vs tree size) — cap at 100%.
+                        let overall_pct = if overall.total_bytes > 0 {
+                            ((overall.downloaded_bytes as f64 / overall.total_bytes as f64)
+                                * 100.0)
+                                .min(100.0)
+                        } else {
+                            0.0
+                        };
+                        let remaining = overall
+                            .total_bytes
+                            .saturating_sub(overall.downloaded_bytes);
+                        // \x1b[K erases to end of line so shrinking fields
+                        // (unit crossings, a vanishing eta) leave no residue.
+                        let _ = write!(
+                            stderr,
+                            "\r[{}/{} files {}% │ {}/{} │ {:.1} MB/s{}] ▸ {} {}%\x1b[K",
+                            overall.files_done,
+                            overall.files_total,
+                            overall_pct.round() as u64,
+                            format_size(overall.downloaded_bytes),
+                            format_size(overall.total_bytes),
+                            speed_mbps,
+                            eta_suffix(*speed_mbps, remaining),
+                            truncate_path(filename, 42),
+                            file_pct.round() as u64,
+                        );
+                    } else {
+                        let bar = render_bar(*downloaded_bytes, *total_bytes);
+                        let eta = eta_suffix(
+                            *speed_mbps,
+                            total_bytes.saturating_sub(*downloaded_bytes),
+                        );
+                        let _ = write!(
+                            stderr,
+                            "\r{} {}% {} {}/{} {:.1} MB/s{}\x1b[K",
+                            truncate_path(filename, 42),
+                            file_pct.round() as u64,
+                            bar,
+                            format_size(*downloaded_bytes),
+                            format_size(*total_bytes),
+                            speed_mbps,
+                            eta
+                        );
+                    }
                     self.progress_line_active = true;
                 }
             }
@@ -1015,6 +1065,17 @@ fn render_bar(done: u64, total: u64) -> String {
     )
 }
 
+/// Suffix `" eta <t>"` for the given remaining bytes at the given speed
+/// (empty while the speed estimate is still warming up).
+fn eta_suffix(speed_mbps: f64, remaining: u64) -> String {
+    if speed_mbps > 0.01 {
+        let secs = remaining as f64 / (speed_mbps * 1_048_576.0);
+        format!(" eta {}", format_eta(secs))
+    } else {
+        String::new()
+    }
+}
+
 fn format_eta(secs: f64) -> String {
     if !secs.is_finite() || secs < 0.0 {
         return "?".to_string();
@@ -1064,6 +1125,9 @@ struct RunTally {
     failed: usize,
     hash_mismatch: usize,
     total_bytes: u64,
+    /// Bytes of fully-fetched files (Complete + AlreadyExists outcomes) —
+    /// the base for aggregate run progress (see [`OverallProgress`]).
+    done_bytes: u64,
     auth_required: bool,
     failures: Vec<String>,
     mismatches: Vec<String>,
@@ -1617,12 +1681,27 @@ async fn poll_once(
             } else {
                 0.0
             };
+            // Aggregate view for multi-file runs: finished-file bytes
+            // (tally.done_bytes) plus the active file's partial bytes. The
+            // engine downloads serially, so the active file's speed is the
+            // aggregate speed.
+            let overall = if count > 1 {
+                Some(OverallProgress {
+                    files_done: (tally.downloaded + tally.skipped + tally.failed).min(count),
+                    files_total: count,
+                    downloaded_bytes: tally.done_bytes + progress.downloaded,
+                    total_bytes: tally.total_bytes,
+                })
+            } else {
+                None
+            };
             reporter.emit(&Event::Progress {
                 filename: progress.filename.clone(),
                 downloaded_bytes: progress.downloaded,
                 total_bytes: progress.total,
                 speed_mbps: progress.speed_mbps,
                 percent: (percent * 10.0).round() / 10.0,
+                overall,
             });
         }
     }
@@ -1639,6 +1718,7 @@ fn apply_outcome_event(
     match outcome {
         FileOutcome::Complete { filename, bytes } => {
             tally.downloaded += 1;
+            tally.done_bytes += *bytes;
             reporter.emit(&Event::FileComplete {
                 filename: filename.clone(),
                 status: "downloaded",
@@ -1647,6 +1727,7 @@ fn apply_outcome_event(
         }
         FileOutcome::AlreadyExists { filename, bytes } => {
             tally.skipped += 1;
+            tally.done_bytes += *bytes;
             reporter.emit(&Event::FileComplete {
                 filename: filename.clone(),
                 status: "already_exists",
@@ -1684,13 +1765,20 @@ fn count_outcomes(outcomes: &[FileOutcome], tally: &mut RunTally) {
     tally.downloaded = 0;
     tally.skipped = 0;
     tally.failed = 0;
+    tally.done_bytes = 0;
     tally.auth_required = false;
     tally.failures.clear();
     tally.outcomes = outcomes.to_vec();
     for outcome in outcomes {
         match outcome {
-            FileOutcome::Complete { .. } => tally.downloaded += 1,
-            FileOutcome::AlreadyExists { .. } => tally.skipped += 1,
+            FileOutcome::Complete { bytes, .. } => {
+                tally.downloaded += 1;
+                tally.done_bytes += bytes;
+            }
+            FileOutcome::AlreadyExists { bytes, .. } => {
+                tally.skipped += 1;
+                tally.done_bytes += bytes;
+            }
             FileOutcome::AuthRequired { .. } => tally.auth_required = true,
             FileOutcome::Failed { filename, reason } => {
                 tally.failed += 1;
@@ -3542,8 +3630,29 @@ mod tests {
                 total_bytes: 4_947_802_324,
                 speed_mbps: 62.4,
                 percent: 0.021_183,
+                overall: None,
             },
             "event-progress",
+        );
+    }
+
+    #[test]
+    fn snapshot_event_progress_overall() {
+        snap(
+            &Event::Progress {
+                filename: "model-00003-of-00017.safetensors".to_string(),
+                downloaded_bytes: 1_048_576,
+                total_bytes: 4_947_802_324,
+                speed_mbps: 62.4,
+                percent: 0.021_183,
+                overall: Some(OverallProgress {
+                    files_done: 2,
+                    files_total: 17,
+                    downloaded_bytes: 10_485_760,
+                    total_bytes: 84_102_439_308,
+                }),
+            },
+            "event-progress-overall",
         );
     }
 
