@@ -1435,3 +1435,53 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
     assert_file_content(&base.join("model.mxfp4_moe-00001-of-00002.gguf"), &mxfp4_p1);
     assert_file_content(&base.join("model.mxfp4_moe-00002-of-00002.gguf"), &mxfp4_p2);
 }
+
+#[tokio::test]
+async fn download_progress_plain_prints_lines_without_tty() {
+    let one = fixture_bytes(50_000);
+    let two = fixture_bytes(50_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![
+            FileEntry {
+                path: "one.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&one)),
+                content: one.clone(),
+            },
+            FileEntry {
+                path: "two.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&two)),
+                content: two.clone(),
+            },
+        ],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        // Slow requests keep file 1 in flight across the monitor's first
+        // 400 ms poll tick, so a progress event exists to render.
+        per_request_delay: Duration::from_millis(250),
+        search_results: Vec::new(),
+        branches: Vec::new(),
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    // TestEnv pipes stdout/stderr (non-tty): auto mode prints nothing,
+    // plain must print aggregate progress as plain newline lines.
+    let (code, stdout, stderr) = env
+        .run(&["download", "a/b", "--all", "--progress", "plain"])
+        .await;
+    assert_exit_code(code, 0, &stdout, &stderr);
+
+    assert!(
+        stderr.contains(" files "),
+        "expected an aggregate progress line on stderr, got: {stderr}"
+    );
+    assert!(stderr.contains("MB/s"), "speed missing: {stderr}");
+    assert!(
+        !stderr.contains('\r'),
+        "plain mode must not use \\r rewrites"
+    );
+    assert_file_content(&env.models_dir().join("a/b/one.gguf"), &one);
+    assert_file_content(&env.models_dir().join("a/b/two.gguf"), &two);
+}

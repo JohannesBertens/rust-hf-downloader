@@ -21,6 +21,7 @@
 
 use crate::engine::{EngineState, ManagerHandle};
 use crate::models::{FileOutcome, ModelMetadata, QuantizationGroup, VerifyOutcome};
+use crate::utils::format_size;
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -247,6 +248,11 @@ pub struct DownloadArgs {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Progress output mode: auto (tty rewrites), plain (one line every
+    /// ~10 s, works without a tty), none [default: auto]
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
+    pub progress: ProgressMode,
+
     /// Enable download rate limiting (uses --rate-limit-mbps or the
     /// config-file value)
     #[arg(long, conflicts_with = "no_rate_limit")]
@@ -353,6 +359,11 @@ pub struct HfCacheSyncArgs {
     /// Suppress progress output; errors and the final summary only
     #[arg(short, long)]
     pub quiet: bool,
+
+    /// Progress output mode: auto (tty rewrites), plain (one line every
+    /// ~10 s, works without a tty), none [default: auto]
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
+    pub progress: ProgressMode,
 
     /// Enable download rate limiting (uses --rate-limit-mbps or the
     /// config-file value)
@@ -759,6 +770,21 @@ pub enum Event {
 const PROGRESS_BAR_WIDTH: usize = 20;
 /// Minimum interval between JSON `progress` events per run.
 const JSON_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+/// Minimum interval between `--progress plain` heartbeat lines.
+const PLAIN_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Human progress output mode (`--progress`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProgressMode {
+    /// Single-line `\r` rewrites on a tty; nothing when piped (default)
+    Auto,
+    /// One newline progress line every ~10 s, tty-independent (for docker
+    /// run / CI logs); adds a verification heartbeat during the
+    /// post-download SHA256 drain
+    Plain,
+    /// No progress output at all
+    None,
+}
 
 /// Renders [`Event`]s either as human-readable text (progress to stderr,
 /// summary to stdout) or as NDJSON on stdout.
@@ -767,19 +793,52 @@ pub struct Reporter {
     quiet: bool,
     /// Single-line `\r` progress rewrites are only used when stderr is a tty.
     progress_to_tty: bool,
+    /// `--progress plain`: throttled newline progress lines regardless of
+    /// tty (shares one throttle window with the verification heartbeat).
+    progress_plain: bool,
     progress_line_active: bool,
     last_json_progress: Option<Instant>,
+    last_plain_progress: Option<Instant>,
 }
 
 impl Reporter {
-    pub fn new(json: bool, quiet: bool) -> Self {
+    pub fn new(json: bool, quiet: bool, progress: ProgressMode) -> Self {
+        let human_progress = !json && !quiet && progress != ProgressMode::None;
         Self {
             json,
             quiet,
-            progress_to_tty: !json && !quiet && std::io::stderr().is_terminal(),
+            progress_to_tty: human_progress
+                && progress == ProgressMode::Auto
+                && std::io::stderr().is_terminal(),
+            progress_plain: human_progress && progress == ProgressMode::Plain,
             progress_line_active: false,
             last_json_progress: None,
+            last_plain_progress: None,
         }
+    }
+
+    /// True when a `--progress plain` heartbeat line is due (and records
+    /// the emission).
+    fn plain_progress_due(&mut self, now: Instant) -> bool {
+        if self
+            .last_plain_progress
+            .is_some_and(|last| now.duration_since(last) < PLAIN_PROGRESS_INTERVAL)
+        {
+            return false;
+        }
+        self.last_plain_progress = Some(now);
+        true
+    }
+
+    /// `--progress plain` heartbeat for the verification drain: downloads
+    /// finished, SHA256 still hashing — no `progress` events fire in that
+    /// phase, so without this the tail of a run is silent between
+    /// `✓ verified` milestones.
+    pub fn plain_verification(&mut self, active: usize, done: usize) {
+        if !self.progress_plain || !self.plain_progress_due(Instant::now()) {
+            return;
+        }
+        self.line_stderr(&verification_heartbeat_line(active, done));
     }
 
     fn emit_json(&mut self, event: &Event) {
@@ -850,65 +909,28 @@ impl Reporter {
                 overall,
                 ..
             } => {
-                if self.progress_to_tty {
-                    // Percent is recomputed from the raw byte counts: the
-                    // event's `percent` field is pre-rounded to 0.1%, so
-                    // rounding it again would double-round.
-                    let file_pct = if *total_bytes > 0 {
-                        (*downloaded_bytes as f64 / *total_bytes as f64) * 100.0
-                    } else {
-                        0.0
-                    };
-                    let mut stderr = std::io::stderr().lock();
-                    if let Some(overall) = overall {
-                        // Multi-file run: one line, aggregate first; the
-                        // active file is demoted to name + percent (its
-                        // bar/bytes/eta are redundant with the aggregate).
-                        // Clamped: actual bytes can exceed the tree-reported
-                        // total (Content-Range vs tree size) — cap at 100%.
-                        let overall_pct = if overall.total_bytes > 0 {
-                            ((overall.downloaded_bytes as f64 / overall.total_bytes as f64)
-                                * 100.0)
-                                .min(100.0)
-                        } else {
-                            0.0
-                        };
-                        let remaining = overall
-                            .total_bytes
-                            .saturating_sub(overall.downloaded_bytes);
-                        // \x1b[K erases to end of line so shrinking fields
-                        // (unit crossings, a vanishing eta) leave no residue.
-                        let _ = write!(
-                            stderr,
-                            "\r[{}/{} files {}% │ {}/{} │ {:.1} MB/s{}] ▸ {} {}%\x1b[K",
-                            overall.files_done,
-                            overall.files_total,
-                            overall_pct.round() as u64,
-                            format_size(overall.downloaded_bytes),
-                            format_size(overall.total_bytes),
-                            speed_mbps,
-                            eta_suffix(*speed_mbps, remaining),
-                            truncate_path(filename, 42),
-                            file_pct.round() as u64,
-                        );
-                    } else {
-                        let bar = render_bar(*downloaded_bytes, *total_bytes);
-                        let eta = eta_suffix(
-                            *speed_mbps,
-                            total_bytes.saturating_sub(*downloaded_bytes),
-                        );
-                        let _ = write!(
-                            stderr,
-                            "\r{} {}% {} {}/{} {:.1} MB/s{}\x1b[K",
-                            truncate_path(filename, 42),
-                            file_pct.round() as u64,
-                            bar,
-                            format_size(*downloaded_bytes),
-                            format_size(*total_bytes),
-                            speed_mbps,
-                            eta
-                        );
+                let content = match overall {
+                    Some(overall) => format_overall_progress(
+                        filename,
+                        *downloaded_bytes,
+                        *total_bytes,
+                        overall,
+                        *speed_mbps,
+                    ),
+                    None => format_file_progress(filename, *downloaded_bytes, *total_bytes, *speed_mbps),
+                };
+                if self.progress_plain {
+                    // tty-independent heartbeat: one line per interval
+                    // through the normal line printer (no \r rewrites, so
+                    // piped/docker logs stay clean).
+                    if self.plain_progress_due(Instant::now()) {
+                        self.line_stderr(&content);
                     }
+                } else if self.progress_to_tty {
+                    let mut stderr = std::io::stderr().lock();
+                    // \x1b[K erases to end of line so shrinking fields
+                    // (unit crossings, a vanishing eta) leave no residue.
+                    let _ = write!(stderr, "\r{content}\x1b[K");
                     self.progress_line_active = true;
                 }
             }
@@ -1051,6 +1073,72 @@ impl Reporter {
     }
 }
 
+/// Single-file progress line content (no `\r`/erase wrapper — the tty
+/// renderer adds those; `--progress plain` prints it as-is).
+///
+/// Percent is computed from the raw byte counts: the event's `percent`
+/// field is pre-rounded to 0.1%, so rounding it again would double-round.
+fn format_file_progress(filename: &str, downloaded: u64, total: u64, speed_mbps: f64) -> String {
+    let pct = if total > 0 {
+        (downloaded as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+    format!(
+        "{} {}% {} {}/{} {:.1} MB/s{}",
+        truncate_path(filename, 42),
+        pct.round() as u64,
+        render_bar(downloaded, total),
+        format_size(downloaded),
+        format_size(total),
+        speed_mbps,
+        eta_suffix(speed_mbps, total.saturating_sub(downloaded)),
+    )
+}
+
+/// Multi-file (aggregate) progress line content: aggregate first, the
+/// active file demoted to name + percent. The aggregate percent is
+/// clamped at 100% — actual bytes can exceed the tree-reported total
+/// (Content-Range vs tree size).
+fn format_overall_progress(
+    filename: &str,
+    file_downloaded: u64,
+    file_total: u64,
+    overall: &OverallProgress,
+    speed_mbps: f64,
+) -> String {
+    let file_pct = if file_total > 0 {
+        (file_downloaded as f64 / file_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    let overall_pct = if overall.total_bytes > 0 {
+        ((overall.downloaded_bytes as f64 / overall.total_bytes as f64) * 100.0).min(100.0)
+    } else {
+        0.0
+    };
+    format!(
+        "[{}/{} files {}% │ {}/{} │ {:.1} MB/s{}] ▸ {} {}%",
+        overall.files_done,
+        overall.files_total,
+        overall_pct.round() as u64,
+        format_size(overall.downloaded_bytes),
+        format_size(overall.total_bytes),
+        speed_mbps,
+        eta_suffix(
+            speed_mbps,
+            overall.total_bytes.saturating_sub(overall.downloaded_bytes),
+        ),
+        truncate_path(filename, 42),
+        file_pct.round() as u64,
+    )
+}
+
+/// `--progress plain` verification-drain heartbeat.
+fn verification_heartbeat_line(active: usize, done: usize) -> String {
+    format!("verifying: {active} in flight, {done} verified")
+}
+
 fn render_bar(done: u64, total: u64) -> String {
     let filled = if total == 0 {
         PROGRESS_BAR_WIDTH
@@ -1154,7 +1242,7 @@ impl RunTally {
 }
 
 async fn run_download(args: DownloadArgs) -> i32 {
-    let mut reporter = Reporter::new(args.json, args.quiet);
+    let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
 
     // --- 1. Configuration ------------------------------------------------
     let mut options = crate::config::load_config();
@@ -1447,7 +1535,7 @@ fn render_search_table(models: &[ModelDto]) {
 }
 
 async fn run_search(args: SearchArgs) -> i32 {
-    let mut reporter = Reporter::new(args.json, false);
+    let mut reporter = Reporter::new(args.json, false, ProgressMode::Auto);
     let options = crate::config::load_config();
     let token = merge_token(
         args.token.clone(),
@@ -1644,7 +1732,9 @@ async fn poll_once(
     }
 
     // Verification starts (new entries in the active-progress list)
+    let mut verifying_active = 0usize;
     if let Ok(progress) = state.verification_progress.try_lock() {
+        verifying_active = progress.len();
         for entry in progress.iter() {
             if seen_verifying.insert(entry.filename.clone()) {
                 reporter.emit(&Event::VerificationStart {
@@ -1662,8 +1752,10 @@ async fn poll_once(
     }
 
     // Download progress (single line for the currently-active file)
+    let mut download_active = false;
     if let Ok(guard) = state.download_progress.try_lock() {
         if let Some(progress) = guard.as_ref() {
+            download_active = true;
             if seen_download.as_deref() != Some(progress.filename.as_str()) {
                 *seen_download = Some(progress.filename.clone());
                 reporter.emit(&Event::DownloadStart {
@@ -1704,6 +1796,14 @@ async fn poll_once(
                 overall,
             });
         }
+    }
+
+    // `--progress plain` heartbeat for the verification drain: downloads
+    // finished (or between files), SHA256 still hashing — no progress
+    // events fire in that phase. Shares the plain throttle window with
+    // the download line, so at most one heartbeat every ~10 s total.
+    if !download_active && (verifying_active > 0 || !state.verification_idle()) {
+        reporter.plain_verification(verifying_active, tally.verified);
     }
 }
 
@@ -2174,7 +2274,7 @@ fn print_sync_dry_run(
 // --- `hf-cache sync` (§5.2 pipeline, followed exactly) ---------------------
 
 async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
-    let mut reporter = Reporter::new(args.json, args.quiet);
+    let mut reporter = Reporter::new(args.json, args.quiet, args.progress);
 
     // --- 1. Configuration (mirrors run_download, minus the output-dir
     //        override: the destination is the hub cache, §4.1) -------------
@@ -3195,6 +3295,7 @@ mod tests {
             quant: quant.map(String::from),
             file: file.iter().map(|f| f.to_string()).collect(),
             all,
+            progress: ProgressMode::Auto,
             output: None,
             token: None,
             no_verify: false,
@@ -3296,6 +3397,99 @@ mod tests {
         assert!(parse_rate_limit_mbps("abc").is_err());
         assert!(parse_rate_limit_mbps("inf").is_err());
         assert!(parse_rate_limit_mbps("NaN").is_err());
+    }
+
+    #[test]
+    fn progress_mode_flag_parses_and_defaults() {
+        // default: auto
+        let args = Cli::try_parse_from(["hf-downloader", "download", "a/b"]).unwrap();
+        let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
+            panic!("expected download subcommand");
+        };
+        assert_eq!(args.progress, ProgressMode::Auto);
+
+        // explicit modes on download
+        for (raw, mode) in [
+            ("auto", ProgressMode::Auto),
+            ("plain", ProgressMode::Plain),
+            ("none", ProgressMode::None),
+        ] {
+            let args = Cli::try_parse_from(["hf-downloader", "download", "a/b", "--progress", raw])
+                .unwrap();
+            let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
+                panic!("expected download subcommand");
+            };
+            assert_eq!(args.progress, mode, "--progress {raw}");
+        }
+
+        // hf-cache sync accepts it too
+        let args =
+            Cli::try_parse_from(["hf-downloader", "hf-cache", "sync", "a/b", "--progress", "plain"])
+                .unwrap();
+        let crate::cli::Command::HfCache(hf) = args.command.expect("subcommand") else {
+            panic!("expected hf-cache subcommand");
+        };
+        let crate::cli::HfCacheCommand::Sync(args) = hf.command else {
+            panic!("expected hf-cache sync subcommand");
+        };
+        assert_eq!(args.progress, ProgressMode::Plain);
+
+        // unknown mode is a usage error
+        assert!(
+            Cli::try_parse_from(["hf-downloader", "download", "a/b", "--progress", "sparkly"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn format_file_progress_layout() {
+        let line = format_file_progress("model-Q4_K_M.gguf", 1_073_741_824, 2_147_483_648, 100.0);
+        // 50% of a 20-cell bar, sizes in GiB units, eta from the remaining
+        // 1 GiB at 100 MiB/s = 10.24s → 10s
+        assert_eq!(
+            line,
+            "model-Q4_K_M.gguf 50% [██████████░░░░░░░░░░] 1.00 GB/2.00 GB 100.0 MB/s eta 10s"
+        );
+    }
+
+    #[test]
+    fn format_overall_progress_layout_and_clamp() {
+        let overall = OverallProgress {
+            files_done: 3,
+            files_total: 17,
+            downloaded_bytes: 10_485_760,
+            total_bytes: 84_102_439_308,
+        };
+        let line = format_overall_progress(
+            "model-00004-of-00017.safetensors",
+            2_900_000_000,
+            4_947_802_324,
+            &overall,
+            88.0,
+        );
+        assert_eq!(
+            line,
+            "[3/17 files 0% │ 10.00 MB/78.33 GB │ 88.0 MB/s eta 15m11s] ▸ model-00004-of-00017.safetensors 59%"
+        );
+
+        // Actual bytes exceeding the tree-reported total clamp at 100%
+        // (Content-Range vs tree size), not 104%.
+        let over = OverallProgress {
+            files_done: 2,
+            files_total: 2,
+            downloaded_bytes: 104_857_600,
+            total_bytes: 102_760_448,
+        };
+        let line = format_overall_progress("f.bin", 104_857_600, 102_760_448, &over, 5.0);
+        assert!(line.starts_with("[2/2 files 100% │ 100.00 MB/98.00 MB"));
+    }
+
+    #[test]
+    fn verification_heartbeat_line_format() {
+        assert_eq!(
+            verification_heartbeat_line(2, 41),
+            "verifying: 2 in flight, 41 verified"
+        );
     }
 
     #[test]

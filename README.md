@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.12.0
+# Rust HF Downloader v2.13.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -471,6 +471,13 @@ file demoted to name + percent:
 ```text
 [3/17 files 43% │ 12.6/29.1 GB │ 88 MB/s eta 2m41s] ▸ model-00004-of-00017.safetensors 61%
 ```
+
+`--progress` controls human progress output (stderr): `auto` (default)
+rewrites one line on a tty and stays silent when piped; `plain` prints
+one newline progress line every ~10 s regardless of tty — built for
+`docker run` (no `-t`), CI logs, and `tee`, and it keeps ticking through
+the verification drain (`verifying: 2 in flight, 41 verified`);
+`none` disables progress entirely.
 
 `--json` emits NDJSON events on **stdout** — `resolved`, `download_start`,
 `progress` (500 ms throttle), `file_complete`, `verification_start`,
