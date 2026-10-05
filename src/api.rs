@@ -559,7 +559,7 @@ pub fn get_multipart_base_name(filename: &str) -> String {
     filename.to_string()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub fn is_quantization_directory(dirname: &str) -> bool {
     // Check if directory name looks like a quantization type
     // Examples: Q4_K_M, Q8_0, Q5_K_S, IQ4_XS, TQ1_0, MXFP4, BF16, etc.

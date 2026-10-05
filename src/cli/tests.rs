@@ -1,4 +1,24 @@
-use super::*;
+use clap::Parser;
+use std::path::Path;
+
+use crate::models::{ModelMetadata, QuantizationGroup};
+
+use super::args::{
+    apply_rate_limit_overrides, merge_token, parse_rate_limit_mbps, parse_revision, valid_model_id,
+    DownloadArgs, HfCacheArgs, HfCacheCommand, ModelDto,
+};
+use super::events::{Event, FileDto, OverallProgress, Summary};
+use super::hf_cache_cmd::{
+    absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
+    SyncSelectionError,
+};
+use super::report::{
+    format_eta, format_file_progress, format_overall_progress, render_bar, truncate_path,
+    verification_heartbeat_line, ProgressMode, Reporter,
+};
+use super::resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};
+use super::search_cmd::effective_search_params;
+use super::{Cli, Command};
 
 fn file_spec(filename: &str, size: u64) -> FileSpec {
     FileSpec {
@@ -302,7 +322,7 @@ fn progress_mode_flag_parses_and_defaults() {
     let crate::cli::Command::HfCache(hf) = args.command.expect("subcommand") else {
         panic!("expected hf-cache subcommand");
     };
-    let crate::cli::HfCacheCommand::Sync(args) = hf.command else {
+    let HfCacheCommand::Sync(args) = hf.command else {
         panic!("expected hf-cache sync subcommand");
     };
     assert_eq!(args.progress, ProgressMode::Plain);

@@ -39,32 +39,6 @@ use hf_cache_cmd::run_hf_cache;
 use search_cmd::run_search;
 use update_cmd::run_update;
 
-#[cfg(test)]
-use crate::models::{ModelMetadata, QuantizationGroup};
-#[cfg(test)]
-use args::{
-    apply_rate_limit_overrides, merge_token, parse_rate_limit_mbps, parse_revision, valid_model_id,
-    HfCacheCommand, ModelDto,
-};
-#[cfg(test)]
-use events::{Event, FileDto, OverallProgress, Summary};
-#[cfg(test)]
-use hf_cache_cmd::{
-    absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
-    SyncSelectionError,
-};
-#[cfg(test)]
-use report::{
-    format_eta, format_file_progress, format_overall_progress, render_bar, truncate_path,
-    verification_heartbeat_line, ProgressMode, Reporter,
-};
-#[cfg(test)]
-use resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};
-#[cfg(test)]
-use search_cmd::effective_search_params;
-#[cfg(test)]
-use std::path::Path;
-
 #[derive(Parser, Debug)]
 #[command(
     name = "rust-hf-downloader",
