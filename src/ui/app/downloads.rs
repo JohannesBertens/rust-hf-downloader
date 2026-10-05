@@ -1,6 +1,6 @@
 use super::state::App;
 use crate::api::fetch_multipart_sha256s;
-use crate::engine::QueuedDownload;
+use crate::engine::{EnqueuePolicy, QueuedDownload};
 use crate::models::*;
 use crate::paths::sanitize::validate_and_sanitize_path;
 use crate::registry;
@@ -198,9 +198,13 @@ impl App {
 
                 let num_files = filenames_to_download.len();
 
-                // Fetch SHA256 hashes for all files
+                // Fetch multipart SHA256 hashes. The map itself is no
+                // longer read (every queued part carries its own sha from
+                // the quantization info; the map lookups were dead code),
+                // but the fetch and its failure warning are observable,
+                // so both stay.
                 let token = self.options.hf_token.as_ref();
-                let sha256_map = if num_files > 1 {
+                let _sha256_map = if num_files > 1 {
                     match fetch_multipart_sha256s(
                         &model.id,
                         crate::api::DEFAULT_REVISION,
@@ -219,113 +223,41 @@ impl App {
                     HashMap::new() // Single file uses quant.sha256 directly
                 };
 
-                // Load registry and add metadata entries for all files
-                let mut registry = {
-                    let reg = self.engine.download_registry.lock().await;
-                    reg.clone()
-                };
+                // Queue payload; the registry entries are derived from
+                // these same fields by the enqueue transaction below.
+                let queued: Vec<QueuedDownload> = files_to_download
+                    .iter()
+                    .map(|f| QueuedDownload {
+                        model_id: model.id.clone(),
+                        revision: crate::api::DEFAULT_REVISION.to_string(),
+                        filename: f.filename.clone(),
+                        base_path: model_path.clone(),
+                        expected_sha256: f.sha256.clone(),
+                        hf_token: self.options.hf_token.clone(),
+                        total_size: f.size,
+                    })
+                    .collect();
 
-                for (idx, filename) in filenames_to_download.iter().enumerate() {
-                    // Validate each filename before processing
-                    let validated_path =
-                        match validate_and_sanitize_path(&base_path, &model.id, filename) {
-                            Ok(path) => path,
-                            Err(e) => {
-                                *self.error.write() =
-                                    Some(format!("Invalid filename '{}': {}", filename, e));
-                                continue;
-                            }
-                        };
+                // Shared enqueue transaction, GGUF-quant flavor: registry
+                // mirror upsert with zero-size entries, queue accounted
+                // before the sends, HUD mirror per successful send,
+                // failed-send tail rollback. Files whose path fails
+                // validation are skipped from the registry — and still
+                // queued, exactly as before.
+                let outcome = self
+                    .engine
+                    .enqueue(
+                        &self.download_tx,
+                        &queued,
+                        &EnqueuePolicy::tui_quant(&base_path),
+                    )
+                    .await;
 
-                    let url =
-                        crate::api::resolve_url(&model.id, filename, crate::api::DEFAULT_REVISION);
-                    let local_path_str = validated_path.to_string_lossy().to_string();
-
-                    // Only add if not already in registry
-                    if !registry.downloads.iter().any(|d| d.url == url) {
-                        // Get SHA256 from the corresponding QuantizationInfo
-                        let expected_sha256 = if idx < files_to_download.len() {
-                            files_to_download[idx].sha256.clone()
-                        } else if num_files == 1 {
-                            files_to_download[0].sha256.clone()
-                        } else {
-                            // Look up hash for this specific part from fetched map
-                            sha256_map.get(filename).and_then(|h| h.clone())
-                        };
-
-                        registry.downloads.push(DownloadMetadata {
-                            model_id: model.id.clone(),
-                            filename: filename.clone(),
-                            url: url.clone(),
-                            local_path: local_path_str,
-                            total_size: 0,
-                            downloaded_size: 0,
-                            status: DownloadStatus::Incomplete,
-                            expected_sha256,
-                            revision: None,
-                        });
-                    }
+                for (filename, err) in &outcome.invalid {
+                    *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
                 }
 
-                // Save registry with all new entries
-                registry::save_registry(&registry);
-                {
-                    let mut reg = self.engine.download_registry.lock().await;
-                    *reg = registry;
-                }
-
-                // Calculate total bytes for all files being queued
-                let total_queued_bytes: u64 = files_to_download.iter().map(|f| f.size).sum();
-
-                // Increment queue size and bytes by number of files
-                {
-                    let mut queue = self.engine.download_queue.lock().await;
-                    queue.add(num_files, total_queued_bytes);
-                }
-
-                // Send all download requests
-                let mut success_count = 0;
-                let hf_token = self.options.hf_token.clone();
-                for (idx, filename) in filenames_to_download.iter().enumerate() {
-                    // Get SHA256 from the corresponding QuantizationInfo
-                    let sha256 = if idx < files_to_download.len() {
-                        files_to_download[idx].sha256.clone()
-                    } else {
-                        // Fallback: look up hash from fetched map
-                        sha256_map.get(filename).and_then(|h| h.clone())
-                    };
-
-                    // Get file size from the corresponding QuantizationInfo
-                    let file_size = if idx < files_to_download.len() {
-                        files_to_download[idx].size
-                    } else {
-                        0 // Fallback for safety
-                    };
-
-                    if self
-                        .download_tx
-                        .send(QueuedDownload {
-                            model_id: model.id.clone(),
-                            revision: crate::api::DEFAULT_REVISION.to_string(),
-                            filename: filename.clone(),
-                            base_path: model_path.clone(),
-                            expected_sha256: sha256,
-                            hf_token: hf_token.clone(),
-                            total_size: file_size,
-                        })
-                        .is_ok()
-                    {
-                        success_count += 1;
-                        // Mirror the queued file for HUD display
-                        let mut items = self.engine.download_queue_items.lock().await;
-                        items.push(crate::models::QueueItemSummary {
-                            filename: filename.clone(),
-                            total_size: file_size,
-                        });
-                    }
-                }
-
-                if success_count > 0 {
+                if outcome.sent > 0 {
                     if num_files > 1 {
                         *self.status.write() = format!(
                             "Queued {} parts of {} to {}",
@@ -343,19 +275,6 @@ impl App {
                 } else {
                     *self.error.write() = Some("Failed to start download".to_string());
                 }
-
-                // Adjust queue size and bytes if some sends failed
-                if success_count < num_files {
-                    let failed_count = num_files - success_count;
-                    let failed_bytes: u64 = files_to_download
-                        .iter()
-                        .skip(success_count)
-                        .map(|f| f.size)
-                        .sum();
-
-                    let mut queue = self.engine.download_queue.lock().await;
-                    queue.remove(failed_count, failed_bytes);
-                }
             }
         }
     }
@@ -365,54 +284,48 @@ impl App {
         let count = self.incomplete_downloads.len();
         let hf_token = self.options.hf_token.clone();
         let default_dir = self.options.default_directory.clone();
-        let mut total_bytes: u64 = 0;
 
-        for metadata in &self.incomplete_downloads {
-            // Calculate model_path as base/author/model_name (without file's subdirectory)
-            // The filename may contain subdirectories (e.g., "Q4_1/model.gguf")
-            // which will be appended during download
-            let model_parts: Vec<&str> = metadata.model_id.split('/').collect();
-            let base_path = if model_parts.len() == 2 {
-                PathBuf::from(&default_dir)
-                    .join(model_parts[0])
-                    .join(model_parts[1])
-            } else {
-                // Fallback to deriving from local_path if model_id format is unexpected
-                PathBuf::from(&metadata.local_path)
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from(&default_dir))
-            };
-
-            total_bytes += metadata.total_size;
-
-            let _ = self.download_tx.send(QueuedDownload {
-                model_id: metadata.model_id.clone(),
-                revision: metadata
-                    .revision
-                    .clone()
-                    .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string()),
-                filename: metadata.filename.clone(),
-                base_path,
-                expected_sha256: metadata.expected_sha256.clone(),
-                hf_token: hf_token.clone(),
-                total_size: metadata.total_size,
-            });
-            // Mirror the queued file for HUD display
-            {
-                let mut items = self.engine.download_queue_items.lock().await;
-                items.push(crate::models::QueueItemSummary {
+        // Files land under base/author/model (without the filename's own
+        // subdirectory, e.g. "Q4_1/model.gguf" — download.rs appends it); a
+        // malformed model_id falls back to the recorded local_path's
+        // parent directory.
+        let queued: Vec<QueuedDownload> = self
+            .incomplete_downloads
+            .iter()
+            .map(|metadata| {
+                let model_parts: Vec<&str> = metadata.model_id.split('/').collect();
+                let base_path = if model_parts.len() == 2 {
+                    PathBuf::from(&default_dir)
+                        .join(model_parts[0])
+                        .join(model_parts[1])
+                } else {
+                    PathBuf::from(&metadata.local_path)
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| PathBuf::from(&default_dir))
+                };
+                QueuedDownload {
+                    model_id: metadata.model_id.clone(),
+                    revision: metadata
+                        .revision
+                        .clone()
+                        .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string()),
                     filename: metadata.filename.clone(),
+                    base_path,
+                    expected_sha256: metadata.expected_sha256.clone(),
+                    hf_token: hf_token.clone(),
                     total_size: metadata.total_size,
-                });
-            }
-        }
+                }
+            })
+            .collect();
 
-        // Update queue size and bytes
-        {
-            let mut queue = self.engine.download_queue.lock().await;
-            queue.add(count, total_bytes);
-        }
+        // Shared enqueue transaction, resume flavor: no registry writes
+        // (the entries already exist), HUD summary per file regardless of
+        // send result, queue accounted once after the sends.
+        let _ = self
+            .engine
+            .enqueue(&self.download_tx, &queued, &EnqueuePolicy::tui_resume())
+            .await;
 
         *self.status.write() = format!("Resuming {} incomplete download(s)", count);
         self.incomplete_downloads.clear();
@@ -493,70 +406,8 @@ impl App {
                     return;
                 }
 
-                let num_files = files_to_download.len();
-
-                // Load registry
-                let mut registry = {
-                    let reg = self.engine.download_registry.lock().await;
-                    reg.clone()
-                };
-
-                // Add metadata entries for all files
-                for file in &files_to_download {
-                    let filename = &file.rfilename;
-
-                    // Validate path
-                    let validated_path =
-                        match validate_and_sanitize_path(&base_path, &model.id, filename) {
-                            Ok(path) => path,
-                            Err(e) => {
-                                *self.error.write() =
-                                    Some(format!("Invalid filename '{}': {}", filename, e));
-                                continue;
-                            }
-                        };
-
-                    let url =
-                        crate::api::resolve_url(&model.id, filename, crate::api::DEFAULT_REVISION);
-                    let local_path_str = validated_path.to_string_lossy().to_string();
-
-                    // Only add if not already in registry
-                    if !registry.downloads.iter().any(|d| d.url == url) {
-                        // Extract SHA256 from LFS info if available
-                        let expected_sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
-
-                        registry.downloads.push(DownloadMetadata {
-                            model_id: model.id.clone(),
-                            filename: filename.clone(),
-                            url: url.clone(),
-                            local_path: local_path_str,
-                            total_size: file.size.unwrap_or(0),
-                            downloaded_size: 0,
-                            status: DownloadStatus::Incomplete,
-                            expected_sha256,
-                            revision: None,
-                        });
-                    }
-                }
-
-                // Save registry with all new entries
-                registry::save_registry(&registry);
-                {
-                    let mut reg = self.engine.download_registry.lock().await;
-                    *reg = registry;
-                }
-
-                // Calculate total bytes for all files
-                let total_queued_bytes: u64 = files_to_download.iter().filter_map(|f| f.size).sum();
-
-                // Increment queue size and bytes
-                {
-                    let mut queue = self.engine.download_queue.lock().await;
-                    queue.add(num_files, total_queued_bytes);
-                }
-
-                // Calculate the model root directory (base/author/model_name)
-                // This is where all files will be organized with their subdirectory structure
+                // Files land under base/author/model, each file
+                // preserving its subdirectory structure.
                 let model_parts: Vec<&str> = model.id.split('/').collect();
                 let model_root = if model_parts.len() == 2 {
                     PathBuf::from(&base_path)
@@ -566,58 +417,49 @@ impl App {
                     PathBuf::from(&base_path)
                 };
 
-                // Send all download requests - each file will preserve its subdirectory structure
-                let mut success_count = 0;
-                let hf_token = self.options.hf_token.clone();
-                for file in &files_to_download {
-                    let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
-                    let file_size = file.size.unwrap_or(0);
+                // Queue payload; the registry entries are derived from
+                // these same fields by the enqueue transaction below.
+                let queued: Vec<QueuedDownload> = files_to_download
+                    .iter()
+                    .map(|file| QueuedDownload {
+                        model_id: model.id.clone(),
+                        revision: crate::api::DEFAULT_REVISION.to_string(),
+                        filename: file.rfilename.clone(),
+                        base_path: model_root.clone(),
+                        expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+                        hf_token: self.options.hf_token.clone(),
+                        total_size: file.size.unwrap_or(0),
+                    })
+                    .collect();
 
-                    if self
-                        .download_tx
-                        .send(QueuedDownload {
-                            model_id: model.id.clone(),
-                            revision: crate::api::DEFAULT_REVISION.to_string(),
-                            filename: file.rfilename.clone(),
-                            base_path: model_root.clone(),
-                            expected_sha256: sha256,
-                            hf_token: hf_token.clone(),
-                            total_size: file_size,
-                        })
-                        .is_ok()
-                    {
-                        success_count += 1;
-                        // Mirror the queued file for HUD display
-                        let mut items = self.engine.download_queue_items.lock().await;
-                        items.push(crate::models::QueueItemSummary {
-                            filename: file.rfilename.clone(),
-                            total_size: file_size,
-                        });
-                    }
+                // Shared enqueue transaction, repository flavor: registry
+                // mirror upsert with queued-size entries, queue accounted
+                // before the sends, HUD mirror per successful send,
+                // failed-send tail rollback. Files whose path fails
+                // validation are skipped from the registry — and still
+                // queued, exactly as before.
+                let outcome = self
+                    .engine
+                    .enqueue(
+                        &self.download_tx,
+                        &queued,
+                        &EnqueuePolicy::tui_repository(&base_path),
+                    )
+                    .await;
+
+                for (filename, err) in &outcome.invalid {
+                    *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
                 }
 
-                if success_count > 0 {
+                if outcome.sent > 0 {
                     *self.status.write() = format!(
                         "Queued {} files from {} to {}",
-                        success_count,
+                        outcome.sent,
                         model.id,
                         model_root.display()
                     );
                 } else {
                     *self.error.write() = Some("Failed to start downloads".to_string());
-                }
-
-                // Adjust queue size and bytes if some sends failed
-                if success_count < num_files {
-                    let failed_count = num_files - success_count;
-                    let failed_bytes: u64 = files_to_download
-                        .iter()
-                        .skip(success_count)
-                        .filter_map(|f| f.size)
-                        .sum();
-
-                    let mut queue = self.engine.download_queue.lock().await;
-                    queue.remove(failed_count, failed_bytes);
                 }
             }
         }
@@ -667,55 +509,6 @@ impl App {
             return;
         }
 
-        let num_files = files_to_download.len();
-
-        // Load registry
-        let mut registry = {
-            let reg = self.engine.download_registry.lock().await;
-            reg.clone()
-        };
-
-        for file in &files_to_download {
-            let filename = &file.rfilename;
-
-            let validated_path = match validate_and_sanitize_path(&base_path, &model.id, filename) {
-                Ok(validated) => validated,
-                Err(e) => {
-                    *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, e));
-                    continue;
-                }
-            };
-
-            let url = crate::api::resolve_url(&model.id, filename, crate::api::DEFAULT_REVISION);
-            let local_path_str = validated_path.to_string_lossy().to_string();
-
-            if !registry.downloads.iter().any(|d| d.url == url) {
-                registry.downloads.push(DownloadMetadata {
-                    model_id: model.id.clone(),
-                    filename: filename.clone(),
-                    url: url.clone(),
-                    local_path: local_path_str,
-                    total_size: file.size.unwrap_or(0),
-                    downloaded_size: 0,
-                    status: DownloadStatus::Incomplete,
-                    expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
-                    revision: None,
-                });
-            }
-        }
-
-        registry::save_registry(&registry);
-        {
-            let mut reg = self.engine.download_registry.lock().await;
-            *reg = registry;
-        }
-
-        let total_queued_bytes: u64 = files_to_download.iter().filter_map(|f| f.size).sum();
-        {
-            let mut queue = self.engine.download_queue.lock().await;
-            queue.add(num_files, total_queued_bytes);
-        }
-
         // Files land under base/author/model/<repo subpath>
         let model_parts: Vec<&str> = model.id.split('/').collect();
         let model_root = if model_parts.len() == 2 {
@@ -726,55 +519,50 @@ impl App {
             PathBuf::from(&base_path)
         };
 
-        let mut success_count = 0;
-        let hf_token = self.options.hf_token.clone();
-        for file in &files_to_download {
-            let sha256 = file.lfs.as_ref().map(|lfs| lfs.oid.clone());
-            let file_size = file.size.unwrap_or(0);
+        // Queue payload; the registry entries are derived from these same
+        // fields by the enqueue transaction below.
+        let queued: Vec<QueuedDownload> = files_to_download
+            .iter()
+            .map(|file| QueuedDownload {
+                model_id: model.id.clone(),
+                revision: crate::api::DEFAULT_REVISION.to_string(),
+                filename: file.rfilename.clone(),
+                base_path: model_root.clone(),
+                expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+                hf_token: self.options.hf_token.clone(),
+                total_size: file.size.unwrap_or(0),
+            })
+            .collect();
 
-            if self
-                .download_tx
-                .send(QueuedDownload {
-                    model_id: model.id.clone(),
-                    revision: crate::api::DEFAULT_REVISION.to_string(),
-                    filename: file.rfilename.clone(),
-                    base_path: model_root.clone(),
-                    expected_sha256: sha256,
-                    hf_token: hf_token.clone(),
-                    total_size: file_size,
-                })
-                .is_ok()
-            {
-                success_count += 1;
-                let mut items = self.engine.download_queue_items.lock().await;
-                items.push(crate::models::QueueItemSummary {
-                    filename: file.rfilename.clone(),
-                    total_size: file_size,
-                });
-            }
+        // Shared enqueue transaction, repository flavor (see
+        // confirm_repository_download): registry mirror upsert with
+        // queued-size entries, queue accounted before the sends, HUD mirror
+        // per successful send, failed-send tail rollback. Files whose path
+        // fails validation are skipped from the registry — and still
+        // queued, exactly as before.
+        let outcome = self
+            .engine
+            .enqueue(
+                &self.download_tx,
+                &queued,
+                &EnqueuePolicy::tui_repository(&base_path),
+            )
+            .await;
+
+        for (filename, err) in &outcome.invalid {
+            *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
         }
 
-        if success_count > 0 {
+        if outcome.sent > 0 {
             *self.status.write() = format!(
                 "Queued {} file{} from {} to {}",
-                success_count,
-                if success_count == 1 { "" } else { "s" },
+                outcome.sent,
+                if outcome.sent == 1 { "" } else { "s" },
                 path,
                 model_root.display()
             );
         } else {
             *self.error.write() = Some("Failed to start downloads".to_string());
-        }
-
-        if success_count < num_files {
-            let failed_count = num_files - success_count;
-            let failed_bytes: u64 = files_to_download
-                .iter()
-                .skip(success_count)
-                .filter_map(|f| f.size)
-                .sum();
-            let mut queue = self.engine.download_queue.lock().await;
-            queue.remove(failed_count, failed_bytes);
         }
     }
 }

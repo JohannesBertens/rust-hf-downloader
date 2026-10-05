@@ -43,9 +43,9 @@ Files and roles
 - downloads.rs
   • scan_incomplete_downloads: seeds the engine registry mirror via engine::seed_registry_mirror (one disk read, snapshot reused), populates popup, complete map, and status
   • trigger_download: decides scope based on focused pane (group/file/repo)
-  • confirm_download: validates paths, populates registry entries, fetches SHA256 map (multipart), queues N downloads
-  • resume/delete incomplete downloads operate on registry + filesystem
-  • confirm_repository_download: non-GGUF repo case; preserves folder structure under base/author/model
+  • confirm_download: validates paths, fetches multipart SHA256s (the failure warning is observable), then queues through EngineState::enqueue with EnqueuePolicy::tui_quant — registry bookkeeping, queue accounting, HUD mirror, and failed-send rollback live in the engine; per-file user messages stay at this call site
+  • resume/delete incomplete downloads: resume re-queues through engine.enqueue (EnqueuePolicy::tui_resume — no registry writes, queue accounted after sends); delete operates on registry + filesystem
+  • confirm_repository_download / confirm_tree_download: non-GGUF repo/tree cases; preserve folder structure under base/author/model; queue through engine.enqueue (EnqueuePolicy::tui_repository)
 
 Important queues and channels (all on `app.engine` except download_tx)
 - download_tx (on App): sends QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size } into the engine queue

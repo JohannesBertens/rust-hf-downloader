@@ -155,11 +155,6 @@ impl EngineState {
     /// sender clone would keep the channel open forever and break the CLI's
     /// drop-based deterministic completion (dropping *every* sender is the
     /// drain signal).
-    // No call site exists yet (tests only): dead_code is allowed on every
-    // enqueue item until the immediately following commits (W2.1 steps 2–3)
-    // migrate the six inline sites and these allows are deleted — same
-    // temporary window as W1.4a's fmt module.
-    #[allow(dead_code)]
     pub async fn enqueue(
         &self,
         tx: &mpsc::UnboundedSender<QueuedDownload>,
@@ -345,7 +340,6 @@ impl EngineState {
 
 /// Which registry bookkeeping the enqueue transaction performs (divergence
 /// knob 1 of the W2.1 table; see [`EngineState::enqueue`]).
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum RegistryMode {
     /// Register nothing. Two deliberate flavors share this mode: the TUI
@@ -381,7 +375,6 @@ pub enum RegistryMode {
 }
 
 /// `total_size` written into registry entries by [`RegistryMode::Mirror`].
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistryEntrySize {
     /// The GGUF quant-group flow records `0` — today's behavior.
@@ -393,7 +386,6 @@ pub enum RegistryEntrySize {
 /// When `download_queue.add` runs (divergence knob 2): every flavor
 /// accounts the queue BEFORE sending, except the resume flow, which sends
 /// everything first and accounts once afterwards.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueTiming {
     BeforeSends,
@@ -402,7 +394,6 @@ pub enum QueueTiming {
 
 /// How the `download_queue_items` HUD mirror is populated (divergence
 /// knob 3).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemsMirror {
     /// TUI confirm flavors: after each SUCCESSFUL send, push that file's
@@ -419,7 +410,6 @@ pub enum ItemsMirror {
 /// The full shape of one enqueue transaction: every knob is a documented
 /// divergence between the six legacy inline sites (see the W2.1 divergence
 /// table). Use the named constructors for the six known flavors.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct EnqueuePolicy {
     /// Registry bookkeeping: none / TUI mirror upsert / CLI disk upsert.
@@ -434,6 +424,8 @@ pub struct EnqueuePolicy {
     pub failed_send_rollback: bool,
 }
 
+// The two CLI constructors still have no production call site (migrated in
+// the immediately following W2.1 step-3 commit); the allow dies with it.
 #[allow(dead_code)]
 impl EnqueuePolicy {
     /// TUI `confirm_download` (GGUF quant group): mirror registry with
@@ -505,7 +497,6 @@ impl EnqueuePolicy {
 
 /// What the enqueue transaction did — the input for the call site's own
 /// status/error strings (which stay at the call sites).
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct EnqueueOutcome {
     /// Files successfully handed to the download channel.
@@ -517,11 +508,13 @@ pub struct EnqueueOutcome {
     pub invalid: Vec<(String, crate::paths::sanitize::PathError)>,
     /// Set only by [`RegistryMode::Disk`]'s validate-first abort: nothing
     /// was queued or sent; the caller reports the error and bails.
+    // Read only by the CLI flavor + tests until the W2.1 step-3 commit
+    // migrates download_cmd; the allow dies with it.
+    #[allow(dead_code)]
     pub aborted: Option<crate::paths::sanitize::PathError>,
 }
 
 /// HUD summary for one queued file (the `download_queue_items` mirror).
-#[allow(dead_code)]
 fn queue_item_summary(file: &QueuedDownload) -> QueueItemSummary {
     QueueItemSummary {
         filename: file.filename.clone(),
