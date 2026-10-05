@@ -201,3 +201,10 @@ All work lands as sequential commits on `refactor/readability-maintainability-re
 |---|---|---|
 | 5e4b061 | W0.1, W0.6 | 4 stale attrs + api.rs:561 gate (`#[cfg(test)]`), 8 cli test use-walls removed |
 | 8f875f4 | W0.9 (amended), W0.2, W0.4, W0.8 | W0.9 guard deviation: `if !plan.fetch.is_empty()` (no `items` binding in scope); 18/18 block_on sites were parking_lot, 1 tokio site left for W4.11; clippy zero warnings after tree_json removal |
+| dab6cfb | W0.5, W0.7 | module docs on 9 bare modules; merge_token/apply_rate_limit_overrides/valid_model_id/truncate_path -> pub(super); get_config_path/get_registry_path pass-throughs removed |
+| 0b24d69 | W0.3 | docs truth pass, 6 files; lock hierarchy rewritten to real locks (10 levels); found stale render.rs:1669 "14 fields" comment (fixed in W4.7 scope) |
+| 602fe8e | H2, H6 | 7 help surfaces + debug_assert snapshotted; 26 construction sites = 13 distinct codes pinned byte-exact; +11 tests (277/0) |
+| c910215 | H3, H4 | exit-code matrix (EXIT_OK/USAGE/FAILURE/AUTH; INTERRUPTED=pty GAP; UPDATE/CHECKSUM pinned by update_e2e); 7 human-output goldens + shared tests/common harness; regex dev-dep; +10 tests (287/0) |
+| 7dc6129 | H5 | style_run signatures pin focus/hover/selection/popup styles (previously unpinned: TestBackend Display is symbols-only); 4-size matrix; HUD threshold clamp pinned; +11 tests (298/0) |
+
+Group 1 (P0 + harness) complete at 298/0. Known residual: ~1% pre-existing e2e flake (unattributed; guard = name-and-rerun policy). Workers: local big-ai GLM-5.3-Flash (slices 1-6), remote zai glm-5.3 (H5 onward, after big-ai retirement).
