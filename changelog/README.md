@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.11.0] - unreleased
+
+### Version 2.11.0 (unreleased)
+- **Added**: `hf-cache` subcommand — `sync` writes the **real** HuggingFace
+  hub cache (`models--<org>--<name>/{refs,blobs,snapshots}`) via the existing
+  engine (chunked parallel downloads, SHA256 verification, rate limiting):
+  atomic staging→`blobs/<oid>` publish, relative snapshot symlinks, revision
+  pinning with `refs/`, `--for vllm` preset (safetensors + configs only),
+  `--include`/`--exclude` fnmatch globs, `--dry-run`/`--force`/`--no-symlinks`,
+  idempotent re-runs; `path` prints the snapshot dir for scripts. Last
+  output line is the snapshot path; `--json` adds `SyncPlanned`/
+  `FilePublished`/`SyncComplete` events; cache resolution honors
+  `--cache-dir` > `$HF_HUB_CACHE` > `$HUGGINGFACE_HUB_CACHE` > `$HF_HOME/hub`
+  > `~/.cache/huggingface/hub` and writes a spec-compliant `CACHEDIR.TAG`.
+  Serving stacks (`vllm serve`, transformers) read it with
+  `HF_HUB_OFFLINE=1` and make zero network calls.
+- **Added**: container recipes — `examples/k8s/vllm-prefetch.yaml` (init
+  container syncing into a shared volume, commented PVC variant for
+  multi-node) and `examples/docker/Dockerfile.baked` (multi-stage bake with
+  BuildKit secret token mount, `vllm/vllm-openai` final stage, offline mode
+  baked in).
+- **Internal**: new `hf_cache.rs` (layout writer: blob naming incl. git
+  sha1 fallback, symlink/copy publish, refs, sync lock) and `patterns.rs`
+  (Python-fnmatch parity matcher + preset table); `paths.rs` gains
+  `hf_hub_cache()`/`write_cachedir_tag()`; README "Use with vLLM /
+  transformers" section; AGENTS.md module map; agent-skill `hf-cache`
+  section; unit tests + end-to-end coverage against the mock HF server.
+  See [RELEASE_NOTES_2.11.0.md](RELEASE_NOTES_2.11.0.md).
+
 ## [2.10.0] - 2026-09-28
 
 ### Version 2.10.0 (2026-09-28)

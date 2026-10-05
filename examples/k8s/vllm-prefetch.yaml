@@ -1,0 +1,174 @@
+# =============================================================================
+# Pattern A — shared-volume prefetch: sync once per pod, serve offline
+# =============================================================================
+#
+# A Kubernetes Deployment for vLLM where an initContainer runs
+# `rust-hf-downloader hf-cache sync` into a shared volume before the server
+# starts. The vLLM container then mounts that volume READ-ONLY with
+# HF_HUB_OFFLINE=1 and makes zero network calls to the hub.
+#
+# Prefer this over the "baked image" pattern (../docker/Dockerfile.baked)
+# when you swap models per node without rebuilding images, or when weights
+# live on a big shared filesystem.
+#
+# Rules baked into this example (see the README section "Use with vLLM /
+# transformers" for the why):
+#   - BOTH HF_HOME and HF_HUB_CACHE are set, to the SAME directory.
+#   - Single writer: only the initContainer writes /hf; the server is a
+#     read-only consumer. (Multi-writer caches — especially on NFS — are
+#     unsupported.)
+#   - Readers set HF_HUB_OFFLINE=1 so nothing silently falls back online.
+#
+# Apply with:  kubectl apply -f examples/k8s/vllm-prefetch.yaml
+# ==============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-prefetch
+  labels:
+    app: vllm-prefetch
+spec:
+  replicas: 1   # with emptyDir (below) each pod re-syncs its own copy; scale
+                # per-node, or switch to the PVC variant for shared caches
+  selector:
+    matchLabels:
+      app: vllm-prefetch
+  template:
+    metadata:
+      labels:
+        app: vllm-prefetch
+    spec:
+      # ---------------------------------------------------------------------
+      # Init container: the single writer for the cache volume.
+      # ---------------------------------------------------------------------
+      # IMAGE PLACEHOLDER — replace with an image that contains the
+      # rust-hf-downloader binary. There is no official registry image yet;
+      # build one in one line from a release tarball (no Dockerfile needed):
+      #
+      #   tar -xzf rust-hf-downloader-$(uname -m)-unknown-linux-gnu.tar.gz
+      #   echo 'FROM debian:bookworm-slim
+      #   COPY rust-hf-downloader /usr/local/bin/
+      #   RUN apt-get update && apt-get install -y ca-certificates' \
+      #     | docker build -t rust-hf-downloader:v2.11.0 -
+      #
+      # Pin the tag to the exact CLI version you tested with.
+      initContainers:
+        - name: hf-cache-sync
+          image: rust-hf-downloader:v2.11.0  # ← your registry/repo here
+          # Same model id the server serves below — keep them in lockstep.
+          #
+          # --for vllm       fetch only what vLLM reads (safetensors +
+          #                 configs + tokenizer; skips *.bin/*.pt/*.gguf/…)
+          # --revision      PIN THE COMMIT SHA. A branch name works but moves;
+          #                 a pin makes re-deploys and rollbacks byte-stable.
+          #                 Unknown revisions exit 64 (usage) → CrashLoopBackOff
+          #                 with a clear message in `kubectl logs`.
+          # Idempotent: pods that restart with the cache already complete
+          # skip all downloads (exit 0 after a metadata check).
+          args:
+            - hf-cache
+            - sync
+            - Qwen/Qwen2.5-7B-Instruct
+            - --for
+            - vllm
+            - --revision
+            - 0000000000000000000000000000000000000000  # ← replace with the real 40-hex commit sha
+            - --cache-dir
+            - /hf
+          # Optional environment for gated repos / mirrors:
+          #   kubectl create secret generic hf-token --from-literal=token=hf_xxx
+          #   then add:
+          #     env:
+          #       - name: HF_TOKEN
+          #         valueFrom:
+          #           secretKeyRef:
+          #             name: hf-token
+          #             key: token
+          #   hub mirror override: - name: HF_ENDPOINT
+          #                          value: https://hf-mirror.com
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /hf
+      # ---------------------------------------------------------------------
+      # Main container: read-only consumer, fully offline.
+      # ---------------------------------------------------------------------
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest  # pin this too in production
+          args:
+            - --model
+            - Qwen/Qwen2.5-7B-Instruct  # must match the sync above
+            - --served-model-name
+            - qwen2.5-7b
+            # - --max-model-len=32768    # tune per model/VRAM
+          # BOTH variables, SAME path — vLLM/transformers/huggingface_hub
+          # disagree on which one wins per version; setting only one leaves
+          # the other pointing at an empty default and the server re-fetches
+          # (or fails offline). HF_HUB_OFFLINE=1 turns "file missing" into a
+          # loud error instead of an unplanned multi-GB download.
+          env:
+            - name: HF_HOME
+              value: /hf
+            - name: HF_HUB_CACHE
+              value: /hf
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          ports:
+            - containerPort: 8000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60   # vLLM needs a while to load weights
+            periodSeconds: 10
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /hf
+              readOnly: true          # readers never write — the single-writer rule
+          resources:
+            requests:
+              cpu: "4"
+              memory: 24Gi
+              # nvidia.com/gpu: 1       # uncomment with a GPU-enabled runtime
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              # nvidia.com/gpu: 1
+      volumes:
+        # -------------------------------------------------------------------
+        # Single-node default: a per-pod scratch volume. The initContainer
+        # syncs into it on every (re)schedule; restarts of a live pod reuse
+        # the completed cache.
+        # -------------------------------------------------------------------
+        - name: hf-cache
+          emptyDir: {}
+          # -----------------------------------------------------------------
+          # MULTI-NODE LABS / SHARED CACHES — comment out emptyDir above and
+          # use a ReadWriteMany PVC instead, claimed only by the init writer:
+          #
+          #   - name: hf-cache
+          #     persistentVolumeClaim:
+          #       claimName: hf-cache-claim
+          #
+          # with (separate manifest):
+          #
+          #   apiVersion: v1
+          #   kind: PersistentVolumeClaim
+          #   metadata:
+          #     name: hf-cache-claim
+          #   spec:
+          #     accessModes: [ReadWriteMany]     # needs NFS/CephFS/Filestore…
+          #     resources:
+          #       requests:
+          #         storage: 200Gi
+          #
+          # Notes:
+          #   - Keep replicas=1 per writing Deployment (single-writer rule);
+          #     point additional vLLM Deployments at the same PVC mounted
+          #     readOnly — no lock contention, readers scale freely.
+          #   - Restarts of the writing pod resume partial downloads
+          #     (`hf-cache sync` resumes from .incomplete staging files).
+          #   - Add a CronJob running the same sync command to refresh the
+          #     pinned revision (or bump --revision and let it roll).
+          # -----------------------------------------------------------------

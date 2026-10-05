@@ -77,6 +77,7 @@ Both auto-detect OS/arch, verify the SHA256 checksum, install to a user-local bi
 - [Installation](#installation)
 - [TUI Mode (Interactive)](#tui-mode-interactive)
 - [CLI Mode (One-shot Download)](#cli-mode-one-shot-download)
+- [Use with vLLM / transformers (HF cache drop-in)](#use-with-vllm--transformers-hf-cache-drop-in)
 - [Technical Details](#technical-details)
 - [Changelog](#changelog)
 - [License](#license)
@@ -527,6 +528,129 @@ Verify with `pi` startup diagnostics or `/skill:hf-downloader`, then try:
 The skill versions with the binary because the exit codes and event schema
 are contracts — keep the installed skill in sync with the CLI version
 (>= 2.3.0).
+
+## Use with vLLM / transformers (HF cache drop-in)
+
+`hf-cache sync` populates the **real** HuggingFace hub cache — the exact
+`~/.cache/huggingface/hub` layout `huggingface_hub`, transformers, and vLLM
+already read — using this tool's chunked parallel downloads, SHA256
+verification, and rate limiting. After a sync, serving stacks resolve a
+revision-pinned snapshot from local disk and make **zero network calls**:
+
+```bash
+# Fetch only what vLLM reads (configs + tokenizer + safetensors), pinned to a commit
+rust-hf-downloader hf-cache sync Qwen/Qwen2.5-7B-Instruct --for vllm --revision <commit-sha>
+
+# Serve fully offline — vLLM finds the model in the hub cache
+HF_HUB_OFFLINE=1 vllm serve Qwen/Qwen2.5-7B-Instruct
+```
+
+The same cache works for transformers:
+`HF_HUB_OFFLINE=1 AutoModel.from_pretrained("Qwen/Qwen2.5-7B-Instruct")`,
+and for `hf download` / `hf cache` tooling, which resume from or scan the
+blobs we wrote. `rust-hf-downloader hf-cache path <MODEL_ID> [--revision
+<REV>]` prints the snapshot directory for a model (pure path math — no
+network), handy for pointing other tools at the right place.
+
+### What gets written
+
+The standard hub layout, byte-compatible with what `hf download` would
+produce (LFS blobs named by sha256, non-LFS by git blob sha1, snapshot
+entries as relative symlinks so the cache survives any mount point):
+
+```text
+~/.cache/huggingface/hub/                          # default cache root
+├── CACHEDIR.TAG                                   # backup tools skip the cache
+└── models--Qwen--Qwen2.5-7B-Instruct/
+    ├── refs/main                    # 40-hex commit SHA of the synced revision
+    ├── blobs/<oid>                  # content-addressed: sha256 (LFS) | git sha1
+    └── snapshots/<commit-sha>/      # what vLLM/transformers resolve
+        ├── config.json                       -> ../../blobs/<oid>
+        ├── tokenizer.json                    -> ../../blobs/<oid>
+        └── model-00001-of-00004.safetensors  -> ../../blobs/<oid>
+```
+
+Files are downloaded into a staging area inside the repo folder and
+**published only after bytes are complete and digests check out**:
+LFS files must pass the SHA256 gate, non-LFS files are hashed and checked
+against the tree's git oid. Publishing is `rename(2)` into `blobs/<oid>`,
+then the snapshot symlink. A concurrently running offline reader never
+observes partial files, and a re-run of the same sync is a network-free
+no-op (blob present + size match ⇒ skip; missing symlink ⇒ relink; branch
+moved ⇒ new snapshot fetched, `refs/` updated, old snapshot kept).
+Failed files are simply re-fetched from scratch on the next run — keep
+`--force` for cases where you suspect corrupt local state.
+
+### Command surface
+
+```text
+rust-hf-downloader hf-cache sync <MODEL_ID> [FILE…]      # FILE = repo-relative paths
+    --revision <REV>        # branch | tag | 40-hex SHA   (default: main)
+    --for <PRESET>          # "vllm" (see below)
+    --include <GLOB>        # repeatable, hf-download semantics (fnmatch)
+    --exclude <GLOB>        # repeatable
+    --cache-dir <DIR>       # default: $HF_HUB_CACHE > $HF_HOME/hub > ~/.cache/huggingface/hub
+    --no-symlinks           # copy files into snapshots/ (hub fallback mode)
+    --force                 # re-download even if the blob already exists
+    --dry-run               # list what would be fetched/skipped; no writes
+    --token / --json / --quiet / --no-verify /
+    --rate-limit[-mbps] / --no-rate-limit                 # existing shared flags
+
+rust-hf-downloader hf-cache path <MODEL_ID> [--revision <REV>] [--cache-dir <DIR>]
+```
+
+Selection precedence (deterministic): positional `FILE…` → `--include` /
+`--exclude` (Python-`fnmatch` semantics, `*` crosses `/`) → `--for vllm`
+preset → whole repository (with a hint that `--for vllm` exists).
+`--exclude` additionally filters the result of every pattern-based mode
+(include, preset, whole-repo); explicitly listed `FILE…` arguments are
+taken literally and never filtered.
+`--exclude` applies on top of every mode. The `--for vllm` preset fetches
+`*.safetensors *.json *.txt *.model *.jinja` (sharded safetensors in
+subfolders included) and skips everything vLLM never reads (`original/**`,
+`*.bin`, `*.pt`, `*.gguf`, `*.onnx`, …).
+
+On success the human-mode summary's **last line is the snapshot path**
+(hf-CLI parity), ready for `$(…)`. `--json` streams the usual NDJSON events
+plus `SyncPlanned { files, skipped, total_bytes }`, `FilePublished { path,
+blob }`, and `SyncComplete { snapshot_path, revision, sha }`. Exit codes:
+`0` success including a
+fully-cached no-op, `64` bad model id / empty selection / unknown revision,
+`1` download or verification failure — a hash mismatch never publishes into
+the cache.
+
+### Container patterns
+
+**A — shared-volume prefetch (lab default).** An init container (or a
+docker pre-step) runs `hf-cache sync <MODEL> --for vllm --revision <sha>
+--cache-dir /hf` into a volume; the server mounts that volume read-only
+with `HF_HUB_OFFLINE=1`. Only the prefetcher ever writes — readers are
+read-only, so there is no lock contention even on NFS. See the commented
+example: [examples/k8s/vllm-prefetch.yaml](examples/k8s/vllm-prefetch.yaml)
+(includes the PVC variant for multi-node labs).
+
+**B — baked image (immutable deployments).** A multi-stage Dockerfile
+`COPY`s a locally built release binary, syncs the model at **build** time
+(gated-repo tokens via BuildKit `--mount=type=secret`), and the final
+`vllm/vllm-openai` stage ships the cache with `HF_HUB_OFFLINE=1` baked in —
+zero pulls at deploy time, exact reproducible weights per image digest. See
+[examples/docker/Dockerfile.baked](examples/docker/Dockerfile.baked).
+
+### Gotchas
+
+> - **When overriding the cache location, set *both* `HF_HOME` and
+>   `HF_HUB_CACHE`.** Different libraries consult different variables
+>   (vLLM, transformers, and `huggingface_hub` versions disagree); setting
+>   only one leaves the other pointing at an empty default and the server
+>   silently re-downloads or fails offline. The example files set both.
+> - **Single writer per cache.** Only one process should ever write a shared
+>   cache volume — the prefetcher/init container. Readers must mount
+>   read-only. Multiple concurrent writers (especially on NFS) are
+>   unsupported.
+> - **Readers: read-only mount + `HF_HUB_OFFLINE=1`.** Offline mode is what
+>   turns the cache into a guarantee (no network fallback, no partial
+>   re-fetches). Without it, a missing file silently goes to the network —
+>   exactly what air-gapped deployments must avoid.
 
 ## Technical Details
 
