@@ -257,66 +257,61 @@ async fn calculate_sha256_with_progress(
     // tokio::fs, i.e. one blocking-pool dispatch per buffer (~160k hops for
     // a 20 GiB file); sync reads measure ~12% faster end-to-end on a warm
     // cache (1.87 -> 2.10 GiB/s) and keep the SHA-NI hasher saturated.
+    // The loop itself is the shared streaming-digest core
+    // (`utils::stream_file_digest`); this closure only contributes the
+    // progress accounting.
     let digest = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-        use std::io::Read;
-
-        let mut file = std::fs::File::open(&path)?;
-        let mut hasher = Sha256::new();
         let buffer_size = VERIFICATION_CONFIG.buffer_size.load(Ordering::Relaxed);
-        let mut buffer = vec![0u8; buffer_size];
-
-        let mut bytes_verified = 0u64;
+        let mut hasher = Sha256::new();
         let mut iteration = 0u64;
         let mut last_update = std::time::Instant::now();
         let mut last_bytes = 0u64;
 
-        loop {
-            let bytes_read = file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..bytes_read]);
+        let _ = crate::utils::stream_file_digest(
+            &path,
+            &mut hasher,
+            buffer_size,
+            |_, bytes_verified| {
+                iteration += 1;
 
-            bytes_verified += bytes_read as u64;
-            iteration += 1;
-
-            // Update progress at configured interval to avoid excessive
-            // lock traffic. Publish the exact running total. (An earlier
-            // version did `fetch_add(bytes_read)` here, which credited only
-            // the last chunk at each checkpoint - the UI advanced at
-            // 1/update_interval of the real speed and looked stalled on
-            // multi-GB files.)
-            let update_interval = VERIFICATION_CONFIG
-                .update_interval_iterations
-                .load(Ordering::Relaxed);
-            #[allow(clippy::manual_is_multiple_of)]
-            // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
-            if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
-                if let Some(ref vb) = verified_bytes {
-                    vb.store(bytes_verified, Ordering::Relaxed);
-                }
-
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(last_update).as_secs_f64();
-
-                if elapsed >= 0.2 {
-                    let bytes_since_last = bytes_verified - last_bytes;
-                    let speed = (bytes_since_last as f64 / elapsed) / 1_048_576.0;
-
-                    // Best-effort speed publish from this blocking thread:
-                    // try_lock avoids blocking; skip the update if the UI
-                    // currently holds the progress lock.
-                    if let Ok(mut progress) = progress_shared.try_lock() {
-                        if let Some(entry) = progress.iter_mut().find(|p| p.filename == name) {
-                            entry.speed_mbps = speed;
-                        }
+                // Update progress at configured interval to avoid excessive
+                // lock traffic. Publish the exact running total. (An earlier
+                // version did `fetch_add(bytes_read)` here, which credited only
+                // the last chunk at each checkpoint - the UI advanced at
+                // 1/update_interval of the real speed and looked stalled on
+                // multi-GB files.)
+                let update_interval = VERIFICATION_CONFIG
+                    .update_interval_iterations
+                    .load(Ordering::Relaxed);
+                #[allow(clippy::manual_is_multiple_of)]
+                // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
+                if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
+                    if let Some(ref vb) = verified_bytes {
+                        vb.store(bytes_verified, Ordering::Relaxed);
                     }
 
-                    last_update = now;
-                    last_bytes = bytes_verified;
+                    let now = std::time::Instant::now();
+                    let elapsed = now.duration_since(last_update).as_secs_f64();
+
+                    if elapsed >= 0.2 {
+                        let bytes_since_last = bytes_verified - last_bytes;
+                        let speed = (bytes_since_last as f64 / elapsed) / 1_048_576.0;
+
+                        // Best-effort speed publish from this blocking thread:
+                        // try_lock avoids blocking; skip the update if the UI
+                        // currently holds the progress lock.
+                        if let Ok(mut progress) = progress_shared.try_lock() {
+                            if let Some(entry) = progress.iter_mut().find(|p| p.filename == name) {
+                                entry.speed_mbps = speed;
+                            }
+                        }
+
+                        last_update = now;
+                        last_bytes = bytes_verified;
+                    }
                 }
-            }
-        }
+            },
+        )?;
 
         // Final progress update to ensure 100%. If verified_bytes is Some,
         // update atomically; otherwise entry was removed (cancellation)

@@ -78,11 +78,26 @@ pub fn repo_dir_name(model_id: &str) -> String {
 /// Computes the git blob sha1 of a file: `sha1("blob <len>\0" ++ content)`.
 /// This is the blob name for non-LFS files whose tree entry lacks `oid`
 /// (R1 fallback), and matches `git hash-object` output.
+///
+/// Streams the file through the shared digest core (64 KiB reads) instead
+/// of loading it whole; `<len>` comes from `fs::metadata` taken up front.
+/// Plan amendment (W1.6): if the file changes size while being read
+/// (bytes read ≠ stat length), this returns an error instead of producing
+/// a digest — the previous whole-file read could never observe that race
+/// but also silently hashed whatever torn interleaving it saw; erroring is
+/// the safer contract for a cache blob name.
 pub fn git_blob_sha1(path: &Path) -> io::Result<String> {
-    let content = fs::read(path)?;
+    let len = fs::metadata(path)?.len();
     let mut hasher = Sha1::new();
-    hasher.update(format!("blob {}\0", content.len()).as_bytes());
-    hasher.update(&content);
+    hasher.update(format!("blob {len}\0").as_bytes());
+    let hashed =
+        crate::utils::stream_file_digest(path, &mut hasher, crate::utils::DIGEST_CHUNK, |_, _| {})?;
+    if hashed != len {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!("file changed size while hashing: read {hashed} bytes, metadata said {len}"),
+        ));
+    }
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -754,6 +769,65 @@ mod tests {
             git_blob_sha1(&hello).unwrap(),
             "ce013625030ba8dba906f756967f9e9ca394464a"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_blob_sha1_streams_files_larger_than_the_buffer() {
+        // 1 MiB + 1 B of deterministic bytes: multiple 64 KiB chunks plus a
+        // short tail. The streaming result must equal the one-shot
+        // header ++ content hash.
+        let dir = tmp("sha1-big");
+        let path = dir.join("big.bin");
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut payload = Vec::with_capacity(1024 * 1024 + 1);
+        while payload.len() < payload.capacity() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            payload.extend_from_slice(&state.to_le_bytes());
+        }
+        fs::write(&path, &payload).expect("write big file");
+
+        let mut expected = Sha1::new();
+        expected.update(format!("blob {}\0", payload.len()).as_bytes());
+        expected.update(&payload);
+
+        assert_eq!(
+            git_blob_sha1(&path).unwrap(),
+            hex::encode(expected.finalize())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_blob_sha1_errors_when_the_file_changes_size_underneath() {
+        // Plan amendment (W1.6): stat length vs bytes read mismatch errors
+        // instead of hashing a torn file. A FIFO reports stat length 0 but
+        // yields real bytes, which triggers the check deterministically.
+        let dir = tmp("sha1-race");
+        let fifo = dir.join("pipe");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo available on unix CI")
+            .success());
+
+        let writer = std::thread::spawn({
+            let fifo = fifo.clone();
+            move || {
+                use std::io::Write;
+                if let Ok(mut f) = fs::OpenOptions::new().write(true).open(&fifo) {
+                    let _ = f.write_all(b"hello\n");
+                }
+            }
+        });
+
+        let err = git_blob_sha1(&fifo).expect_err("stat/read mismatch must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(err.to_string().contains("changed size while hashing"));
+        writer.join().expect("writer thread");
         let _ = fs::remove_dir_all(&dir);
     }
 

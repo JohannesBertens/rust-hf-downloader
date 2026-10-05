@@ -1,13 +1,77 @@
 //! Small shared helpers: [`format_size`] and [`format_number`] are thin
 //! aliases for the shared surface-pinned formatters in [`crate::fmt`]
-//! (kept because they are used across the UI and CLI), and
+//! (kept because they are used across the UI and CLI),
 //! [`atomic_rename_with_retry`] is the shared final-rename primitive whose
 //! retry policy is chosen per call site (the download pipeline retries
 //! transient filesystem locks; other sites pass `retries = 0` for a plain
-//! single-attempt rename).
+//! single-attempt rename), and [`stream_file_digest`] / [`sha256_file`]
+//! are the shared streaming-digest primitives (one read+hash loop for the
+//! verification worker, the update path, and hub-cache blob hashing).
 
+use sha2::Digest as _;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
+
+/// Read granularity of [`sha256_file`] and the hub-cache blob hasher.
+/// 64 KiB amortizes syscall overhead well below the SHA-NI hashing
+/// ceiling; callers with progress-reporting needs pick their own size via
+/// [`stream_file_digest`].
+pub(crate) const DIGEST_CHUNK: usize = 64 * 1024;
+
+/// Streams `path` through `hasher` in chunks of `buffer_size` bytes,
+/// calling `on_chunk(chunk, bytes_hashed_so_far)` after every non-empty
+/// read (the same loop the verification worker used to inline: open,
+/// buffered read, hash, report). Returns the number of bytes hashed, so
+/// callers that need a stat-vs-read consistency check (see
+/// [`crate::hf_cache::git_blob_sha1`]) can detect a file that changed
+/// size while being read.
+///
+/// A `buffer_size` of 0 is legal: the reads then bypass buffering one
+/// byte at a time (a zero-length read would otherwise read as EOF, since
+/// `Read` on an empty slice is always `Ok(0)`).
+pub(crate) fn stream_file_digest<H, F>(
+    path: &Path,
+    hasher: &mut H,
+    buffer_size: usize,
+    mut on_chunk: F,
+) -> std::io::Result<u64>
+where
+    H: sha2::digest::Update,
+    F: FnMut(&[u8], u64),
+{
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(buffer_size, file);
+    let mut buffer = vec![0u8; buffer_size.max(1)];
+    let mut hashed: u64 = 0;
+    loop {
+        let bytes_read = reader.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+        hashed += bytes_read as u64;
+        on_chunk(&buffer[..bytes_read], hashed);
+    }
+    Ok(hashed)
+}
+
+/// Streaming SHA-256 of a file's contents, hex-encoded (BufReader with a
+/// fixed [`DIGEST_CHUNK`] buffer — the whole file is never held in
+/// memory). Files that change while being hashed produce whatever digest
+/// the interleaved reads saw; callers that must detect that race should
+/// use [`stream_file_digest`] and compare bytes read against a stat taken
+/// up front.
+// 2026-10 (W1.6): no production caller yet — verification streams with
+//  progress callbacks and `update.rs` hashes network chunks — so this is
+//  pinned only by the known-vector tests below until a whole-file
+//  SHA-256 consumer appears.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    let mut hasher = sha2::Sha256::new();
+    stream_file_digest(path, &mut hasher, DIGEST_CHUNK, |_, _| {})?;
+    Ok(hex::encode(hasher.finalize()))
+}
 
 /// Abbreviated count (`1.2M`); see [`crate::fmt::number`].
 pub fn format_number(n: u64) -> String {
@@ -133,5 +197,98 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    // ---- streaming digest helpers ----
+
+    /// Deterministic pseudo-random payload (xorshift64*) so multi-chunk
+    /// vectors never depend on RNG state.
+    fn pseudo_random(len: usize) -> Vec<u8> {
+        let mut state = 0x9E3779B97F4A7C15u64;
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            out.extend_from_slice(&state.to_le_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+
+    fn sha256_one_shot(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(bytes))
+    }
+
+    fn write_tmp_file(dir_tag: &str, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = tmp(dir_tag);
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn sha256_file_known_vectors() {
+        // Reference vectors for the bare content hash (no git blob header).
+        let empty = write_tmp_file("digest-empty", "empty", b"");
+        assert_eq!(
+            sha256_file(&empty).unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let hello = write_tmp_file("digest-hello", "hello", b"hello\n");
+        assert_eq!(
+            sha256_file(&hello).unwrap(),
+            "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+        );
+        let _ = std::fs::remove_dir_all(empty.parent().unwrap());
+        let _ = std::fs::remove_dir_all(hello.parent().unwrap());
+    }
+
+    #[test]
+    fn sha256_file_hashes_multi_chunk_files_exactly() {
+        // 1 MiB + 1 B: strictly larger than the 64 KiB digest buffer and
+        // not an exact multiple of it, so the loop must handle a short
+        // final chunk.
+        let payload = pseudo_random(1024 * 1024 + 1);
+        let path = write_tmp_file("digest-big", "big.bin", &payload);
+        assert_eq!(sha256_file(&path).unwrap(), sha256_one_shot(&payload));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn stream_digest_zero_inner_buffer_is_still_exact() {
+        // Capacity-0 BufReader: reads bypass the (empty) internal buffer,
+        // and the loop must not misread a 1-byte read as EOF. Byte-at-a-
+        // time, so kept small.
+        let payload = pseudo_random(1024);
+        let path = write_tmp_file("digest-zero", "z.bin", &payload);
+        let mut hasher = sha2::Sha256::new();
+        let hashed = stream_file_digest(&path, &mut hasher, 0, |_, _| {}).unwrap();
+        assert_eq!(hashed, payload.len() as u64);
+        assert_eq!(hex::encode(hasher.finalize()), sha256_one_shot(&payload));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn stream_digest_reports_running_totals_per_chunk() {
+        // The on_chunk callback sees each non-empty chunk and the exact
+        // running total (the invariant the verification worker's progress
+        // accounting relies on).
+        let payload = pseudo_random(10);
+        let path = write_tmp_file("digest-cb", "cb.bin", &payload);
+        let mut hasher = sha2::Sha256::new();
+        let mut seen = Vec::new();
+        stream_file_digest(&path, &mut hasher, 3, |chunk, total| {
+            seen.push((chunk.len() as u64, total));
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            vec![(3, 3), (3, 6), (3, 9), (1, 10)],
+            "chunks of 3 over 10 bytes with exact running totals"
+        );
+        assert_eq!(hex::encode(hasher.finalize()), sha256_one_shot(&payload));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
