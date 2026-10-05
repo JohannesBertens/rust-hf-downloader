@@ -1,0 +1,7 @@
+---
+source: tests/cli_exit_codes.rs
+expression: normalize(&stderr)
+---
+1 file(s) to download, $N KB total
+ + model.gguf ($N KB)
+ ✓ verified: model.gguf

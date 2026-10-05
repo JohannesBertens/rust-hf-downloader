@@ -1,0 +1,5 @@
+---
+source: tests/cli_exit_codes.rs
+expression: normalize(&stderr)
+---
+error [usage]: invalid model ID "no-slash" — expected "author/model-name"

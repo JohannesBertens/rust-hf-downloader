@@ -1,0 +1,6 @@
+---
+source: tests/cli_exit_codes.rs
+expression: normalize(&stdout)
+---
+Done: 1 file(s), $N KB → 1 downloaded, 0 skipped (exists), 1 verified, 0 failed
+Destination: $TMP/models/a/b

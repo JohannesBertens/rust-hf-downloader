@@ -49,6 +49,9 @@ indexmap = "=2.2.6"
 
 [dev-dependencies]
 insta = { version = "1.48.0", features = ["filters"] }
+# Volatility normalizer for the human-output goldens (tests/cli_exit_codes.rs);
+# same version as the main-dependency `regex` so cargo unifies the build.
+regex = "1.10"
 # Same version reqwest 0.11 already locks; used only by the integration-test
 # mock server (Range-aware) — ships nothing in the binary.
 hyper = { version = "0.14", features = ["full"] }
