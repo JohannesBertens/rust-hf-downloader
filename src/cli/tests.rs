@@ -1,6 +1,7 @@
 use clap::{CommandFactory, Parser};
 use std::path::Path;
 
+use crate::fmt::{bar_cli, eta_cli, truncate_path_cli};
 use crate::models::{ModelMetadata, QuantizationGroup};
 
 use super::args::{
@@ -13,8 +14,8 @@ use super::hf_cache_cmd::{
     SyncSelectionError,
 };
 use super::report::{
-    format_eta, format_file_progress, format_overall_progress, render_bar, truncate_path,
-    verification_heartbeat_line, ProgressMode, Reporter,
+    format_file_progress, format_overall_progress, verification_heartbeat_line, ProgressMode,
+    Reporter,
 };
 use super::resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};
 use super::search_cmd::effective_search_params;
@@ -662,22 +663,22 @@ fn snapshot_search_json_array() {
 
 #[test]
 fn bar_and_eta_render() {
-    assert_eq!(render_bar(0, 10), format!("[{}]", "░".repeat(20)));
+    assert_eq!(bar_cli(0, 10), format!("[{}]", "░".repeat(20)));
     assert_eq!(
-        render_bar(5, 10),
+        bar_cli(5, 10),
         format!("[{}{}]", "█".repeat(10), "░".repeat(10))
     );
-    assert_eq!(render_bar(10, 10), format!("[{}]", "█".repeat(20)));
-    assert_eq!(format_eta(59.4), "59s");
-    assert_eq!(format_eta(95.0), "1m35s");
-    assert_eq!(format_eta(3700.0), "1h1m");
+    assert_eq!(bar_cli(10, 10), format!("[{}]", "█".repeat(20)));
+    assert_eq!(eta_cli(59.4), "59s");
+    assert_eq!(eta_cli(95.0), "1m35s");
+    assert_eq!(eta_cli(3700.0), "1h1m");
 }
 
 #[test]
 fn truncate_keeps_tail() {
-    assert_eq!(truncate_path("short.gguf", 20), "short.gguf");
+    assert_eq!(truncate_path_cli("short.gguf", 20), "short.gguf");
     let long = "author/model-name/subdir/file-Q4_K_M.gguf";
-    let cut = truncate_path(long, 20);
+    let cut = truncate_path_cli(long, 20);
     assert!(cut.starts_with('…'));
     assert!(cut.ends_with("Q4_K_M.gguf"));
     assert_eq!(cut.chars().count(), 20);

@@ -4,7 +4,7 @@ use std::io::Write;
 
 use super::args::{merge_token, ModelDto, SearchArgs};
 use super::events::{ErrorCode, Event};
-use super::report::{truncate_path, ProgressMode, Reporter};
+use super::report::{ProgressMode, Reporter};
 use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
@@ -60,7 +60,7 @@ fn render_search_table(models: &[ModelDto]) {
         let _ = writeln!(
             stdout,
             "{:<id_w$}  {:>10}  {:>7}  {}",
-            truncate_path(&m.id, id_width),
+            crate::fmt::truncate_path_cli(&m.id, id_width),
             crate::utils::format_number(m.downloads),
             crate::utils::format_number(m.likes),
             updated,

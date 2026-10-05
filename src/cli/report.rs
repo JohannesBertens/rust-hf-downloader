@@ -1,13 +1,14 @@
 //! Reporters: render [`Event`]s as human text (stderr) or NDJSON (stdout),
-//! plus `--progress` modes and the progress-line format helpers.
+//! plus `--progress` modes; the progress-line building blocks (bar, ETA,
+//! path truncation) come from [`crate::fmt`].
 
+use crate::fmt::{bar_cli, eta_cli, truncate_path_cli};
 use crate::utils::format_size;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use super::events::{Event, FileStatus, OverallProgress};
 
-const PROGRESS_BAR_WIDTH: usize = 20;
 /// Minimum interval between JSON `progress` events per run.
 const JSON_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
 /// Minimum interval between `--progress plain` heartbeat lines.
@@ -207,7 +208,7 @@ impl Reporter {
                     self.line_stderr(&format!(
                         " {} {} ({})",
                         mark,
-                        truncate_path(filename, 60),
+                        truncate_path_cli(filename, 60),
                         format_size(*bytes)
                     ));
                 }
@@ -225,7 +226,7 @@ impl Reporter {
                         " {} verified{}: {}",
                         mark,
                         note,
-                        truncate_path(filename, 60)
+                        truncate_path_cli(filename, 60)
                     ));
                 }
             }
@@ -268,7 +269,7 @@ impl Reporter {
                     let short_oid = if blob.len() > 12 { &blob[..12] } else { blob };
                     self.line_stderr(&format!(
                         " ✓ published {} → blobs/{}…",
-                        truncate_path(path, 52),
+                        truncate_path_cli(path, 52),
                         short_oid
                     ));
                 }
@@ -350,9 +351,9 @@ pub(super) fn format_file_progress(
     };
     format!(
         "{} {}% {} {}/{} {:.1} MB/s{}",
-        truncate_path(filename, 42),
+        truncate_path_cli(filename, 42),
         pct.round() as u64,
-        render_bar(downloaded, total),
+        bar_cli(downloaded, total),
         format_size(downloaded),
         format_size(total),
         speed_mbps,
@@ -393,7 +394,7 @@ pub(super) fn format_overall_progress(
             speed_mbps,
             overall.total_bytes.saturating_sub(overall.downloaded_bytes),
         ),
-        truncate_path(filename, 42),
+        truncate_path_cli(filename, 42),
         file_pct.round() as u64,
     )
 }
@@ -403,55 +404,13 @@ pub(super) fn verification_heartbeat_line(active: usize, done: usize) -> String 
     format!("verifying: {active} in flight, {done} verified")
 }
 
-// W1.4 oracle window: `render_bar`/`format_eta`/`truncate_path` below are
-// `pub(crate)` only so `fmt`'s differential tests can call the live legacy
-// helpers; they are deleted in W1.4b once the oracles are frozen.
-pub(crate) fn render_bar(done: u64, total: u64) -> String {
-    let filled = if total == 0 {
-        PROGRESS_BAR_WIDTH
-    } else {
-        ((done as f64 / total as f64) * PROGRESS_BAR_WIDTH as f64).round() as usize
-    }
-    .min(PROGRESS_BAR_WIDTH);
-    format!(
-        "[{}{}]",
-        "█".repeat(filled),
-        "░".repeat(PROGRESS_BAR_WIDTH - filled)
-    )
-}
-
 /// Suffix `" eta <t>"` for the given remaining bytes at the given speed
 /// (empty while the speed estimate is still warming up).
 fn eta_suffix(speed_mbps: f64, remaining: u64) -> String {
     if speed_mbps > 0.01 {
         let secs = remaining as f64 / (speed_mbps * 1_048_576.0);
-        format!(" eta {}", format_eta(secs))
+        format!(" eta {}", eta_cli(secs))
     } else {
         String::new()
-    }
-}
-
-pub(crate) fn format_eta(secs: f64) -> String {
-    if !secs.is_finite() || secs < 0.0 {
-        return "?".to_string();
-    }
-    let secs = secs.round() as u64;
-    if secs < 60 {
-        format!("{}s", secs)
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-/// Truncate a path-like string for single-line display, keeping the
-/// (differing) tail.
-pub(crate) fn truncate_path(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let tail: String = s.chars().skip(s.chars().count() + 1 - max).collect();
-        format!("…{}", tail)
     }
 }

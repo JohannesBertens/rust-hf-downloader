@@ -7,7 +7,7 @@ use super::args::{
 };
 use super::download_cmd::{monitor, RunTally};
 use super::events::{ErrorCode, Event, FileDto, Summary};
-use super::report::{truncate_path, Reporter};
+use super::report::Reporter;
 use super::resolve::FileSpec;
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
 use crate::engine::{EngineState, QueuedDownload};
@@ -330,7 +330,7 @@ fn print_sync_dry_run(
             out,
             " {:<6} {:<58} {:>9}",
             "fetch",
-            truncate_path(&item.repo_path, 58),
+            crate::fmt::truncate_path_cli(&item.repo_path, 58),
             crate::utils::format_size(item.size)
         );
     }
@@ -339,7 +339,7 @@ fn print_sync_dry_run(
             out,
             " {:<6} {:<58} {:>9}",
             "cached",
-            truncate_path(path, 58),
+            crate::fmt::truncate_path_cli(path, 58),
             crate::utils::format_size(size_of(path))
         );
     }

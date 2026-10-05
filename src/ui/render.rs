@@ -717,7 +717,7 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
             if is_downloaded {
                 name_budget = name_budget.saturating_sub(" [downloaded]".len());
             }
-            let shown_name = truncate_filename(&file.filename, name_budget);
+            let shown_name = crate::fmt::truncate_filename(&file.filename, name_budget);
 
             let mut spans = vec![Span::raw(format!("{:>10}  ", size_str))];
 
@@ -753,41 +753,6 @@ fn render_gguf_panels(frame: &mut Frame, chunks: std::rc::Rc<[Rect]>, ctx: GgufP
     // Store panel area for click/hover detection
     panel_areas.push((FocusedPane::QuantizationFiles, chunks[1]));
     frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
-}
-
-/// Truncate a filename to at most `max_chars` using a middle ellipsis, so
-/// the tail (shard index, extension) stays visible — the identifying part
-/// of multipart names like `model-00002-of-00003.gguf`. Names that already
-/// fit are returned unchanged.
-pub(crate) fn truncate_filename(name: &str, max_chars: usize) -> String {
-    let count = name.chars().count();
-    if max_chars == 0 {
-        return String::new();
-    }
-    if count <= max_chars {
-        return name.to_string();
-    }
-    if max_chars == 1 {
-        return "…".to_string();
-    }
-    let tail_len = (max_chars - 1) / 3;
-    let head_len = max_chars - 1 - tail_len;
-    let head: String = name.chars().take(head_len).collect();
-    let tail: String = name.chars().skip(count - tail_len).collect();
-    format!("{}…{}", head, tail)
-}
-
-/// Format bytes as GB, rounding up. Returns empty string for 0 bytes.
-pub(crate) fn format_remaining_gb(bytes: u64) -> String {
-    const GB: u64 = 1_073_741_824;
-    if bytes == 0 {
-        String::new()
-    } else if bytes < GB {
-        "<1GB".to_string()
-    } else {
-        let gb = (bytes as f64 / GB as f64).ceil() as u64;
-        format!("{}GB", gb)
-    }
 }
 
 // ============================================================================
@@ -952,7 +917,7 @@ impl HudColumns {
 fn pad_name(name: &str, width: usize) -> String {
     format!(
         "{:<width$}",
-        truncate_name_middle(name, width),
+        crate::fmt::truncate_name_middle_hud(name, width),
         width = width
     )
 }
@@ -969,13 +934,13 @@ fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
     // footer line (see hud_footer_line)
     let current_remaining = p.total.saturating_sub(p.downloaded);
     let speed_str = if p.speed_mbps > 0.0 {
-        format_speed_hud(p.speed_mbps)
+        crate::fmt::speed_hud(p.speed_mbps)
     } else {
         "--".to_string()
     };
     let eta_str = if p.speed_mbps > 0.0 {
         let secs = current_remaining as f64 / (p.speed_mbps * 1_048_576.0);
-        format_eta_hud(secs as u64)
+        crate::fmt::eta_hud(secs as u64)
     } else {
         "--".to_string()
     };
@@ -1037,13 +1002,13 @@ fn verification_hud_line(ver: &VerificationProgress, w: usize) -> Line<'static> 
         0
     };
     let speed_str = if ver.speed_mbps > 0.0 {
-        format_speed_hud(ver.speed_mbps)
+        crate::fmt::speed_hud(ver.speed_mbps)
     } else {
         "--".to_string()
     };
     let eta_str = if ver.speed_mbps > 0.0 && ver.total_bytes > verified {
         let remaining = (ver.total_bytes - verified) as f64 / (ver.speed_mbps * 1_048_576.0);
-        format_eta_hud(remaining as u64)
+        crate::fmt::eta_hud(remaining as u64)
     } else {
         "--".to_string()
     };
@@ -1067,7 +1032,7 @@ fn verification_hud_line(ver: &VerificationProgress, w: usize) -> Line<'static> 
 fn queue_hud_line(name: &str, size: Option<u64>, w: usize, dim: bool) -> Line<'static> {
     let cols = HudColumns::for_width(w);
     let size_str = size
-        .map(format_bytes_hud)
+        .map(crate::fmt::bytes_hud)
         .unwrap_or_else(|| "--".to_string());
     let name_span = if dim {
         Span::styled(
@@ -1107,14 +1072,14 @@ fn hud_footer_line(data: &ActivityHudData<'_>, w: usize) -> Line<'static> {
         parts.push(format!(
             "verify q {} ({})",
             data.verification_queue_size,
-            format_bytes_hud(data.verification_queue_bytes)
+            crate::fmt::bytes_hud(data.verification_queue_bytes)
         ));
     }
     if data.queue_size > 0 {
         parts.push(format!(
             "dl q {} ({})",
             data.queue_size,
-            format_bytes_hud(data.queue_bytes)
+            crate::fmt::bytes_hud(data.queue_bytes)
         ));
     }
     if let Some(p) = data.download_progress {
@@ -1123,8 +1088,8 @@ fn hud_footer_line(data: &ActivityHudData<'_>, w: usize) -> Line<'static> {
             let secs = total_remaining as f64 / (p.speed_mbps * 1_048_576.0);
             parts.push(format!(
                 "remaining {} {}",
-                format_remaining_gb(total_remaining),
-                format_eta_hud(secs as u64)
+                crate::fmt::remaining_gb(total_remaining),
+                crate::fmt::eta_hud(secs as u64)
             ));
         }
     }
@@ -1196,62 +1161,6 @@ fn right_block_spans(
         s.push_str(&format!("{:>width$}", e, width = cols.eta_w));
     }
     Span::raw(s)
-}
-
-// W1.4 oracle window: the six HUD/files-panel formatting helpers directly
-// below (`format_bytes_hud`, `format_speed_hud`, `format_eta_hud`,
-// `format_remaining_gb`, `truncate_filename`, `truncate_name_middle`) are
-// `pub(crate)` only so `fmt`'s differential tests can call the live legacy
-// helpers; they are deleted in W1.4b once the oracles are frozen.
-/// Compact byte size for HUD columns, e.g. "38.2GB", "512MB".
-pub(crate) fn format_bytes_hud(bytes: u64) -> String {
-    const MB: f64 = 1_048_576.0;
-    const GB: f64 = 1_073_741_824.0;
-    let b = bytes as f64;
-    if bytes >= 1 << 30 {
-        format!("{:.1}GB", b / GB)
-    } else if bytes >= 1 << 20 {
-        format!("{:.0}MB", b / MB)
-    } else if bytes >= 1024 {
-        format!("{:.0}KB", b / 1024.0)
-    } else {
-        format!("{bytes}B")
-    }
-}
-
-/// Compact throughput, e.g. "32.8MB/s" or "1.9GB/s".
-pub(crate) fn format_speed_hud(mbps: f64) -> String {
-    if mbps >= 1024.0 {
-        format!("{:.1}GB/s", mbps / 1024.0)
-    } else {
-        format!("{:.1}MB/s", mbps)
-    }
-}
-
-/// Compact ETA bounded to the HUD eta column (7 cells), e.g. "~1h05m",
-/// "~12m21s", "~42s".
-pub(crate) fn format_eta_hud(secs: u64) -> String {
-    if secs >= 3600 {
-        format!("~{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    } else if secs >= 60 {
-        format!("~{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("~{}s", secs)
-    }
-}
-
-/// Middle-truncate a name to `max` chars (char-based, UTF-8 safe), keeping
-/// head and tail with a `~` marker: "model~.gguf".
-pub(crate) fn truncate_name_middle(name: &str, max: usize) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() <= max || max < 3 {
-        return name.chars().take(max).collect();
-    }
-    let tail_w = (max - 1) / 2;
-    let head_w = max - 1 - tail_w;
-    let head: String = chars[..head_w].iter().collect();
-    let tail: String = chars[chars.len() - tail_w..].iter().collect();
-    format!("{head}~{tail}")
 }
 
 trait StateGlyph {
@@ -2224,35 +2133,10 @@ mod hud_tests {
     }
 
     #[test]
-    fn truncate_name_keeps_head_and_tail() {
-        assert_eq!(
-            truncate_name_middle("model-Q4_K_M.gguf", 24),
-            "model-Q4_K_M.gguf"
-        );
-        assert_eq!(
-            truncate_name_middle("shard-00001.safetensors", 12),
-            "shard-~nsors"
-        );
-        assert_eq!(truncate_name_middle("ab", 5), "ab");
-        // UTF-8 safe
-        assert_eq!(truncate_name_middle("模　型　名　称.gguf", 7), "模　型~guf");
-    }
-
-    #[test]
     fn pad_name_pads_to_fixed_column_width() {
         assert_eq!(pad_name("ab", 6), "ab    ");
         assert_eq!(pad_name("abcdefg", 6), "abc~fg"); // truncates to width, no pad needed
         assert_eq!(pad_name("模　型.gguf", 12).chars().count(), 12);
-    }
-
-    #[test]
-    fn format_bytes_and_speed_compact() {
-        assert_eq!(format_bytes_hud(0), "0B");
-        assert_eq!(format_bytes_hud(2048), "2KB");
-        assert_eq!(format_bytes_hud(5 * 1_048_576), "5MB");
-        assert_eq!(format_bytes_hud(6_442_450_944), "6.0GB");
-        assert_eq!(format_speed_hud(32.84), "32.8MB/s");
-        assert_eq!(format_speed_hud(2048.0), "2.0GB/s");
     }
 
     #[test]

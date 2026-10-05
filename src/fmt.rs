@@ -1,8 +1,3 @@
-// W1.4a creates this module with oracle tests only — no production caller
-// exists yet, so dead_code must be allowed until W1.4b (the immediately
-// following commit) migrates the call sites and deletes this allow.
-#![allow(dead_code)]
-
 //! Formatting primitives shared by the CLI and TUI surfaces, with one
 //! wrapper per surface pinning that surface's exact historical string.
 //!
@@ -30,11 +25,11 @@
 //!
 //! The `#[cfg(test)]` `oracle` module holds verbatim copies of the old
 //! helper bodies as frozen oracles (characterization-first, H1): the
-//! differential table tests assert wrapper output == oracle output. While
-//! the legacy helpers still exist in `utils`, `cli::report` and
-//! `ui::render`, [`crate::fmt::tests::oracle_copies_match_live_legacy_helpers`]
-//! additionally cross-checks oracle copy == live helper, so the copies
-//! provably froze the real algorithms.
+//! differential table tests assert wrapper output == oracle output. The
+//! legacy helpers in `cli::report` and `ui::render` were deleted by
+//! W1.4b; `utils::format_size`/`utils::format_number` survive as
+//! delegates and are still pinned against the frozen oracles by
+//! [`crate::fmt::tests::utils_delegates_match_frozen_oracle`].
 
 // ---------------------------------------------------------------------------
 // Primitives
@@ -266,9 +261,10 @@ mod tests {
     use super::*;
 
     /// Verbatim copies of the legacy helper bodies — the frozen oracle.
-    /// Every differential table below asserts `fmt::* == oracle::*`, and
-    /// [`oracle_copies_match_live_legacy_helpers`] proves the copies match
-    /// the still-live legacy helpers while those exist.
+    /// Every differential table below asserts `fmt::* == oracle::*`.
+    /// W1.4b deleted the legacy helpers (except the two `utils` delegates,
+    /// pinned by [`utils_delegates_match_frozen_oracle`]); these copies are
+    /// what keeps the historical algorithms executable.
     mod oracle {
         pub fn format_size(bytes: u64) -> String {
             const GB: u64 = 1_073_741_824;
@@ -559,91 +555,21 @@ mod tests {
     /// Widths from degenerate (0/1/2) through panel-realistic to no-op.
     const TRUNC_WIDTHS: [usize; 9] = [0, 1, 2, 3, 5, 7, 12, 20, 24];
 
-    /// While the legacy helpers still exist, prove the oracle copies froze
-    /// the real algorithms: oracle == live for every table input.
+    /// `utils::format_size`/`utils::format_number` survive as one-line
+    /// delegates to `fmt` (widely used across the UI and CLI); pin them
+    /// against the frozen oracles so any later change to either side trips
+    /// a test.
     #[test]
-    fn oracle_copies_match_live_legacy_helpers() {
-        use crate::cli::report;
-        use crate::ui::render;
+    fn utils_delegates_match_frozen_oracle() {
         use crate::utils;
-
-        for &b in SIZES.iter().chain(COUNTS.iter()) {
-            assert_eq!(oracle::format_size(b), utils::format_size(b), "size {b}");
+        for &b in SIZES.iter() {
+            assert_eq!(utils::format_size(b), oracle::format_size(b), "size {b}");
         }
         for &n in COUNTS.iter() {
             assert_eq!(
-                oracle::format_number(n),
                 utils::format_number(n),
+                oracle::format_number(n),
                 "count {n}"
-            );
-        }
-        for &(done, total) in BARS.iter() {
-            assert_eq!(
-                oracle::render_bar(done, total),
-                report::render_bar(done, total),
-                "bar {done}/{total}"
-            );
-        }
-        for &secs in ETAS_F64.iter() {
-            assert_eq!(
-                oracle::format_eta(secs),
-                report::format_eta(secs),
-                "eta {secs}"
-            );
-        }
-        for &secs in ETAS_U64.iter() {
-            assert_eq!(
-                oracle::format_eta_hud(secs),
-                render::format_eta_hud(secs),
-                "eta hud {secs}"
-            );
-        }
-        for &s in TRUNC_INPUTS.iter() {
-            assert_eq!(
-                oracle::truncate_path(s, 42),
-                report::truncate_path(s, 42),
-                "path {s:?}"
-            );
-            assert_eq!(
-                oracle::truncate_filename(s, 18),
-                render::truncate_filename(s, 18),
-                "filename {s:?}"
-            );
-            for &w in TRUNC_WIDTHS.iter() {
-                assert_eq!(
-                    oracle::truncate_path(s, w),
-                    report::truncate_path(s, w),
-                    "path {s:?} w{w}"
-                );
-                assert_eq!(
-                    oracle::truncate_filename(s, w),
-                    render::truncate_filename(s, w),
-                    "filename {s:?} w{w}"
-                );
-                assert_eq!(
-                    oracle::truncate_name_middle(s, w),
-                    render::truncate_name_middle(s, w),
-                    "name middle {s:?} w{w}"
-                );
-            }
-        }
-        for &b in SIZES.iter() {
-            assert_eq!(
-                oracle::format_bytes_hud(b),
-                render::format_bytes_hud(b),
-                "bytes hud {b}"
-            );
-            assert_eq!(
-                oracle::format_remaining_gb(b),
-                render::format_remaining_gb(b),
-                "remaining gb {b}"
-            );
-        }
-        for &v in SPEEDS.iter() {
-            assert_eq!(
-                oracle::format_speed_hud(v),
-                render::format_speed_hud(v),
-                "speed {v}"
             );
         }
     }
@@ -773,5 +699,36 @@ mod tests {
         assert_eq!(truncate_path_cli(name, 12), "…safetensors");
         assert_eq!(truncate_filename(name, 12), "shard-00…ors");
         assert_eq!(truncate_name_middle_hud(name, 12), "shard-~nsors");
+    }
+
+    /// Moved from `ui::render::hud_tests` in W1.4b (the helpers these tests
+    /// targeted were deleted there); assertions unchanged, calls retargeted
+    /// to the wrappers.
+    #[test]
+    fn truncate_name_keeps_head_and_tail() {
+        assert_eq!(
+            truncate_name_middle_hud("model-Q4_K_M.gguf", 24),
+            "model-Q4_K_M.gguf"
+        );
+        assert_eq!(
+            truncate_name_middle_hud("shard-00001.safetensors", 12),
+            "shard-~nsors"
+        );
+        assert_eq!(truncate_name_middle_hud("ab", 5), "ab");
+        // UTF-8 safe
+        assert_eq!(
+            truncate_name_middle_hud("模　型　名　称.gguf", 7),
+            "模　型~guf"
+        );
+    }
+
+    #[test]
+    fn format_bytes_and_speed_compact() {
+        assert_eq!(bytes_hud(0), "0B");
+        assert_eq!(bytes_hud(2048), "2KB");
+        assert_eq!(bytes_hud(5 * 1_048_576), "5MB");
+        assert_eq!(bytes_hud(6_442_450_944), "6.0GB");
+        assert_eq!(speed_hud(32.84), "32.8MB/s");
+        assert_eq!(speed_hud(2048.0), "2.0GB/s");
     }
 }
