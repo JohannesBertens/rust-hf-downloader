@@ -136,8 +136,8 @@ Conventions & gotchas
 - UI draws read many RwLocks; keep heavy work off hot render path (spawn tasks and set flags)
 
 Quick map
-- Search: ui/app/models.rs::search_models -> api::fetch_models_filtered
-- Select model: ui/app/models.rs::spawn_load_quantizations -> api::{fetch_model_metadata, classify_quantizations, build_file_tree}
+- Search: ui/app/search.rs::search_models -> api::fetch_models_filtered
+- Select model: ui/app/search.rs::spawn_load_quantizations -> api::{fetch_model_metadata, classify_quantizations, build_file_tree}
 - Download: ui/app/downloads.rs::{trigger_download, confirm_download, confirm_repository_download} -> download::start_download
 - Verify: verification::verification_worker auto-runs; queue via download completion
 

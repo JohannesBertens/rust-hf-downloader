@@ -1,7 +1,7 @@
 // Declare submodules
 mod downloads;
 mod events;
-mod models;
+mod search;
 mod state;
 mod verification;
 

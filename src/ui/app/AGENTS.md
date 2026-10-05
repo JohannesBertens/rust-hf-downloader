@@ -33,7 +33,7 @@ Files and roles
   • Navigation helpers for models, quantizations, files, file tree
   • Filter preset application and persistence (Ctrl+S saves as defaults)
 
-- models.rs (UI models logic)
+- models.rs (search + model-detail loading; renamed search.rs in W3.6)
   • search_models: cache-first on ApiCache.searches; calls api::fetch_models_filtered; sets loading/status
   • show_model/quant/file_details: updates status/selection info lines
   • spawn_load_quantizations: loads metadata (cache-first); chooses mode:
@@ -69,4 +69,4 @@ Safety and correctness notes
 Adding features safely
 - New input actions → events.rs; update status messages and focused pane logic if needed
 - New background operations → set a flag, spawn task, update Arc/RwLock fields, and clear loading flags
-- Persisted options → add to AppOptions (models.rs), map in sync_options_to_config, render in options popup
+- Persisted options → add to AppOptions (models/options.rs), map in sync_options_to_config, render in options popup
