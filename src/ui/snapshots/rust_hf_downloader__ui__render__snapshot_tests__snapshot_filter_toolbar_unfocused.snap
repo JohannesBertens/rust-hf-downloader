@@ -1,9 +1,10 @@
 ---
 source: src/ui/render.rs
+assertion_line: 2727
 expression: terminal.backend()
 ---
 "┌Filters  [Click to cycle | 1-4: Presets | r: Reset | Ctrl+S: Save]────────────────────────────────┐"
-"│Sort: Downloads ▼  |  Min Downloads: 0  |  Min Likes: 0  |  [No Filters]                   v2.10.0│"
+"│Sort: Downloads ▼  |  Min Downloads: 0  |  Min Likes: 0  |  [No Filters]                   v2.11.0│"
 "└──────────────────────────────────────────────────────────────────────────────────────────────────┘"
 "                                                                                                    "
 "                                                                                                    "

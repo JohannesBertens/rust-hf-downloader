@@ -128,11 +128,51 @@ pub async fn fetch_model_metadata(
         .map(|f| RepoFile {
             rfilename: f.path,
             size: Some(f.size),
+            oid: f.oid,
             lfs: f.lfs,
         })
         .collect();
 
     Ok(metadata)
+}
+
+/// Minimal shape of a `GET /api/models/{id}/revision/{rev}` response. Only
+/// the top-level `sha` is consumed; every other field is ignored by serde.
+#[derive(serde::Deserialize)]
+struct RevisionInfo {
+    sha: String,
+}
+
+/// Revision info endpoint URL: resolves any branch/tag/commit name to the
+/// commit SHA it currently points at. Sibling of [`resolve_url`] under the
+/// same single-builder convention.
+fn revision_url(model_id: &str, revision: &str) -> String {
+    format!(
+        "{}/api/models/{}/revision/{}",
+        api_base(),
+        model_id,
+        revision
+    )
+}
+
+/// Resolve a branch/tag/commit name to its commit SHA via
+/// `GET {api_base()}/api/models/{model_id}/revision/{revision}`.
+///
+/// `fetch_model_metadata`'s info call stays revision-less, so this is the
+/// authoritative SHA source for pinning snapshots and refs (hf-cache sync).
+/// Unknown repos or revisions surface as HTTP 404 status errors so callers
+/// can distinguish not_found/auth from decode failures (issue #28).
+pub async fn resolve_revision_sha(
+    model_id: &str,
+    revision: &str,
+    token: Option<&String>,
+) -> Result<String, reqwest::Error> {
+    let url = revision_url(model_id, revision);
+    let response = crate::http_client::get_with_optional_token(&url, token).await?;
+    // Unknown revision → 404 → not_found for the caller (issue #28).
+    let response = response.error_for_status()?;
+    let info: RevisionInfo = response.json().await?;
+    Ok(info.sha)
 }
 
 /// Recursively fetch all files from a repository, including subdirectories
@@ -745,10 +785,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn revision_url_targets_revision_info_endpoint() {
+        // Same convention as resolve_url tests: expectations are built from
+        // api_base() so the test stays correct under HF_ENDPOINT overrides.
+        let base = api_base();
+        assert_eq!(
+            revision_url("a/b", DEFAULT_REVISION),
+            format!("{base}/api/models/a/b/revision/main")
+        );
+        assert_eq!(
+            revision_url("a/b", "2.0bpw"),
+            format!("{base}/api/models/a/b/revision/2.0bpw")
+        );
+        // commit SHA revisions use the same shape
+        assert_eq!(
+            revision_url("a/b", "0123456789abcdef"),
+            format!("{base}/api/models/a/b/revision/0123456789abcdef")
+        );
+    }
+
+    #[test]
+    fn revision_info_parses_top_level_sha_and_ignores_the_rest() {
+        // Representative (truncated) revision-endpoint payload: serde keeps
+        // only the top-level sha; all other fields are ignored.
+        let payload = r#"{
+            "id": "a/b",
+            "sha": "f6e3ba1a0b7d54e967a20e8dccd1e42e7e9b1234",
+            "private": false,
+            "gated": false,
+            "downloads": 1234,
+            "likes": 42,
+            "tags": ["text-generation"],
+            "siblings": [{"rfilename": "config.json"}]
+        }"#;
+        let info: RevisionInfo = serde_json::from_str(payload).unwrap();
+        assert_eq!(info.sha, "f6e3ba1a0b7d54e967a20e8dccd1e42e7e9b1234");
+    }
+
     fn repo_file(path: &str, size: u64) -> RepoFile {
         RepoFile {
             rfilename: path.to_string(),
             size: Some(size),
+            oid: None,
             lfs: None,
         }
     }
@@ -757,6 +836,7 @@ mod tests {
         RepoFile {
             rfilename: path.to_string(),
             size: Some(size),
+            oid: None,
             lfs: Some(crate::models::LfsInfo {
                 oid: oid.to_string(),
                 size,
@@ -785,6 +865,7 @@ mod tests {
             card_data: None,
             siblings: siblings.iter().map(|s| repo_file(s, 1)).collect(),
             tags: Vec::new(),
+            sha: None,
         }
     }
 

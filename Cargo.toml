@@ -1,6 +1,6 @@
 [package]
 name = "rust-hf-downloader"
-version = "2.10.0"
+version = "2.11.0"
 description = "TUI for searching and downloading HuggingFace models"
 authors = ["Johannes Bertens <no-reply@jreb.nl>"]
 license = "MIT"
@@ -27,6 +27,7 @@ urlencoding = "2.1"
 regex = "1.10"
 toml = "0.8"
 sha2 = "0.10"
+sha1 = "0.10"
 hex = "0.4"
 once_cell = "1.19"
 self-replace = "1"
