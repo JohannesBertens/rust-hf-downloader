@@ -1,0 +1,32 @@
+---
+source: src/ui/render.rs
+expression: signature
+---
+y0: 0..99 fg=Cyan
+y1: 0 fg=Cyan | 1..6 fg=DarkGray | 7..17 fg=White,mod=BOLD | 18..22 fg=Cyan | 23..37 fg=DarkGray | 38 fg=White | 39..43 fg=Cyan | 44..54 fg=DarkGray | 55 fg=White | 56..60 fg=Cyan | 61..72 fg=Green,mod=BOLD | 73..91 fg=Cyan | 92..98 fg=DarkGray | 99 fg=Cyan
+y2: 0..17 fg=Cyan | 18..81 fg=Yellow | 82..99 fg=Cyan
+y3: 0..18 fg=Yellow | 21..78 fg=DarkGray | 81..99 fg=Yellow
+y4: 0 fg=Yellow | 4..8 fg=DarkGray | 9..17 fg=Cyan,mod=BOLD | 18 fg=Yellow | 21..78 fg=Yellow,mod=BOLD | 81..96 fg=Yellow | 99 fg=Yellow
+y5: 0 fg=Yellow | 1..3 bg=DarkGray,mod=BOLD | 4..8 fg=DarkGray,bg=DarkGray,mod=BOLD | 9..17 fg=Cyan,bg=DarkGray,mod=BOLD | 18 fg=Yellow | 81 fg=Yellow | 82..98 bg=DarkGray,mod=BOLD | 99 fg=Yellow
+y6: 0 fg=Yellow | 4..8 fg=DarkGray | 9..17 fg=Cyan,mod=BOLD | 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow | 99 fg=Yellow
+y7: 0 fg=Yellow | 18 fg=Yellow | 81 fg=Yellow | 99 fg=Yellow
+y8: 0 fg=Yellow | 18 fg=Yellow | 81 fg=Yellow | 99 fg=Yellow
+y9: 0 fg=Yellow | 18 fg=Yellow | 81 fg=Yellow | 99 fg=Yellow
+y10: 0 fg=Yellow | 18 fg=Yellow | 81 fg=Yellow | 99 fg=Yellow
+y11: 0 fg=Yellow | 18 fg=Yellow | 81 fg=Yellow | 99 fg=Yellow
+y12: 0 fg=Yellow | 18 fg=Yellow | 81 fg=Yellow | 99 fg=Yellow
+y13: 0..18 fg=Yellow | 81..99 fg=Yellow
+y14: 18 fg=Yellow | 81 fg=Yellow
+y15: 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow
+y16: 18 fg=Yellow | 81 fg=Yellow
+y17: 18 fg=Yellow | 81 fg=Yellow
+y18: 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow
+y19: 18 fg=Yellow | 81 fg=Yellow
+y20: 18 fg=Yellow | 81 fg=Yellow
+y21: 18 fg=Yellow | 81 fg=Yellow
+y22: 18 fg=Yellow | 81 fg=Yellow
+y23: 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow
+y24: 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow
+y25: 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow
+y26: 18 fg=Yellow | 21..78 fg=DarkGray | 81 fg=Yellow
+y27: 18..81 fg=Yellow
