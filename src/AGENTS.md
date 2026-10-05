@@ -13,7 +13,7 @@ Data flow (high level):
 - Searches call API (src/api.rs) via HTTP client (src/http_client.rs)
 - Model results and caches live in App state (ApiCache in src/models.rs)
 - Selecting a model loads GGUF quantizations or repository metadata/file tree
-- Downloads (src/download.rs) stream in parallel with progress; registry (src/registry.rs) persists metadata
+- Downloads (src/download/, W3.8: mod.rs facade + private chunked.rs) stream in parallel with progress; registry (src/registry.rs) persists metadata
 - Verification worker (src/verification.rs) validates SHA256 post‑download
 
 Threading/async:
@@ -70,16 +70,15 @@ Key modules
 - load_registry/save_registry, selectors for incomplete/complete
 - Typed mutation ops (W2.4) — every registry write routes through them; register_pending (CLI pending seeder, moved from engine.rs so pending writes have one owner) sits next to the upsert_pending op it drives; mark_complete is one fn taking a Completion::{AlreadyExists (status flip only) | Downloaded (status + downloaded_size + url rewrite)} flavor (the two former mark_complete/mark_complete_with_url ops merged); byte-level behavior pinned by the goldens in registry/registry_tests.rs
 
-6) download.rs
-- start_download(DownloadParams) async orchestrates a safe, parallel, ranged GET download:
-  • Validates/sanitizes paths; restarts if .incomplete exists; preserves subdirectories in filename
-  • HEAD via Range to get total size; falls back to /raw endpoint on 404
-  • Preallocates file; spawns chunk workers limited by DOWNLOAD_CONFIG.concurrent_threads
-  • Updates DownloadProgress and registry continuously; renames .incomplete -> final on success
-  • Queues verification when enabled and hash known
+6) download/ (W3.8: mod.rs facade + private chunked.rs — every crate::download::X path unchanged)
+- start_download(DownloadParams) async orchestrates a safe, parallel, ranged GET download, in three W5.1a phases:
+  • prepare_download_paths: validates/sanitizes paths; restarts if .incomplete exists; preserves subdirectories in filename
+  • handle_existing_file: already-exists branch (registry mark_complete, verification queueing, progress clear)
+  • execute_download_with_retry: retry loop — transient errors consume a retry and delete .incomplete; 401 → AuthRequired; terminal failure → mark_failed + .incomplete cleanup
+- chunked.rs: download_chunked = probe_file_size (Range probe, /raw fallback on 404, Content-Range/Content-Length parse) + file prealloc + spawn_chunk_tasks/wait_for_chunks; renames .incomplete -> final on success; queues verification when enabled and hash known
   • W5.6: each chunk task takes one bundled ChunkContext (client, url, incomplete path, progress handles, span, pacing state — formerly a 12-arg fn); the cross-chunk `progress_downloaded` counter is an Arc<AtomicU64> (audited: single u64, no compound state — fetch_add per stream item, relaxed load for the speed snapshot; rendered progress flows through DownloadProgress under its own lock); the speed-pacing Instant + byte-marker pair stays mutexed (compound state: the window gate and the marker update move as one unit)
 - Path security: paths::sanitize::{sanitize_path_component, validate_and_sanitize_path} (see 12)) — start_download applies them to user-supplied filenames; blocks traversal
-- DownloadConfig (global atomics) controls chunking, retries, timeouts, and UI update cadence
+- DownloadConfig (global atomics in mod.rs) controls chunking, retries, timeouts, and UI update cadence
 
 7) verification.rs
 - VERIFICATION_CONFIG (global atomics)
