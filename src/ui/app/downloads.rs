@@ -576,3 +576,528 @@ fn count_tree_files(node: &FileTreeNode) -> usize {
         1
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! W4.4 characterization tests for the three `confirm_*` download
+    //! flows. They pin each flow's OBSERVABLE effects — status/error
+    //! strings, queue accounting, HUD items mirror, registry entries,
+    //! download-channel messages, and the popup clear driven through the
+    //! real `on_key_event` dispatch — so the unification refactor must keep
+    //! every one of them byte-for-byte. App-level fixtures seed the same
+    //! state the UI path would (`models`/`quantizations`/`model_metadata`
+    //! plus selection state); `App::new` is sync and lazy (EventStream is
+    //! never polled here), so the TUI container is directly
+    //! test-constructible.
+    //!
+    //! Env discipline mirrors `engine.rs`'s tests: HOME (config + registry
+    //! path) and HF_ENDPOINT (api_base, `fetch_multipart_sha256s`) are
+    //! redirected under the crate-wide `ENV_MUTEX`; the endpoint points at
+    //! a closed localhost port so the multi-part SHA fetch fails fast and
+    //! deterministically (connection refused — the same observable the
+    //! status overwrite hides anyway).
+    use super::*;
+    use crate::models::{
+        DownloadStatus, LfsInfo, ModelDisplayMode, ModelInfo, ModelMetadata, PopupMode,
+        QuantizationGroup, QuantizationInfo, RepoFile,
+    };
+
+    /// Find a guaranteed-closed localhost port (bind then drop the listener).
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    struct EnvGuard {
+        home: Option<String>,
+        endpoint: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn install(home: &std::path::Path, endpoint: &str) -> Self {
+            let guard = Self {
+                home: std::env::var("HOME").ok(),
+                endpoint: std::env::var("HF_ENDPOINT").ok(),
+            };
+            std::env::set_var("HOME", home);
+            std::env::set_var("HF_ENDPOINT", endpoint);
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.home {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.endpoint {
+                Some(e) => std::env::set_var("HF_ENDPOINT", e),
+                None => std::env::remove_var("HF_ENDPOINT"),
+            }
+        }
+    }
+
+    fn test_model() -> ModelInfo {
+        ModelInfo {
+            id: "author/model".to_string(),
+            author: Some("author".to_string()),
+            downloads: 0,
+            likes: 0,
+            tags: Vec::new(),
+            last_modified: None,
+        }
+    }
+
+    /// One GGUF quant group; `files` are (filename, size, sha256) rows.
+    fn test_quant_group(files: &[(&str, u64, &str)]) -> QuantizationGroup {
+        QuantizationGroup {
+            quant_type: "Q4_K_M".to_string(),
+            files: files
+                .iter()
+                .map(|(filename, size, sha)| QuantizationInfo {
+                    quant_type: "Q4_K_M".to_string(),
+                    filename: filename.to_string(),
+                    size: *size,
+                    sha256: Some(sha.to_string()),
+                })
+                .collect(),
+            total_size: files.iter().map(|(_, size, _)| size).sum(),
+        }
+    }
+
+    fn test_repo_file(rfilename: &str, size: Option<u64>, lfs_oid: Option<&str>) -> RepoFile {
+        RepoFile {
+            rfilename: rfilename.to_string(),
+            size,
+            oid: None,
+            lfs: lfs_oid.map(|oid| LfsInfo {
+                oid: oid.to_string(),
+                size: size.unwrap_or(0),
+                pointer_size: 0,
+            }),
+        }
+    }
+
+    /// Fresh App with model list + selection seeded, popup open, download
+    /// base path pointed at `<tmp>/dl`, no token. Callers seed the
+    /// flow-specific state (quants / metadata / pending tree selection).
+    fn app_with_model_selected(tmp: &std::path::Path) -> App {
+        let mut app = App::new();
+        *app.models.write() = vec![test_model()];
+        app.list_state.select(Some(0));
+        app.options.hf_token = None;
+        app.download_path_input =
+            tui_input::Input::default().with_value(tmp.join("dl").to_string_lossy().to_string());
+        app.popup_mode = PopupMode::DownloadPath;
+        app
+    }
+
+    /// The download base path every fixture uses (`<tmp>/dl`).
+    fn base_path(tmp: &std::path::Path) -> String {
+        tmp.join("dl").to_string_lossy().to_string()
+    }
+
+    /// Drain every message currently buffered in the download channel.
+    async fn drain_downloads(app: &App) -> Vec<QueuedDownload> {
+        let mut rx = app.engine.download_rx.lock().await;
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    /// Queue accounting + HUD summaries for a successful confirm.
+    async fn assert_queue_accounting(app: &App, count: usize, bytes: u64, names: &[&str]) {
+        let queue = app.engine.download_queue.lock().await;
+        assert_eq!(queue.size, count, "queue size");
+        assert_eq!(queue.bytes, bytes, "queue bytes");
+        drop(queue);
+        let items = app.engine.download_queue_items.lock().await;
+        let got: Vec<&str> = items.iter().map(|i| i.filename.as_str()).collect();
+        assert_eq!(got, names, "HUD queue summaries in send order");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_single_quant_file_queues_one_part_and_clears_popup() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("app-confirm-quant-single-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let filename = "author/model-Q4_K_M.gguf";
+        let mut app = app_with_model_selected(&tmp);
+        *app.quantizations.write() = vec![test_quant_group(&[(filename, 10, "sha-a")])];
+        app.quant_list_state.select(Some(0));
+        app.quant_file_list_state.select(Some(0));
+        app.focused_pane = FocusedPane::QuantizationFiles;
+
+        // Enter in the DownloadPath popup: the real key path users take.
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        // Popup closed by the key handler; single-file status string.
+        assert_eq!(app.popup_mode, PopupMode::None);
+        let root = PathBuf::from(base_path(&tmp)).join("author").join("model");
+        assert_eq!(
+            *app.status.read(),
+            format!("Starting download of {} to {}", filename, root.display())
+        );
+        assert!(app.error.read().is_none());
+
+        // One file accounted and one channel message with every field.
+        assert_queue_accounting(&app, 1, 10, &[filename]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].model_id, "author/model");
+        assert_eq!(drained[0].revision, crate::api::DEFAULT_REVISION);
+        assert_eq!(drained[0].filename, filename);
+        assert_eq!(drained[0].base_path, root);
+        assert_eq!(drained[0].expected_sha256.as_deref(), Some("sha-a"));
+        assert_eq!(drained[0].hf_token, None);
+        assert_eq!(drained[0].total_size, 10);
+
+        // GGUF quant flavor: zero-size registry entry, no revision.
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(registry.downloads.len(), 1);
+        assert_eq!(registry.downloads[0].total_size, 0);
+        assert_eq!(registry.downloads[0].status, DownloadStatus::Incomplete);
+        assert_eq!(registry.downloads[0].revision, None);
+        assert_eq!(
+            registry.downloads[0].expected_sha256.as_deref(),
+            Some("sha-a")
+        );
+        assert_eq!(
+            registry.downloads[0].url,
+            crate::api::resolve_url("author/model", filename, crate::api::DEFAULT_REVISION)
+        );
+        assert_eq!(
+            PathBuf::from(&registry.downloads[0].local_path),
+            root.join(filename)
+        );
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_quant_group_queues_all_parts_with_multi_part_status() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("app-confirm-quant-group-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let f1 = "author/model-Q4_K_M-00001-of-00002.gguf";
+        let f2 = "author/model-Q4_K_M-00002-of-00002.gguf";
+        let mut app = app_with_model_selected(&tmp);
+        *app.quantizations.write() =
+            vec![test_quant_group(&[(f1, 10, "sha-1"), (f2, 20, "sha-2")])];
+        app.quant_list_state.select(Some(0));
+        app.focused_pane = FocusedPane::QuantizationGroups;
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        // Group focus downloads every part; the multi-part status string
+        // names the FIRST file. (The transient SHA-fetch warning — the
+        // endpoint is a closed port here — is overwritten by this line.)
+        assert_eq!(app.popup_mode, PopupMode::None);
+        let root = PathBuf::from(base_path(&tmp)).join("author").join("model");
+        assert_eq!(
+            *app.status.read(),
+            format!("Queued 2 parts of {} to {}", f1, root.display())
+        );
+        assert!(app.error.read().is_none());
+
+        assert_queue_accounting(&app, 2, 30, &[f1, f2]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 2);
+        for (msg, (filename, size, sha)) in drained
+            .iter()
+            .zip([(f1, 10u64, "sha-1"), (f2, 20, "sha-2")])
+        {
+            assert_eq!(msg.filename, filename);
+            assert_eq!(msg.base_path, root);
+            assert_eq!(msg.total_size, size);
+            assert_eq!(msg.expected_sha256.as_deref(), Some(sha));
+        }
+
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(registry.downloads.len(), 2);
+        assert!(registry.downloads.iter().all(|d| d.total_size == 0));
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_repository_download_queues_files_only_under_model_root() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("app-confirm-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_with_model_selected(&tmp);
+        *app.display_mode.write() = ModelDisplayMode::Standard;
+        app.focused_pane = FocusedPane::Models;
+        *app.model_metadata.write() = Some(ModelMetadata {
+            model_id: "author/model".to_string(),
+            library_name: None,
+            pipeline_tag: None,
+            card_data: None,
+            siblings: vec![
+                test_repo_file("README.md", Some(100), None),
+                test_repo_file("sub/model.bin", Some(200), Some("lfs-sha")),
+                // Directory markers must be filtered out: no size, or a
+                // trailing slash.
+                test_repo_file("empty-dir/", None, None),
+                test_repo_file("dir/", Some(1), None),
+            ],
+            tags: Vec::new(),
+            sha: None,
+        });
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        let root = PathBuf::from(base_path(&tmp)).join("author").join("model");
+        assert_eq!(
+            *app.status.read(),
+            format!("Queued 2 files from author/model to {}", root.display())
+        );
+        assert!(app.error.read().is_none());
+
+        assert_queue_accounting(&app, 2, 300, &["README.md", "sub/model.bin"]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].filename, "README.md");
+        assert_eq!(drained[0].base_path, root);
+        assert_eq!(drained[0].expected_sha256, None);
+        assert_eq!(drained[0].total_size, 100);
+        assert_eq!(drained[1].filename, "sub/model.bin");
+        assert_eq!(drained[1].base_path, root);
+        assert_eq!(drained[1].expected_sha256.as_deref(), Some("lfs-sha"));
+        assert_eq!(drained[1].total_size, 200);
+
+        // Repository flavor records the QUEUED size and keeps each file's
+        // subdirectory under base/author/model.
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(registry.downloads.len(), 2);
+        assert_eq!(registry.downloads[0].total_size, 100);
+        assert_eq!(registry.downloads[1].total_size, 200);
+        assert_eq!(
+            PathBuf::from(&registry.downloads[1].local_path),
+            root.join("sub").join("model.bin")
+        );
+        assert_eq!(
+            registry.downloads[1].expected_sha256.as_deref(),
+            Some("lfs-sha")
+        );
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_tree_directory_download_queues_subtree_only() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp = std::env::temp_dir().join(format!("app-confirm-tree-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_with_model_selected(&tmp);
+        *app.model_metadata.write() = Some(ModelMetadata {
+            model_id: "author/model".to_string(),
+            library_name: None,
+            pipeline_tag: None,
+            card_data: None,
+            siblings: vec![
+                test_repo_file("sub/a.bin", Some(10), Some("sha-a")),
+                test_repo_file("sub/b.bin", Some(20), Some("sha-b")),
+                test_repo_file("other.bin", Some(30), None),
+            ],
+            tags: Vec::new(),
+            sha: None,
+        });
+        app.pending_tree_download = Some(("sub".to_string(), true));
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        let root = PathBuf::from(base_path(&tmp)).join("author").join("model");
+        assert_eq!(
+            *app.status.read(),
+            format!("Queued 2 files from sub to {}", root.display())
+        );
+        assert!(app.error.read().is_none());
+
+        // Only the subtree — other.bin stays out of every mirror.
+        assert_queue_accounting(&app, 2, 30, &["sub/a.bin", "sub/b.bin"]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 2);
+        assert!(drained.iter().all(|m| m.base_path == root));
+
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(registry.downloads.len(), 2);
+        assert_eq!(
+            PathBuf::from(&registry.downloads[0].local_path),
+            root.join("sub").join("a.bin")
+        );
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_tree_file_download_queues_exact_file_with_singular_status() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("app-confirm-tree-file-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_with_model_selected(&tmp);
+        *app.model_metadata.write() = Some(ModelMetadata {
+            model_id: "author/model".to_string(),
+            library_name: None,
+            pipeline_tag: None,
+            card_data: None,
+            siblings: vec![
+                test_repo_file("config.json", Some(5), None),
+                test_repo_file("sub/a.bin", Some(10), None),
+            ],
+            tags: Vec::new(),
+            sha: None,
+        });
+        app.pending_tree_download = Some(("config.json".to_string(), false));
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        // Singular "file" — the one-file spelling of the tree status line.
+        assert_eq!(app.popup_mode, PopupMode::None);
+        let root = PathBuf::from(base_path(&tmp)).join("author").join("model");
+        assert_eq!(
+            *app.status.read(),
+            format!("Queued 1 file from config.json to {}", root.display())
+        );
+        assert!(app.error.read().is_none());
+
+        assert_queue_accounting(&app, 1, 5, &["config.json"]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].filename, "config.json");
+        assert_eq!(drained[0].base_path, root);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_tree_download_without_matches_cancels_and_queues_nothing() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("app-confirm-tree-miss-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_with_model_selected(&tmp);
+        *app.model_metadata.write() = Some(ModelMetadata {
+            model_id: "author/model".to_string(),
+            library_name: None,
+            pipeline_tag: None,
+            card_data: None,
+            siblings: vec![test_repo_file("sub/a.bin", Some(10), None)],
+            tags: Vec::new(),
+            sha: None,
+        });
+        app.pending_tree_download = Some(("nope".to_string(), true));
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        // Cancellation path: both strings, and nothing enqueued anywhere.
+        assert_eq!(*app.status.read(), "Download cancelled");
+        assert_eq!(
+            app.error.read().as_deref(),
+            Some("No downloadable files match nope")
+        );
+        assert!(
+            app.pending_tree_download.is_none(),
+            "pending selection consumed"
+        );
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_quant_flow_with_no_file_selected_reports_error_and_queues_nothing() {
+        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let tmp =
+            std::env::temp_dir().join(format!("app-confirm-quant-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_with_model_selected(&tmp);
+        *app.quantizations.write() = vec![test_quant_group(&[("f.gguf", 10, "sha")])];
+        app.quant_list_state.select(Some(0));
+        // Files pane focused but nothing selected → empty selection guard.
+        app.focused_pane = FocusedPane::QuantizationFiles;
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        assert_eq!(
+            app.error.read().as_deref(),
+            Some("No files selected for download")
+        );
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

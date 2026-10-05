@@ -1,5 +1,4 @@
 use crate::models::*;
-use crossterm::event::EventStream;
 use parking_lot::RwLock;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
@@ -16,7 +15,6 @@ pub use crate::engine::QueuedDownload;
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
-    pub event_stream: EventStream,
     pub input: Input,
     pub input_mode: InputMode,
     pub focused_pane: FocusedPane,
@@ -119,7 +117,6 @@ impl App {
 
         Self {
             running: false,
-            event_stream: EventStream::default(),
             input: Input::default(),
             input_mode: InputMode::Normal, // Start in normal mode
             focused_pane: FocusedPane::Models,

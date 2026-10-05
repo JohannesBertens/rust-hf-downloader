@@ -10,7 +10,7 @@ pub use state::App;
 
 use crate::models::PopupMode;
 use color_eyre::Result;
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::{FutureExt, StreamExt};
 use ratatui::{DefaultTerminal, Frame};
 use std::sync::atomic::Ordering;
@@ -19,6 +19,13 @@ impl App {
     /// Main application run loop
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.running = true;
+
+        // The terminal event stream needs a live tty (crossterm's source
+        // eagerly opens stdin or /dev/tty), so it is constructed here —
+        // after the caller's terminal setup and immediately before its
+        // first poll — instead of in `App::new`. This also keeps `App::new`
+        // test-constructible in headless environments.
+        let mut event_stream = EventStream::default();
 
         // Initialize global download config from options
         self.sync_options_to_config();
@@ -58,7 +65,7 @@ impl App {
                 self.prefetch_adjacent_models();
             }
 
-            self.handle_crossterm_events().await?;
+            self.handle_crossterm_events(&mut event_stream).await?;
         }
         Ok(())
     }
@@ -484,7 +491,7 @@ impl App {
 
     /// Handle crossterm events with event coalescing
     /// Drains all pending events, processing keys immediately but coalescing mouse moves
-    async fn handle_crossterm_events(&mut self) -> Result<()> {
+    async fn handle_crossterm_events(&mut self, event_stream: &mut EventStream) -> Result<()> {
         use crossterm::event::{MouseButton, MouseEventKind};
 
         // Check for status messages from download tasks (non-blocking)
@@ -506,7 +513,7 @@ impl App {
         // Wait for at least one event or timeout
         let delay = tokio::time::sleep(tokio::time::Duration::from_millis(50));
         tokio::select! {
-            maybe_event = self.event_stream.next().fuse() => {
+            maybe_event = event_stream.next().fuse() => {
                 if let Some(Ok(event)) = maybe_event {
                     match event {
                         Event::Key(key) => {
@@ -549,7 +556,7 @@ impl App {
         loop {
             // Use poll to check if there are more events without blocking
             use futures::stream::StreamExt;
-            match futures::poll!(self.event_stream.next()) {
+            match futures::poll!(event_stream.next()) {
                 std::task::Poll::Ready(Some(Ok(event))) => {
                     match event {
                         Event::Key(key) => {
