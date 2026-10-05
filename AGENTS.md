@@ -37,7 +37,7 @@ src/
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
 ├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
-├── registry.rs       # Download metadata management + typed mutation ops (W2.4): upsert_pending / upsert_metadata / mark_complete / mark_complete_with_url / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save → mirror patch; see registry.rs module docs)
+├── registry.rs       # Download metadata management + typed mutation ops (W2.4): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save → mirror patch; see registry.rs module docs)
 ├── download.rs       # Download orchestration with auth; returns FileOutcome (v0.9.5)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
@@ -67,8 +67,10 @@ src/
 ### Frontends share one engine (v-unreleased)
 
 Every registry mutation goes through the typed ops in `registry.rs`
-(W2.4): `upsert_pending`, `upsert_metadata`, `mark_complete`,
-`mark_complete_with_url`, `mark_failed`, `mark_mismatch`. Each op loads
+(W2.4): `register_pending`, `upsert_pending`, `upsert_metadata`,
+`mark_complete` (one fn taking a `Completion::{AlreadyExists, Downloaded}`
+flavor — the two former `mark_complete`/`mark_complete_with_url` ops
+merged), `mark_failed`, `mark_mismatch`. Each op loads
 the on-DISK registry, mutates, saves (non-atomic by design — §8.5), then
 patches the caller's mirror regardless of save success; no lock is held
 across the load-modify-save (the concurrent-writer lost-update race is a

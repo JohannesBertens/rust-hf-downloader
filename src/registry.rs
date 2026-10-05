@@ -5,8 +5,9 @@
 //!
 //! # Mutation ops (W2.4b)
 //!
-//! `upsert_pending`, `upsert_metadata`, `mark_complete`,
-//! `mark_complete_with_url`, `mark_failed` and `mark_mismatch` are the
+//! `upsert_pending`, `upsert_metadata`, `mark_complete` (taking a
+//! [`Completion`] flavor), `register_pending`, `mark_failed` and
+//! `mark_mismatch` are the
 //! single home of every registry mutation the engine performs (the inline
 //! load-modify-save sequences they replaced lived in `download.rs`,
 //! `verification.rs` and `engine.rs`). Every op keeps the exact contract
@@ -68,8 +69,54 @@ pub fn save_registry(registry: &DownloadRegistry) {
 // assertions passed unchanged through the migration from the inline code.
 // ---------------------------------------------------------------------------
 
+/// Seed the on-disk registry with `Incomplete` entries for files about to
+/// be queued, so downloads started headlessly show up in the TUI's
+/// resume/complete views (moved here from `engine.rs`: pending writes have
+/// one owner, next to the `upsert_pending` op they drive). Validates each
+/// filename (path-traversal safety, same rules as the TUI) and returns the
+/// first validation error, if any. The error type is the shared
+/// [`crate::paths::sanitize::PathError`]: path validation is
+/// register_pending's only failure source today, and its `Display`
+/// reproduces the historical message strings byte-for-byte.
+pub fn register_pending(
+    model_id: &str,
+    revision: &str,
+    files: &[(String, u64, Option<String>)],
+    base_path: &str,
+) -> Result<(), crate::paths::sanitize::PathError> {
+    // Validate and build every entry first: the first invalid filename
+    // aborts (via `?`) before anything is written — no partial save. The
+    // registry write itself is the shared `upsert_pending` op (one load,
+    // append-only-missing-urls, one save).
+    let mut entries = Vec::with_capacity(files.len());
+    for (filename, size, sha256) in files {
+        let validated_path =
+            crate::paths::sanitize::validate_and_sanitize_path(base_path, model_id, filename)?;
+
+        let url = crate::api::resolve_url(model_id, filename, revision);
+        entries.push(DownloadMetadata {
+            model_id: model_id.to_string(),
+            filename: filename.clone(),
+            url,
+            local_path: validated_path.to_string_lossy().to_string(),
+            total_size: *size,
+            downloaded_size: 0,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: sha256.clone(),
+            revision: if revision == crate::api::DEFAULT_REVISION {
+                None
+            } else {
+                Some(revision.to_string())
+            },
+        });
+    }
+
+    upsert_pending(&entries);
+    Ok(())
+}
+
 /// Seed the registry with `Incomplete` entries for files about to be
-/// queued (`engine::register_pending`): one load, one append per entry
+/// queued ([`register_pending`]): one load, one append per entry
 /// whose url is not recorded yet, one save. Callers validate filenames
 /// first — this op performs no path validation and no per-entry aborts.
 pub fn upsert_pending(entries: &[DownloadMetadata]) {
@@ -97,53 +144,71 @@ pub fn upsert_metadata(entry: DownloadMetadata) {
     save_registry(&registry);
 }
 
-/// Mark an existing-file download complete (`download::start_download`
-/// "already exists" path): the entry matching `url` flips to `Complete` —
-/// its `downloaded_size` and every other field are left alone — and the
-/// mutated entry is inserted into the complete-downloads mirror. No entry
-/// on disk means no change and no mirror insert.
-pub async fn mark_complete(
-    complete_downloads: &Arc<Mutex<CompleteDownloads>>,
-    url: &str,
-    filename: &str,
-) {
-    let mut registry = load_registry();
-    let mut updated = None;
-    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-        entry.status = DownloadStatus::Complete;
-        updated = Some(entry.clone());
-    }
-    save_registry(&registry);
-
-    if let Some(entry) = updated {
-        let mut complete = complete_downloads.lock().await;
-        complete.insert(filename.to_string(), entry);
-    }
+/// How a download finished — the input shape of [`mark_complete`]. The
+/// two former ops (`mark_complete` / `mark_complete_with_url`) differed
+/// in three correlated ways (match predicate, `downloaded_size`, url
+/// rewrite); one enum keeps each flavor's exact semantics while making
+/// the wrong mixtures unrepresentable.
+#[derive(Debug, Clone, Copy)]
+pub enum Completion<'a> {
+    /// The file already existed on disk (`download::start_download`'s
+    /// already-exists path): the entry matching `url` flips to
+    /// `Complete` — its `downloaded_size` and every other field are
+    /// left alone.
+    AlreadyExists {
+        /// Registry url of the download (the resolve URL).
+        url: &'a str,
+    },
+    /// The chunked download finished (`download::start_download`'s
+    /// success path): the entry matching `url` OR `successful_url` (the
+    /// raw-endpoint fallback) flips to `Complete` with
+    /// `downloaded_size` set and its url rewritten to the successful
+    /// one.
+    Downloaded {
+        /// Registry url of the download (the resolve URL).
+        url: &'a str,
+        /// The URL that actually served the bytes (may equal `url`).
+        successful_url: &'a str,
+        /// Final byte count recorded on the entry.
+        downloaded_size: u64,
+    },
 }
 
-/// Mark a finished chunked download complete (`download::start_download`
-/// success path): the entry matching `url` OR `successful_url` (the
-/// raw-endpoint fallback) flips to `Complete` with `downloaded_size` set
-/// and its url rewritten to the successful one; the mutated entry is
-/// inserted into the complete-downloads mirror.
-pub async fn mark_complete_with_url(
+/// Mark a download complete (`download::start_download`'s two success
+/// paths — see [`Completion`] for each flavor's exact rules): the
+/// matching entry flips to `Complete`, the mutated registry is saved,
+/// and the mutated entry is inserted into the complete-downloads
+/// mirror. No entry on disk means no change and no mirror insert.
+pub async fn mark_complete(
     complete_downloads: &Arc<Mutex<CompleteDownloads>>,
-    url: &str,
-    successful_url: &str,
-    downloaded_size: u64,
+    completion: Completion<'_>,
     filename: &str,
 ) {
     let mut registry = load_registry();
     let mut updated = None;
-    if let Some(entry) = registry
-        .downloads
-        .iter_mut()
-        .find(|d| d.url == url || d.url == successful_url)
-    {
-        entry.status = DownloadStatus::Complete;
-        entry.downloaded_size = downloaded_size;
-        entry.url = successful_url.to_string();
-        updated = Some(entry.clone());
+    match completion {
+        Completion::AlreadyExists { url } => {
+            if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
+                entry.status = DownloadStatus::Complete;
+                updated = Some(entry.clone());
+            }
+        }
+        Completion::Downloaded {
+            url,
+            successful_url,
+            downloaded_size,
+        } => {
+            if let Some(entry) = registry
+                .downloads
+                .iter_mut()
+                .find(|d| d.url == url || d.url == successful_url)
+            {
+                entry.status = DownloadStatus::Complete;
+                entry.downloaded_size = downloaded_size;
+                entry.url = successful_url.to_string();
+                updated = Some(entry.clone());
+            }
+        }
     }
     save_registry(&registry);
 

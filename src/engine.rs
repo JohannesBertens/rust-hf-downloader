@@ -245,7 +245,7 @@ impl EngineState {
                 // every file first — the first invalid filename aborts
                 // the whole enqueue (nothing is queued or sent) — then
                 // upsert the entries on DISK. This is exactly
-                // `register_pending`, whose byte-level behavior the
+                // `registry::register_pending`, whose byte-level behavior the
                 // registry golden tests pin. A single-model batch is
                 // assumed (the CLI flavor's shape), so the first file's
                 // model id and revision stand for the whole batch, exactly
@@ -264,7 +264,7 @@ impl EngineState {
                     .collect();
                 (
                     Vec::new(),
-                    register_pending(&model_id, &revision, &pending, base).err(),
+                    crate::registry::register_pending(&model_id, &revision, &pending, base).err(),
                 )
             }
         };
@@ -415,7 +415,8 @@ pub enum RegistryMode {
     /// CLI download flow: validate every file first — the first invalid
     /// filename aborts the whole enqueue (reported via
     /// [`EnqueueOutcome::aborted`]) — then upsert the entries on DISK
-    /// (`register_pending`/`registry::upsert_pending`). The engine's
+    /// (`register_pending`/`upsert_pending`, both in `registry.rs` —
+    /// pending writes have one owner). The engine's
     /// mirror is not patched: the CLI seeds it from disk at bootstrap.
     Disk {
         /// Raw user base directory (same meaning as [`RegistryMode::Mirror`]'s
@@ -466,8 +467,9 @@ pub enum InvalidPolicy {
     /// [`EnqueueOutcome::invalid`] — but still queued and sent.
     ReportAndQueue,
     /// Disk-registry flavor (CLI `download`): the first invalid
-    /// filename aborts the whole enqueue (via `register_pending`'s
-    /// validate-first pass) — nothing is queued or sent; the error is
+    /// filename aborts the whole enqueue (via
+    /// `registry::register_pending`'s validate-first pass) — nothing is
+    /// queued or sent; the error is
     /// reported via [`EnqueueOutcome::aborted`].
     AbortAll,
     /// The no-registry flavors (TUI resume, `hf-cache sync`): no path
@@ -536,7 +538,7 @@ impl EnqueuePolicy {
         }
     }
 
-    /// CLI `download`: disk upsert via `register_pending`
+    /// CLI `download`: disk upsert via `registry::register_pending`
     /// (validate-first, abort on the first invalid file), queue accounted
     /// before the sends, HUD mirror pushed up front, no rollback.
     pub fn cli_download(base: impl Into<String>) -> Self {
@@ -711,50 +713,6 @@ pub async fn bootstrap() -> (
     (state, download_tx, manager)
 }
 
-/// Seed the on-disk registry with `Incomplete` entries for files about to be
-/// queued, so downloads started headlessly show up in the TUI's
-/// resume/complete views. Validates each filename (path-traversal safety,
-/// same rules as the TUI) and returns the first validation error, if any.
-/// The error type is the shared [`crate::paths::sanitize::PathError`]:
-/// path validation is register_pending's only failure source today, and
-/// its `Display` reproduces the historical message strings byte-for-byte.
-pub fn register_pending(
-    model_id: &str,
-    revision: &str,
-    files: &[(String, u64, Option<String>)],
-    base_path: &str,
-) -> Result<(), crate::paths::sanitize::PathError> {
-    // Validate and build every entry first: the first invalid filename
-    // aborts (via `?`) before anything is written — no partial save. The
-    // registry write itself is the shared `upsert_pending` op (one load,
-    // append-only-missing-urls, one save).
-    let mut entries = Vec::with_capacity(files.len());
-    for (filename, size, sha256) in files {
-        let validated_path =
-            crate::paths::sanitize::validate_and_sanitize_path(base_path, model_id, filename)?;
-
-        let url = crate::api::resolve_url(model_id, filename, revision);
-        entries.push(DownloadMetadata {
-            model_id: model_id.to_string(),
-            filename: filename.clone(),
-            url,
-            local_path: validated_path.to_string_lossy().to_string(),
-            total_size: *size,
-            downloaded_size: 0,
-            status: DownloadStatus::Incomplete,
-            expected_sha256: sha256.clone(),
-            revision: if revision == crate::api::DEFAULT_REVISION {
-                None
-            } else {
-                Some(revision.to_string())
-            },
-        });
-    }
-
-    crate::registry::upsert_pending(&entries);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,7 +869,7 @@ mod tests {
     }
 
     /// One registry entry to write to disk, exercising the same field set
-    /// `register_pending` produces.
+    /// `registry::register_pending` produces.
     fn sample_registry() -> DownloadRegistry {
         DownloadRegistry {
             downloads: vec![DownloadMetadata {

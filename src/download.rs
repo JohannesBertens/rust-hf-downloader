@@ -179,7 +179,12 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
             .unwrap_or(0);
 
         // Update registry as complete
-        registry::mark_complete(&complete_downloads, &url, &filename).await;
+        registry::mark_complete(
+            &complete_downloads,
+            registry::Completion::AlreadyExists { url: &url },
+            &filename,
+        )
+        .await;
 
         // Queue verification if enabled AND hash is available
         let verification_enabled = DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
@@ -238,11 +243,13 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
                 // Verify the download is complete
                 if final_size == expected_size && expected_size > 0 {
                     // Update registry: mark as complete and update URL if it changed (raw fallback)
-                    registry::mark_complete_with_url(
+                    registry::mark_complete(
                         &complete_downloads,
-                        &url,
-                        &successful_url,
-                        final_size,
+                        registry::Completion::Downloaded {
+                            url: &url,
+                            successful_url: &successful_url,
+                            downloaded_size: final_size,
+                        },
                         &filename,
                     )
                     .await;

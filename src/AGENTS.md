@@ -68,6 +68,7 @@ Key modules
 5) registry.rs
 - Persistence of DownloadRegistry at ~/models/hf-downloads.toml
 - load_registry/save_registry, selectors for incomplete/complete
+- Typed mutation ops (W2.4) — every registry write routes through them; register_pending (CLI pending seeder, moved from engine.rs so pending writes have one owner) sits next to the upsert_pending op it drives; mark_complete is one fn taking a Completion::{AlreadyExists (status flip only) | Downloaded (status + downloaded_size + url rewrite)} flavor (the two former mark_complete/mark_complete_with_url ops merged); byte-level behavior pinned by the goldens in registry/registry_tests.rs
 
 6) download.rs
 - start_download(DownloadParams) async orchestrates a safe, parallel, ranged GET download:

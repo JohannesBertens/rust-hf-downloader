@@ -1,7 +1,8 @@
 //! W2.4a golden fixtures: byte-exact pins of every inline load-modify-save
 //! registry mutation the engine performs today (download.rs x5,
-//! verification.rs x1, engine.rs `register_pending`), plus the concurrency
-//! and failure contracts the W2.4b typed ops must reproduce unchanged:
+//! verification.rs x1, the CLI-pending seeder `register_pending`), plus
+//! the concurrency and failure contracts the W2.4b typed ops must
+//! reproduce unchanged:
 //!
 //! - **Disk is the source of truth.** Every op loads the on-DISK registry,
 //!   mutates, saves (non-atomic `fs::File::create`, errors silently
@@ -15,7 +16,7 @@
 //!
 //! The golden tests drive the real typed ops (`super::mark_complete`,
 //! `mark_failed`, `upsert_metadata`, `mark_mismatch`, and the real
-//! `engine::register_pending`). In W2.4a the very same assertions pinned
+//! `register_pending`). In W2.4a the very same assertions pinned
 //! byte-for-byte identical replicas of the pre-refactor inline sequences —
 //! passing unchanged through the W2.4b swap is the migration's
 //! behavior-preservation proof.
@@ -283,7 +284,14 @@ async fn golden_mark_complete_already_exists_pins_bytes_and_complete_map() {
     write_fixture(&tmp);
 
     let complete = empty_complete_map();
-    mark_complete(&complete, URL_INCOMPLETE, "incomplete.bin").await;
+    mark_complete(
+        &complete,
+        Completion::AlreadyExists {
+            url: URL_INCOMPLETE,
+        },
+        "incomplete.bin",
+    )
+    .await;
 
     assert_eq!(
         read_registry_file(),
@@ -317,7 +325,9 @@ async fn golden_mark_complete_already_exists_pins_bytes_and_complete_map() {
     let before = read_registry_file();
     mark_complete(
         &complete,
-        "https://huggingface.co/no/such/resolve/main/x.bin",
+        Completion::AlreadyExists {
+            url: "https://huggingface.co/no/such/resolve/main/x.bin",
+        },
         "x.bin",
     )
     .await;
@@ -341,7 +351,16 @@ async fn golden_mark_complete_with_url_rewrite_pins_bytes_and_complete_map() {
     write_fixture(&tmp);
 
     let complete = empty_complete_map();
-    mark_complete_with_url(&complete, URL_QUANT, URL_RAW_QUANT, 999_999, "quant.gguf").await;
+    mark_complete(
+        &complete,
+        Completion::Downloaded {
+            url: URL_QUANT,
+            successful_url: URL_RAW_QUANT,
+            downloaded_size: 999_999,
+        },
+        "quant.gguf",
+    )
+    .await;
 
     assert_eq!(
         read_registry_file(),
@@ -574,9 +593,10 @@ async fn golden_mark_mismatch_pins_bytes_and_registry_mirror() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// engine.rs `register_pending` (driven through the real fn): appends
-/// entries for urls not yet present, skips urls already recorded, records
-/// the revision only for non-default revisions, and saves exactly once.
+/// The CLI-pending seeder `register_pending` (driven through the real
+/// fn): appends entries for urls not yet present, skips urls already
+/// recorded, records the revision only for non-default revisions, and
+/// saves exactly once.
 #[test]
 fn golden_register_pending_appends_only_missing_urls_and_pins_bytes() {
     let _env = crate::paths::ENV_MUTEX
@@ -587,7 +607,7 @@ fn golden_register_pending_appends_only_missing_urls_and_pins_bytes() {
     let fixture = write_fixture(&tmp);
 
     let url_new = crate::api::resolve_url(MODEL, "brand-new.gguf", crate::api::DEFAULT_REVISION);
-    crate::engine::register_pending(
+    register_pending(
         MODEL,
         crate::api::DEFAULT_REVISION,
         &[
@@ -638,7 +658,7 @@ fn register_pending_aborts_on_first_invalid_file_without_saving() {
     let _guard = DataDirGuard::install(&tmp);
     let fixture = write_fixture(&tmp);
 
-    let err = crate::engine::register_pending(
+    let err = register_pending(
         MODEL,
         crate::api::DEFAULT_REVISION,
         &[
@@ -733,7 +753,12 @@ async fn save_failure_complete_map_insert_requires_disk_entry() {
     let _guard = DataDirGuard::install(&not_a_dir);
 
     let complete = empty_complete_map();
-    mark_complete(&complete, URL_COMPLETE, "complete.gguf").await;
+    mark_complete(
+        &complete,
+        Completion::AlreadyExists { url: URL_COMPLETE },
+        "complete.gguf",
+    )
+    .await;
 
     assert!(
         !crate::paths::registry_path().exists(),
