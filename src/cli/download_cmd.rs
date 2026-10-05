@@ -13,7 +13,7 @@ use super::events::{ErrorCode, Event, FileDto, FileStatus, OverallProgress, Summ
 use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, FileSpec, Selector};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
-use crate::engine::{EngineState, ManagerHandle, QueuedDownload};
+use crate::engine::{EngineState, EnqueuePolicy, ManagerHandle, QueuedDownload};
 use crate::models::{FileOutcome, VerifyOutcome};
 
 /// Everything the monitor loop accumulates for the summary and exit code.
@@ -154,37 +154,15 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
 
     // --- 4. Register + queue through the shared engine ---------------------
     let base = options.default_directory.clone();
-    let pending: Vec<(String, u64, Option<String>)> = files
-        .iter()
-        .map(|f| (f.filename.clone(), f.size_bytes, f.sha256.clone()))
-        .collect();
-    if let Err(err) = crate::engine::register_pending(&args.model_id, &revision, &pending, &base) {
-        reporter.emit(&Event::error(ErrorCode::InvalidPath, err.to_string()));
-        return EXIT_FAILURE;
-    }
-
     let (state, download_tx, manager) = crate::engine::bootstrap().await;
 
     // Model files land under base/author/model-name (same layout as the TUI)
     let parts: Vec<&str> = args.model_id.split('/').collect();
     let model_path = PathBuf::from(&base).join(parts[0]).join(parts[1]);
 
-    // Queue accounting + sends (mirrors the TUI's confirm_download)
-    {
-        let mut queue = state.download_queue.lock().await;
-        queue.add(files.len(), total_bytes);
-    }
-    {
-        let mut items = state.download_queue_items.lock().await;
-        for file in &files {
-            items.push(crate::models::QueueItemSummary {
-                filename: file.filename.clone(),
-                total_size: file.size_bytes,
-            });
-        }
-    }
-    for file in &files {
-        let _ = download_tx.send(QueuedDownload {
+    let queued: Vec<QueuedDownload> = files
+        .iter()
+        .map(|file| QueuedDownload {
             model_id: args.model_id.clone(),
             revision: revision.clone(),
             filename: file.filename.clone(),
@@ -192,8 +170,24 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
             expected_sha256: file.sha256.clone(),
             hf_token: token.clone(),
             total_size: file.size_bytes,
-        });
+        })
+        .collect();
+    // Shared enqueue transaction, CLI flavor: register_pending's
+    // validate-first DISK upsert (the first invalid filename aborts with
+    // nothing queued or sent), queue accounted before the sends, HUD
+    // summaries pushed up front, no failed-send rollback. Reordering
+    // note: register_pending used to run before bootstrap; moving it
+    // inside enqueue (after bootstrap) is output-identical — bootstrap
+    // emits nothing, and the CLI never reads the (now unseeded-with-
+    // pending) registry mirror: disk is the source of truth.
+    let outcome = state
+        .enqueue(&download_tx, &queued, &EnqueuePolicy::cli_download(&base))
+        .await;
+    if let Some(err) = outcome.aborted {
+        reporter.emit(&Event::error(ErrorCode::InvalidPath, err.to_string()));
+        return EXIT_FAILURE;
     }
+
     // Dropping the sender closes the channel — the manager drains, then its
     // join handle resolves. This is the deterministic completion signal.
     drop(download_tx);

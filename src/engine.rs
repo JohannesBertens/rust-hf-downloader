@@ -424,9 +424,6 @@ pub struct EnqueuePolicy {
     pub failed_send_rollback: bool,
 }
 
-// The two CLI constructors still have no production call site (migrated in
-// the immediately following W2.1 step-3 commit); the allow dies with it.
-#[allow(dead_code)]
 impl EnqueuePolicy {
     /// TUI `confirm_download` (GGUF quant group): mirror registry with
     /// zero-size entries, queue accounted before the sends, HUD mirror per
@@ -508,9 +505,6 @@ pub struct EnqueueOutcome {
     pub invalid: Vec<(String, crate::paths::sanitize::PathError)>,
     /// Set only by [`RegistryMode::Disk`]'s validate-first abort: nothing
     /// was queued or sent; the caller reports the error and bails.
-    // Read only by the CLI flavor + tests until the W2.1 step-3 commit
-    // migrates download_cmd; the allow dies with it.
-    #[allow(dead_code)]
     pub aborted: Option<crate::paths::sanitize::PathError>,
 }
 

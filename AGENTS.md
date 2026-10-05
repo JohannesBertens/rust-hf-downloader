@@ -27,7 +27,7 @@ src/
 │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline (selection, sync lock, publish)
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
 │   └── tests.rs      # cli::tests — insta snapshots in src/cli/snapshots/
-├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, drain signals
+├── engine.rs         # Shared download engine: EngineState, manager + verification bootstrap, the enqueue transaction (EnqueuePolicy), drain signals
 ├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
 ├── hf_cache.rs       # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock
@@ -74,7 +74,16 @@ registry entries immediately before it). The TUI's `App::new` is sync, so it
 composes the same pieces: `EngineState::new()` at construction,
 `engine::seed_registry_mirror` in the startup scan, the two spawns in
 `App::run` — there is exactly ONE manager bootstrap (the v1 headless CLI was
-removed in v2.0.0 because its duplicated copy drifted). The CLI signals
+removed in v2.0.0 because its duplicated copy drifted). Every queue handoff
+— all four TUI download flows and both CLI frontends — goes through
+`EngineState::enqueue(files, policy)`: the single home of the enqueue
+transaction (registry bookkeeping per policy → `download_queue.add` →
+`download_queue_items` mirror → `download_tx` sends → failed-send
+rollback). The per-frontend divergences are explicit `EnqueuePolicy`
+knobs (TUI mirror-registry upsert vs CLI `register_pending` disk upsert
+vs hf-cache's named no-register staging-sweep policy; queue-accounting
+timing; HUD-mirror population; rollback); user-facing status/error
+strings stay at the call sites (`EnqueueOutcome`). The CLI signals
 completion by dropping `download_tx` (manager join resolves) and then
 waiting for `EngineState::verification_idle()`; per-file results stream over
 the `outcome_tx`/`verify_tx` channels. `HF_ENDPOINT` overrides all HuggingFace

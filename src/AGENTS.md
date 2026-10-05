@@ -102,6 +102,7 @@ Key modules
 
 11) engine.rs — the single shared download pipeline bootstrap (v2.9.x)
 - EngineState bundle + bootstrap() (state → registry-mirror seed → verification worker → manager) + seed_registry_mirror()
+- EngineState::enqueue(files, policy) (W2.1): the one enqueue transaction (registry bookkeeping per policy → queue.add → HUD mirror → sends → failed-send rollback); every divergence between the six legacy inline sites is an EnqueuePolicy knob — RegistryMode {None (resume/hf-cache staging-sweep) | Mirror (TUI confirms) | Disk (CLI register_pending)}, queue timing, HUD-mirror shape, rollback; outcome {sent, invalid[], aborted} feeds the call sites' own status/error strings
 - CLI: engine::bootstrap in run_download + hf-cache sync (after purging staging registry entries); TUI: composes the same pieces (EngineState::new in App::new, seed_registry_mirror in the startup scan, both spawns in App::run) — never duplicate this logic
 
 12) paths.rs — cross-platform path resolution (v2.6.0) + path-security policy (paths::sanitize)
