@@ -321,10 +321,75 @@ pub fn write_cachedir_tag(cache_root: &Path) -> std::io::Result<()> {
 /// ([`sanitize_path_component`], including Windows reserved-name and
 /// illegal-character rejection) and the containment-checked
 /// [`validate_and_sanitize_path`] driver built on it. Every download path
-/// is constructed through this module; its `Err` strings are user-visible
-/// (status messages, CLI errors) and must stay byte-identical.
+/// is constructed through this module; its [`sanitize::PathError`]
+/// messages are user-visible (status messages, CLI error events) and must
+/// stay byte-identical — the `Display` strings are pinned by golden
+/// tests.
 pub mod sanitize {
+    use std::fmt;
     use std::path::PathBuf;
+
+    /// Typed validation error for [`validate_and_sanitize_path`]. The
+    /// `Display` strings are the exact historical `String` messages
+    /// (user-visible in TUI status/error lines and CLI `InvalidPath`
+    /// events) — pinned verbatim by the golden tests below; changing a
+    /// variant's wording is an observable-behavior change.
+    #[derive(Debug)]
+    pub enum PathError {
+        /// The current working directory could not be resolved for a
+        /// relative base path.
+        CurrentDirectory(std::io::Error),
+        /// The (existing) base path could not be canonicalized.
+        InvalidBase(std::io::Error),
+        /// Model ID is not exactly `author/model-name`.
+        InvalidModelId(String),
+        /// The author component of the model ID failed sanitization.
+        InvalidAuthor(String),
+        /// The model-name component of the model ID failed sanitization.
+        InvalidModelName(String),
+        /// A `/`-separated component of the filename failed sanitization.
+        InvalidFilenameComponent(String),
+        /// The sanitized final path resolves outside the base directory.
+        TraversalFinalEscape,
+        /// The first existing ancestor of the final path resolves outside
+        /// the base directory (and is not an ancestor of it).
+        TraversalParentEscape,
+    }
+
+    impl fmt::Display for PathError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                PathError::CurrentDirectory(e) => {
+                    write!(f, "Cannot determine current directory: {}", e)
+                }
+                PathError::InvalidBase(e) => write!(f, "Invalid base path: {}", e),
+                PathError::InvalidModelId(id) => write!(f, "Invalid model ID format: {}", id),
+                PathError::InvalidAuthor(author) => {
+                    write!(f, "Invalid author in model ID: {}", author)
+                }
+                PathError::InvalidModelName(name) => {
+                    write!(f, "Invalid model name in model ID: {}", name)
+                }
+                PathError::InvalidFilenameComponent(part) => {
+                    write!(f, "Invalid filename component: {}", part)
+                }
+                PathError::TraversalFinalEscape => {
+                    write!(
+                        f,
+                        "Path traversal detected: final path escapes base directory"
+                    )
+                }
+                PathError::TraversalParentEscape => {
+                    write!(
+                        f,
+                        "Path traversal detected: parent path escapes base directory"
+                    )
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for PathError {}
 
     pub fn sanitize_path_component(component: &str) -> Option<String> {
         // Reject path components that contain path traversal or are invalid
@@ -399,13 +464,13 @@ pub mod sanitize {
         base_path: &str,
         model_id: &str,
         filename: &str,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, PathError> {
         // Validate base path (relative paths resolve against the current dir,
         // preserving the previous behavior)
         let mut base = PathBuf::from(base_path);
         if !base.is_absolute() {
             base = std::env::current_dir()
-                .map_err(|e| format!("Cannot determine current directory: {}", e))?
+                .map_err(PathError::CurrentDirectory)?
                 .join(&base);
         }
 
@@ -413,8 +478,7 @@ pub mod sanitize {
         // existing ancestor so the containment checks below stay correct (and
         // symlink-consistent) for a not-yet-created base directory.
         let canonical_base = if base.exists() {
-            base.canonicalize()
-                .map_err(|e| format!("Invalid base path: {}", e))?
+            base.canonicalize().map_err(PathError::InvalidBase)?
         } else {
             match nearest_existing_ancestor(&base) {
                 Some(ancestor) => ancestor,
@@ -425,13 +489,13 @@ pub mod sanitize {
         // Validate and sanitize model_id (format: "author/model-name")
         let model_parts: Vec<&str> = model_id.split('/').collect();
         if model_parts.len() != 2 {
-            return Err(format!("Invalid model ID format: {}", model_id));
+            return Err(PathError::InvalidModelId(model_id.to_string()));
         }
 
         let author = sanitize_path_component(model_parts[0])
-            .ok_or_else(|| format!("Invalid author in model ID: {}", model_parts[0]))?;
+            .ok_or_else(|| PathError::InvalidAuthor(model_parts[0].to_string()))?;
         let model_name = sanitize_path_component(model_parts[1])
-            .ok_or_else(|| format!("Invalid model name in model ID: {}", model_parts[1]))?;
+            .ok_or_else(|| PathError::InvalidModelName(model_parts[1].to_string()))?;
 
         // Validate and sanitize filename - may contain subdirectory (e.g., "Q4_K_M/file.gguf")
         let filename_parts: Vec<&str> = filename.split('/').collect();
@@ -439,7 +503,7 @@ pub mod sanitize {
 
         for part in filename_parts {
             let sanitized = sanitize_path_component(part)
-                .ok_or_else(|| format!("Invalid filename component: {}", part))?;
+                .ok_or_else(|| PathError::InvalidFilenameComponent(part.to_string()))?;
             sanitized_filename_parts.push(sanitized);
         }
 
@@ -454,9 +518,7 @@ pub mod sanitize {
         // Final safety check: ensure the resulting path is still under the base directory
         if let Ok(canonical_final) = final_path.canonicalize() {
             if !canonical_final.starts_with(&canonical_base) {
-                return Err(
-                    "Path traversal detected: final path escapes base directory".to_string()
-                );
+                return Err(PathError::TraversalFinalEscape);
             }
         } else {
             // File doesn't exist yet, check parent directories. The first
@@ -471,10 +533,7 @@ pub mod sanitize {
                         if !canonical_parent.starts_with(&canonical_base)
                             && !canonical_base.starts_with(&canonical_parent)
                         {
-                            return Err(
-                                "Path traversal detected: parent path escapes base directory"
-                                    .to_string(),
-                            );
+                            return Err(PathError::TraversalParentEscape);
                         }
                     }
                     break;
@@ -591,6 +650,76 @@ pub mod sanitize {
             // bad model ids
             assert!(validate_and_sanitize_path(&base, "nodash", "x.gguf").is_err());
             assert!(validate_and_sanitize_path(&base, "a/b/c", "x.gguf").is_err());
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn path_error_display_strings_are_pinned_verbatim() {
+            // Golden tests: one assert per variant. These strings are
+            // user-visible (TUI error lines, CLI InvalidPath events) and
+            // must stay byte-identical to the pre-typed-error messages.
+            let io = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+            assert_eq!(
+                PathError::CurrentDirectory(io()).to_string(),
+                "Cannot determine current directory: no such file"
+            );
+            assert_eq!(
+                PathError::InvalidBase(io()).to_string(),
+                "Invalid base path: no such file"
+            );
+            assert_eq!(
+                PathError::InvalidModelId("a/b/c".to_string()).to_string(),
+                "Invalid model ID format: a/b/c"
+            );
+            assert_eq!(
+                PathError::InvalidAuthor("bad author".to_string()).to_string(),
+                "Invalid author in model ID: bad author"
+            );
+            assert_eq!(
+                PathError::InvalidModelName("..".to_string()).to_string(),
+                "Invalid model name in model ID: .."
+            );
+            assert_eq!(
+                PathError::InvalidFilenameComponent("a/b".to_string()).to_string(),
+                "Invalid filename component: a/b"
+            );
+            assert_eq!(
+                PathError::TraversalFinalEscape.to_string(),
+                "Path traversal detected: final path escapes base directory"
+            );
+            assert_eq!(
+                PathError::TraversalParentEscape.to_string(),
+                "Path traversal detected: parent path escapes base directory"
+            );
+        }
+
+        #[test]
+        fn validate_returns_the_typed_variant_for_each_failure() {
+            let home =
+                std::env::temp_dir().join(format!("validate-test-vars-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            let base = home.to_str().unwrap().to_string();
+
+            // traversal in a filename component -> InvalidFilenameComponent
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "a/b", "../escape.gguf"),
+                Err(PathError::InvalidFilenameComponent(part)) if part == ".."
+            ));
+            // model id without exactly one slash -> InvalidModelId
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "nodash", "x.gguf"),
+                Err(PathError::InvalidModelId(id)) if id == "nodash"
+            ));
+            // reserved device name as author -> InvalidAuthor
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "CON/model", "x.gguf"),
+                Err(PathError::InvalidAuthor(a)) if a == "CON"
+            ));
+            // reserved device name as model name -> InvalidModelName
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "a/aux", "x.gguf"),
+                Err(PathError::InvalidModelName(n)) if n == "aux"
+            ));
             let _ = std::fs::remove_dir_all(&home);
         }
     }

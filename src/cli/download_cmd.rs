@@ -157,10 +157,8 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         .iter()
         .map(|f| (f.filename.clone(), f.size_bytes, f.sha256.clone()))
         .collect();
-    if let Err(message) =
-        crate::engine::register_pending(&args.model_id, &revision, &pending, &base)
-    {
-        reporter.emit(&Event::error(ErrorCode::InvalidPath, message));
+    if let Err(err) = crate::engine::register_pending(&args.model_id, &revision, &pending, &base) {
+        reporter.emit(&Event::error(ErrorCode::InvalidPath, err.to_string()));
         return EXIT_FAILURE;
     }
 

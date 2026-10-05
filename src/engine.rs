@@ -222,12 +222,15 @@ pub fn spawn_verification_worker(state: EngineState) -> JoinHandle<()> {
 /// queued, so downloads started headlessly show up in the TUI's
 /// resume/complete views. Validates each filename (path-traversal safety,
 /// same rules as the TUI) and returns the first validation error, if any.
+/// The error type is the shared [`crate::paths::sanitize::PathError`]:
+/// path validation is register_pending's only failure source today, and
+/// its `Display` reproduces the historical message strings byte-for-byte.
 pub fn register_pending(
     model_id: &str,
     revision: &str,
     files: &[(String, u64, Option<String>)],
     base_path: &str,
-) -> Result<(), String> {
+) -> Result<(), crate::paths::sanitize::PathError> {
     let mut registry = crate::registry::load_registry();
 
     for (filename, size, sha256) in files {
