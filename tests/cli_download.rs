@@ -584,6 +584,16 @@ async fn human_mode_summary_on_stdout() {
         stdout
     );
     assert!(stdout.contains("Destination:"), "stdout: {:?}", stdout);
+    // Piped (non-tty) auto mode must stay silent on stderr: no \r
+    // rewrites, no progress lines.
+    assert!(
+        !stderr.contains('\r'),
+        "piped auto rewrote stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("MB/s"),
+        "piped auto printed progress: {stderr}"
+    );
     assert_file_content(&env.models_dir().join("a/b/only.gguf"), &content);
 }
 
@@ -1510,4 +1520,43 @@ async fn help_renders_progress_default_exactly_once() {
             "[default: auto] must render exactly once in {args:?} help:\n{stdout}"
         );
     }
+}
+
+#[tokio::test]
+async fn download_progress_plain_single_file_has_no_aggregate() {
+    let one = fixture_bytes(50_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![FileEntry {
+            path: "one.gguf".to_string(),
+            advertised_sha256: Some(sha256_hex(&one)),
+            content: one.clone(),
+        }],
+        gated: false,
+        resolve_404: false,
+        sleep_once: None,
+        // Keeps the file in flight across the monitor's 400 ms poll tick so
+        // a progress event exists to render.
+        per_request_delay: Duration::from_millis(250),
+        search_results: Vec::new(),
+        branches: Vec::new(),
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let (code, stdout, stderr) = env.run(&["download", "a/b", "--progress", "plain"]).await;
+    assert_exit_code(code, 0, &stdout, &stderr);
+
+    // Single-file runs print the file line (bar/speed), never the
+    // multi-file aggregate (" N files ").
+    assert!(stderr.contains("MB/s"), "progress line missing: {stderr}");
+    assert!(
+        !stderr.contains(" files "),
+        "single-file run printed an aggregate line: {stderr}"
+    );
+    assert!(
+        !stderr.contains('\r'),
+        "plain mode must not use \\r rewrites"
+    );
+    assert_file_content(&env.models_dir().join("a/b/one.gguf"), &one);
 }

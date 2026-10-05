@@ -21,8 +21,7 @@
 //! (R4). Re-running a sync is idempotent (R6): blobs already present with
 //! matching sizes are skipped; `--force` refetches them.
 //!
-//! The `cli.rs` subcommand wiring lands in M3; until then this module is
-//! exercised by its unit tests.
+//! Driven by `cli::hf_cache_cmd`; unit tests exercise the pipeline directly.
 
 use crate::models::RepoFile;
 use sha1::{Digest, Sha1};

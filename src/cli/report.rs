@@ -39,10 +39,23 @@ pub struct Reporter {
     progress_line_active: bool,
     last_json_progress: Option<Instant>,
     last_plain_progress: Option<Instant>,
+    /// Sink for every human-mode stderr write. Production uses the real
+    /// stderr; tests inject a capture buffer.
+    stderr: Box<dyn Write>,
 }
 
 impl Reporter {
     pub fn new(json: bool, quiet: bool, progress: ProgressMode) -> Self {
+        Self::new_with_stderr(json, quiet, progress, Box::new(std::io::stderr()))
+    }
+
+    /// Test constructor with an injected stderr sink (see `stderr`).
+    pub(super) fn new_with_stderr(
+        json: bool,
+        quiet: bool,
+        progress: ProgressMode,
+        stderr: Box<dyn Write>,
+    ) -> Self {
         let human_progress = !json && !quiet && progress != ProgressMode::None;
         Self {
             json,
@@ -54,6 +67,7 @@ impl Reporter {
             progress_line_active: false,
             last_json_progress: None,
             last_plain_progress: None,
+            stderr,
         }
     }
 
@@ -103,16 +117,14 @@ impl Reporter {
     /// lines). Only ever called when the progress line went to a tty.
     fn clear_progress_line(&mut self) {
         if self.progress_line_active {
-            let mut stderr = std::io::stderr().lock();
-            let _ = write!(stderr, "\r\x1b[2K");
+            let _ = write!(self.stderr, "\r\x1b[2K");
             self.progress_line_active = false;
         }
     }
 
     fn line_stderr(&mut self, text: &str) {
         self.clear_progress_line();
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "{}", text);
+        let _ = writeln!(self.stderr, "{}", text);
     }
 
     fn line_stdout(&mut self, text: &str) {
@@ -173,11 +185,10 @@ impl Reporter {
                             self.line_stderr(&content);
                         }
                     } else {
-                        let mut stderr = std::io::stderr().lock();
                         // \x1b[K erases to end of line so shrinking fields
                         // (unit crossings, a vanishing eta) leave no
                         // residue.
-                        let _ = write!(stderr, "\r{content}\x1b[K");
+                        let _ = write!(self.stderr, "\r{content}\x1b[K");
                         self.progress_line_active = true;
                     }
                 }

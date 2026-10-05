@@ -92,8 +92,9 @@ Key modules
 9) utils.rs
 - format_number, format_size helpers for UI
 
-10) cli.rs — one-shot CLI surface (v2.3.0+)
-- `download` + `search` subcommands (clap derive); reuses engine::spawn_manager
+10) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
+- `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::spawn_manager
+- Split by section: mod (Cli/Command/run), args, resolve, events, report, download_cmd, search_cmd, hf_cache_cmd, update_cmd, tests
 - Human reporter or JSON Lines (`--json`); documented exit-code table
 - `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
 

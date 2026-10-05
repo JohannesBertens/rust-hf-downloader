@@ -56,7 +56,7 @@ use hf_cache_cmd::{
 #[cfg(test)]
 use report::{
     format_eta, format_file_progress, format_overall_progress, render_bar, truncate_path,
-    verification_heartbeat_line, ProgressMode,
+    verification_heartbeat_line, ProgressMode, Reporter,
 };
 #[cfg(test)]
 use resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};

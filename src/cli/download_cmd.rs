@@ -387,7 +387,7 @@ pub(super) async fn monitor(
 /// Non-blocking snapshot of engine state: drain channels, detect new
 /// downloads/verifications, emit events.
 #[allow(clippy::too_many_arguments)]
-async fn poll_once(
+pub(super) async fn poll_once(
     state: &EngineState,
     count: usize,
     index_of: &HashMap<&str, usize>,

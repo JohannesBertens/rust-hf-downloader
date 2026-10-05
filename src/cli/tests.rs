@@ -1247,3 +1247,104 @@ fn snapshot_event_sync_complete() {
         "event-sync-complete",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Plain-mode stderr seam (Reporter::new_with_stderr)
+// ---------------------------------------------------------------------------
+
+/// Shareable in-memory stderr sink for `Reporter::new_with_stderr`.
+#[derive(Clone, Default)]
+struct SharedStderr(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl SharedStderr {
+    /// Drain and return everything written so far.
+    fn take(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().drain(..).collect()).unwrap()
+    }
+}
+
+impl std::io::Write for SharedStderr {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn plain_verification_heartbeat_emits_once_per_interval() {
+    let sink = SharedStderr::default();
+    let mut reporter =
+        Reporter::new_with_stderr(false, false, ProgressMode::Plain, Box::new(sink.clone()));
+    reporter.plain_verification(2, 41);
+    assert_eq!(sink.take(), "verifying: 2 in flight, 41 verified\n");
+
+    // The ~10 s plain window is shared: an immediate second heartbeat is
+    // swallowed.
+    reporter.plain_verification(3, 42);
+    assert_eq!(sink.take(), "");
+}
+
+#[tokio::test]
+async fn plain_heartbeat_skips_when_progress_snapshot_missed() {
+    use super::download_cmd::{poll_once, RunTally};
+
+    let (state, _tx) = crate::engine::EngineState::new();
+    state
+        .verification_queue_size
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .verification_progress
+        .lock()
+        .await
+        .push(crate::models::VerificationProgress {
+            filename: "a.gguf".to_string(),
+            verified_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total_bytes: 10,
+            speed_mbps: 0.0,
+        });
+
+    let sink = SharedStderr::default();
+    let mut reporter =
+        Reporter::new_with_stderr(false, false, ProgressMode::Plain, Box::new(sink.clone()));
+    let mut seen_download = None;
+    let mut seen_verifying = std::collections::HashSet::new();
+    let mut tally = RunTally::default();
+    let index_of = std::collections::HashMap::new();
+
+    // Hold the lock across the poll: the try_lock snapshot misses, so the
+    // heartbeat must be skipped rather than print "0 in flight" (a lock
+    // artifact, not a fact).
+    let guard = state.verification_progress.lock().await;
+    poll_once(
+        &state,
+        1,
+        &index_of,
+        &mut seen_download,
+        &mut seen_verifying,
+        &mut tally,
+        &mut reporter,
+    )
+    .await;
+    drop(guard);
+    assert_eq!(sink.take(), "", "heartbeat printed a lock artifact");
+
+    // With the snapshot available again, the same poll emits the heartbeat.
+    poll_once(
+        &state,
+        1,
+        &index_of,
+        &mut seen_download,
+        &mut seen_verifying,
+        &mut tally,
+        &mut reporter,
+    )
+    .await;
+    let out = sink.take();
+    assert!(
+        out.contains("verifying: 1 in flight, 0 verified"),
+        "got: {out:?}"
+    );
+}
