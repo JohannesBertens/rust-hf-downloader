@@ -2,6 +2,7 @@ use super::state::App;
 use crate::models::*;
 use crate::ui::tree::toggle_node_expansion;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::widgets::ListState;
 use tui_input::backend::crossterm::EventHandler;
 
 impl App {
@@ -576,44 +577,14 @@ impl App {
 
     /// Navigate to next quantization in list
     pub fn next_quant(&mut self) {
-        let quants_len = self.quantizations.read().len();
-
-        if quants_len == 0 {
-            return;
-        }
-
-        let i = match self.quant_list_state.selected() {
-            Some(i) => {
-                if i >= quants_len - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.quant_list_state.select(Some(i));
+        let len = self.quantizations.read().len();
+        advance(&mut self.quant_list_state, len, true);
     }
 
     /// Navigate to previous quantization in list
     pub fn previous_quant(&mut self) {
-        let quants_len = self.quantizations.read().len();
-
-        if quants_len == 0 {
-            return;
-        }
-
-        let i = match self.quant_list_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    quants_len - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.quant_list_state.select(Some(i));
+        let len = self.quantizations.read().len();
+        advance(&mut self.quant_list_state, len, false);
     }
 
     /// Navigate to next file in quantization files list
@@ -622,23 +593,11 @@ impl App {
             let quantizations = self.quantizations.read().clone();
 
             if selected_group < quantizations.len() {
-                let files_len = quantizations[selected_group].files.len();
-
-                if files_len == 0 {
-                    return;
-                }
-
-                let i = match self.quant_file_list_state.selected() {
-                    Some(i) => {
-                        if i >= files_len - 1 {
-                            0
-                        } else {
-                            i + 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.quant_file_list_state.select(Some(i));
+                advance(
+                    &mut self.quant_file_list_state,
+                    quantizations[selected_group].files.len(),
+                    true,
+                );
             }
         }
     }
@@ -649,23 +608,11 @@ impl App {
             let quantizations = self.quantizations.read().clone();
 
             if selected_group < quantizations.len() {
-                let files_len = quantizations[selected_group].files.len();
-
-                if files_len == 0 {
-                    return;
-                }
-
-                let i = match self.quant_file_list_state.selected() {
-                    Some(i) => {
-                        if i == 0 {
-                            files_len - 1
-                        } else {
-                            i - 1
-                        }
-                    }
-                    None => 0,
-                };
-                self.quant_file_list_state.select(Some(i));
+                advance(
+                    &mut self.quant_file_list_state,
+                    quantizations[selected_group].files.len(),
+                    false,
+                );
             }
         }
     }
@@ -824,24 +771,8 @@ impl App {
         let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
-            let flat = crate::ui::tree::flatten_tree_for_navigation(&tree);
-            let items_len = flat.len();
-
-            if items_len == 0 {
-                return;
-            }
-
-            let i = match self.file_tree_state.selected() {
-                Some(i) => {
-                    if i >= items_len - 1 {
-                        0
-                    } else {
-                        i + 1
-                    }
-                }
-                None => 0,
-            };
-            self.file_tree_state.select(Some(i));
+            let len = crate::ui::tree::flatten_tree_for_navigation(&tree).len();
+            advance(&mut self.file_tree_state, len, true);
         }
     }
 
@@ -850,24 +781,8 @@ impl App {
         let tree = self.file_tree.read().clone();
 
         if let Some(tree) = tree {
-            let flat = crate::ui::tree::flatten_tree_for_navigation(&tree);
-            let items_len = flat.len();
-
-            if items_len == 0 {
-                return;
-            }
-
-            let i = match self.file_tree_state.selected() {
-                Some(i) => {
-                    if i == 0 {
-                        items_len - 1
-                    } else {
-                        i - 1
-                    }
-                }
-                None => 0,
-            };
-            self.file_tree_state.select(Some(i));
+            let len = crate::ui::tree::flatten_tree_for_navigation(&tree).len();
+            advance(&mut self.file_tree_state, len, false);
         }
     }
 
@@ -891,6 +806,274 @@ impl App {
 
                 // Update the tree
                 *self.file_tree.write() = Some(tree.clone());
+            }
+        }
+    }
+}
+
+/// Wrap-around cursor move shared by the quantization-group,
+/// quantization-file and file-tree lists (W4.6 — six per-fn copies of
+/// this match collapsed into one). Contract pinned by the table tests in
+/// `mod tests` below: `len == 0` is a no-op; an unselected list selects
+/// index 0 in BOTH directions; forward wraps last→first (and any
+/// out-of-bounds selection → 0); backward wraps first→last (an
+/// out-of-bounds selection stays `i - 1`, out of bounds — historical
+/// behavior). The Models list keeps its own `next`/`previous` methods
+/// (their call sites also clear model details and trigger a quant
+/// reload).
+fn advance(state: &mut ListState, len: usize, forward: bool) {
+    if len == 0 {
+        return;
+    }
+
+    let i = match state.selected() {
+        Some(i) => {
+            if forward {
+                if i >= len - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            } else if i == 0 {
+                len - 1
+            } else {
+                i - 1
+            }
+        }
+        None => 0,
+    };
+    state.select(Some(i));
+}
+
+#[cfg(test)]
+mod tests {
+    //! W4.6 navigation table tests: len 0/1/3 × selection None/first/last ×
+    //! direction, written FIRST against the old wrap-around fn bodies and
+    //! required to pass unchanged after the `advance()` replacement. They
+    //! pin: len 0 is a no-op; a single item wraps onto itself; an unselected
+    //! list selects index 0 in BOTH directions (backward included — not
+    //! `len - 1`); first/last wrap at both ends; and an out-of-bounds
+    //! selection forward-wraps to 0 while backward keeps it out of bounds
+    //! (`Some(i) - 1`), matching the historical match arms exactly.
+    use super::*;
+    use crate::models::{FileTreeNode, QuantizationGroup, QuantizationInfo};
+
+    fn app_with_quants(n: usize) -> App {
+        let app = App::new();
+        *app.quantizations.write() = (0..n)
+            .map(|i| QuantizationGroup {
+                quant_type: format!("Q{}", i),
+                files: Vec::new(),
+                total_size: 0,
+            })
+            .collect();
+        app
+    }
+
+    fn app_with_files(n: usize) -> App {
+        let mut app = App::new();
+        *app.quantizations.write() = vec![QuantizationGroup {
+            quant_type: "Q".to_string(),
+            files: (0..n)
+                .map(|i| QuantizationInfo {
+                    quant_type: "Q".to_string(),
+                    filename: format!("f{}.gguf", i),
+                    size: 0,
+                    sha256: None,
+                })
+                .collect(),
+            total_size: 0,
+        }];
+        app.quant_list_state.select(Some(0));
+        app
+    }
+
+    fn app_with_tree(n: usize) -> App {
+        let app = App::new();
+        *app.file_tree.write() = Some(FileTreeNode {
+            name: "root".to_string(),
+            path: "root".to_string(),
+            is_dir: true,
+            size: None,
+            children: (0..n)
+                .map(|i| FileTreeNode {
+                    name: format!("f{}", i),
+                    path: format!("root/f{}", i),
+                    is_dir: false,
+                    size: None,
+                    children: Vec::new(),
+                    expanded: false,
+                    depth: 1,
+                })
+                .collect(),
+            expanded: true,
+            depth: 0,
+        });
+        app
+    }
+
+    /// Drive the quantization-group cursor through the OLD public fns.
+    fn quant_nav(len: usize, initial: Option<usize>, forward: bool) -> Option<usize> {
+        let mut app = app_with_quants(len);
+        app.quant_list_state.select(initial);
+        if forward {
+            app.next_quant();
+        } else {
+            app.previous_quant();
+        }
+        app.quant_list_state.selected()
+    }
+
+    /// Drive the quantization-file cursor (one group with `len` files).
+    fn file_nav(len: usize, initial: Option<usize>, forward: bool) -> Option<usize> {
+        let mut app = app_with_files(len);
+        app.quant_file_list_state.select(initial);
+        if forward {
+            app.next_file();
+        } else {
+            app.previous_file();
+        }
+        app.quant_file_list_state.selected()
+    }
+
+    /// Drive the file-tree cursor (root with `len` flattened children).
+    fn tree_nav(len: usize, initial: Option<usize>, forward: bool) -> Option<usize> {
+        let mut app = app_with_tree(len);
+        app.file_tree_state.select(initial);
+        if forward {
+            app.next_file_tree_item();
+        } else {
+            app.previous_file_tree_item();
+        }
+        app.file_tree_state.selected()
+    }
+
+    #[test]
+    fn next_quant_table() {
+        assert_eq!(quant_nav(0, None, true), None, "len 0: no-op");
+        assert_eq!(
+            quant_nav(0, Some(0), true),
+            Some(0),
+            "len 0: selection kept"
+        );
+        assert_eq!(quant_nav(1, None, true), Some(0), "None selects 0");
+        assert_eq!(
+            quant_nav(1, Some(0), true),
+            Some(0),
+            "single item wraps onto itself"
+        );
+        assert_eq!(quant_nav(3, None, true), Some(0));
+        assert_eq!(quant_nav(3, Some(0), true), Some(1), "first → 1");
+        assert_eq!(quant_nav(3, Some(1), true), Some(2), "middle → last");
+        assert_eq!(quant_nav(3, Some(2), true), Some(0), "last wraps to first");
+        assert_eq!(
+            quant_nav(3, Some(5), true),
+            Some(0),
+            "OOB forward wraps to 0"
+        );
+    }
+
+    #[test]
+    fn previous_quant_table() {
+        assert_eq!(quant_nav(0, None, false), None);
+        assert_eq!(quant_nav(0, Some(0), false), Some(0));
+        assert_eq!(
+            quant_nav(1, None, false),
+            Some(0),
+            "None selects 0 even backward"
+        );
+        assert_eq!(quant_nav(1, Some(0), false), Some(0));
+        assert_eq!(quant_nav(3, None, false), Some(0));
+        assert_eq!(quant_nav(3, Some(0), false), Some(2), "first wraps to last");
+        assert_eq!(quant_nav(3, Some(1), false), Some(0));
+        assert_eq!(quant_nav(3, Some(2), false), Some(1));
+        assert_eq!(
+            quant_nav(3, Some(5), false),
+            Some(4),
+            "OOB backward stays OOB (i-1)"
+        );
+    }
+
+    #[test]
+    fn next_file_table() {
+        assert_eq!(file_nav(0, None, true), None);
+        assert_eq!(file_nav(0, Some(0), true), Some(0));
+        assert_eq!(file_nav(1, None, true), Some(0));
+        assert_eq!(file_nav(1, Some(0), true), Some(0));
+        assert_eq!(file_nav(3, None, true), Some(0));
+        assert_eq!(file_nav(3, Some(0), true), Some(1));
+        assert_eq!(file_nav(3, Some(1), true), Some(2));
+        assert_eq!(file_nav(3, Some(2), true), Some(0));
+        assert_eq!(file_nav(3, Some(5), true), Some(0));
+    }
+
+    #[test]
+    fn previous_file_table() {
+        assert_eq!(file_nav(0, None, false), None);
+        assert_eq!(file_nav(0, Some(0), false), Some(0));
+        assert_eq!(file_nav(1, None, false), Some(0));
+        assert_eq!(file_nav(1, Some(0), false), Some(0));
+        assert_eq!(file_nav(3, None, false), Some(0));
+        assert_eq!(file_nav(3, Some(0), false), Some(2));
+        assert_eq!(file_nav(3, Some(1), false), Some(0));
+        assert_eq!(file_nav(3, Some(2), false), Some(1));
+        assert_eq!(file_nav(3, Some(5), false), Some(4));
+    }
+
+    #[test]
+    fn next_file_tree_table() {
+        assert_eq!(tree_nav(0, None, true), None);
+        assert_eq!(tree_nav(0, Some(0), true), Some(0));
+        assert_eq!(tree_nav(1, None, true), Some(0));
+        assert_eq!(tree_nav(1, Some(0), true), Some(0));
+        assert_eq!(tree_nav(3, None, true), Some(0));
+        assert_eq!(tree_nav(3, Some(0), true), Some(1));
+        assert_eq!(tree_nav(3, Some(1), true), Some(2));
+        assert_eq!(tree_nav(3, Some(2), true), Some(0));
+        assert_eq!(tree_nav(3, Some(5), true), Some(0));
+    }
+
+    #[test]
+    fn previous_file_tree_table() {
+        assert_eq!(tree_nav(0, None, false), None);
+        assert_eq!(tree_nav(0, Some(0), false), Some(0));
+        assert_eq!(tree_nav(1, None, false), Some(0));
+        assert_eq!(tree_nav(1, Some(0), false), Some(0));
+        assert_eq!(tree_nav(3, None, false), Some(0));
+        assert_eq!(tree_nav(3, Some(0), false), Some(2));
+        assert_eq!(tree_nav(3, Some(1), false), Some(0));
+        assert_eq!(tree_nav(3, Some(2), false), Some(1));
+        assert_eq!(tree_nav(3, Some(5), false), Some(4));
+    }
+
+    /// The three cursor families are table-identical — the property that
+    /// lets ONE advance() serve all of them.
+    #[test]
+    fn all_families_share_one_table() {
+        for len in [0usize, 1, 3] {
+            for initial in [None, Some(0), Some(len.saturating_sub(1)), Some(len + 2)] {
+                for forward in [true, false] {
+                    // Skip first/last variants that collapse onto other rows.
+                    if initial == Some(len + 2) && len == 0 {
+                        continue;
+                    }
+                    assert_eq!(
+                        quant_nav(len, initial, forward),
+                        file_nav(len, initial, forward),
+                        "quant vs file: len={} initial={:?} forward={}",
+                        len,
+                        initial,
+                        forward
+                    );
+                    assert_eq!(
+                        quant_nav(len, initial, forward),
+                        tree_nav(len, initial, forward),
+                        "quant vs tree: len={} initial={:?} forward={}",
+                        len,
+                        initial,
+                        forward
+                    );
+                }
             }
         }
     }

@@ -30,7 +30,7 @@ Files and roles
     - Tab toggles pane focus; Left/Right switches quant subfocus
     - Enter: show details or toggle depending on pane (incl. file tree expansion)
   • Popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError
-  • Navigation helpers for models, quantizations, files, file tree
+  • Navigation: models keep next/previous; the quantization-group, quantization-file and file-tree cursors share one free fn advance(state, len, forward) (W4.6) — wrap-around both ends, unselected lists pick index 0 in both directions, len 0 no-op; the len×selection×direction tables in mod tests pin the contract
   • Filter preset application and persistence (Ctrl+S saves as defaults)
   • Filter VALUE mutations only route through App.filters (ui/app/filters.rs); events.rs owns key dispatch, status wording, and write order
 
