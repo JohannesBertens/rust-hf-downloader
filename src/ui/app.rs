@@ -36,8 +36,8 @@ impl App {
         // keeps its download_tx alive for the whole session, so the manager
         // runs until the process exits (the join handle is dropped, i.e. the
         // task stays detached — same behavior as the previous inline spawn).
-        crate::engine::spawn_verification_worker(self.engine_state());
-        let _manager = crate::engine::spawn_manager(self.engine_state());
+        crate::engine::spawn_verification_worker(self.engine.clone());
+        let _manager = crate::engine::spawn_manager(self.engine.clone());
 
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
@@ -72,6 +72,7 @@ impl App {
         // For tokio Mutex, use try_lock() to avoid blocking/deadlock
         // Fall back to cached values if lock is held by another task
         let complete_downloads = self
+            .engine
             .complete_downloads
             .try_lock()
             .map(|guard| {
@@ -84,6 +85,7 @@ impl App {
         // Activity HUD data is fetched BEFORE render_ui so the reserved
         // strip height is known when the main layout is split.
         let download_progress = self
+            .engine
             .download_progress
             .try_lock()
             .map(|guard| {
@@ -93,6 +95,7 @@ impl App {
             .unwrap_or_else(|_| self.cached_download_progress.clone());
 
         let download_queue = self
+            .engine
             .download_queue
             .try_lock()
             .map(|guard| {
@@ -107,6 +110,7 @@ impl App {
             });
 
         let download_queue_items = self
+            .engine
             .download_queue_items
             .try_lock()
             .map(|guard| {
@@ -116,6 +120,7 @@ impl App {
             .unwrap_or_else(|_| self.cached_download_queue_items.clone());
 
         let verification_progress = self
+            .engine
             .verification_progress
             .try_lock()
             .map(|guard| {
@@ -124,9 +129,10 @@ impl App {
             })
             .unwrap_or_else(|_| self.cached_verification_progress.clone());
 
-        let verification_queue_size = self.verification_queue_size.load(Ordering::Relaxed);
+        let verification_queue_size = self.engine.verification_queue_size.load(Ordering::Relaxed);
 
         let verification_queue_bytes = self
+            .engine
             .verification_queue
             .try_lock()
             .map(|guard| {
@@ -136,8 +142,12 @@ impl App {
             })
             .unwrap_or(self.cached_verification_queue_bytes);
 
-        let verified_ok = self.verification_results.ok.load(Ordering::Relaxed);
-        let verified_fail = self.verification_results.failed.load(Ordering::Relaxed);
+        let verified_ok = self.engine.verification_results.ok.load(Ordering::Relaxed);
+        let verified_fail = self
+            .engine
+            .verification_results
+            .failed
+            .load(Ordering::Relaxed);
 
         let hud_params = crate::ui::render::ActivityHudData {
             download_progress: &download_progress,
@@ -475,7 +485,7 @@ impl App {
         use crossterm::event::{MouseButton, MouseEventKind};
 
         // Check for status messages from download tasks (non-blocking)
-        if let Ok(mut rx) = self.status_rx.try_lock() {
+        if let Ok(mut rx) = self.engine.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
                 if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
                     let model_url = format!("https://huggingface.co/{}", model_id);

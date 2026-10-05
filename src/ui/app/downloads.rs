@@ -16,7 +16,7 @@ impl App {
 
         // Update the app's registry
         {
-            let mut reg = self.download_registry.lock().await;
+            let mut reg = self.engine.download_registry.lock().await;
             *reg = registry.clone();
         }
 
@@ -27,7 +27,7 @@ impl App {
         let complete_map = registry::get_complete_downloads(&registry);
 
         {
-            let mut complete = self.complete_downloads.lock().await;
+            let mut complete = self.engine.complete_downloads.lock().await;
             *complete = complete_map;
         }
 
@@ -225,7 +225,7 @@ impl App {
 
                 // Load registry and add metadata entries for all files
                 let mut registry = {
-                    let reg = self.download_registry.lock().await;
+                    let reg = self.engine.download_registry.lock().await;
                     reg.clone()
                 };
 
@@ -274,7 +274,7 @@ impl App {
                 // Save registry with all new entries
                 registry::save_registry(&registry);
                 {
-                    let mut reg = self.download_registry.lock().await;
+                    let mut reg = self.engine.download_registry.lock().await;
                     *reg = registry;
                 }
 
@@ -283,7 +283,7 @@ impl App {
 
                 // Increment queue size and bytes by number of files
                 {
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.engine.download_queue.lock().await;
                     queue.add(num_files, total_queued_bytes);
                 }
 
@@ -321,7 +321,7 @@ impl App {
                     {
                         success_count += 1;
                         // Mirror the queued file for HUD display
-                        let mut items = self.download_queue_items.lock().await;
+                        let mut items = self.engine.download_queue_items.lock().await;
                         items.push(crate::models::QueueItemSummary {
                             filename: filename.clone(),
                             total_size: file_size,
@@ -357,7 +357,7 @@ impl App {
                         .map(|f| f.size)
                         .sum();
 
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.engine.download_queue.lock().await;
                     queue.remove(failed_count, failed_bytes);
                 }
             }
@@ -404,7 +404,7 @@ impl App {
             });
             // Mirror the queued file for HUD display
             {
-                let mut items = self.download_queue_items.lock().await;
+                let mut items = self.engine.download_queue_items.lock().await;
                 items.push(crate::models::QueueItemSummary {
                     filename: metadata.filename.clone(),
                     total_size: metadata.total_size,
@@ -414,7 +414,7 @@ impl App {
 
         // Update queue size and bytes
         {
-            let mut queue = self.download_queue.lock().await;
+            let mut queue = self.engine.download_queue.lock().await;
             queue.add(count, total_bytes);
         }
 
@@ -429,7 +429,7 @@ impl App {
 
         // Load registry
         let mut registry = {
-            let reg = self.download_registry.lock().await;
+            let reg = self.engine.download_registry.lock().await;
             reg.clone()
         };
 
@@ -452,7 +452,7 @@ impl App {
         // Save updated registry
         registry::save_registry(&registry);
         {
-            let mut reg = self.download_registry.lock().await;
+            let mut reg = self.engine.download_registry.lock().await;
             *reg = registry;
         }
 
@@ -501,7 +501,7 @@ impl App {
 
                 // Load registry
                 let mut registry = {
-                    let reg = self.download_registry.lock().await;
+                    let reg = self.engine.download_registry.lock().await;
                     reg.clone()
                 };
 
@@ -546,7 +546,7 @@ impl App {
                 // Save registry with all new entries
                 registry::save_registry(&registry);
                 {
-                    let mut reg = self.download_registry.lock().await;
+                    let mut reg = self.engine.download_registry.lock().await;
                     *reg = registry;
                 }
 
@@ -555,7 +555,7 @@ impl App {
 
                 // Increment queue size and bytes
                 {
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.engine.download_queue.lock().await;
                     queue.add(num_files, total_queued_bytes);
                 }
 
@@ -592,7 +592,7 @@ impl App {
                     {
                         success_count += 1;
                         // Mirror the queued file for HUD display
-                        let mut items = self.download_queue_items.lock().await;
+                        let mut items = self.engine.download_queue_items.lock().await;
                         items.push(crate::models::QueueItemSummary {
                             filename: file.rfilename.clone(),
                             total_size: file_size,
@@ -620,7 +620,7 @@ impl App {
                         .filter_map(|f| f.size)
                         .sum();
 
-                    let mut queue = self.download_queue.lock().await;
+                    let mut queue = self.engine.download_queue.lock().await;
                     queue.remove(failed_count, failed_bytes);
                 }
             }
@@ -675,7 +675,7 @@ impl App {
 
         // Load registry
         let mut registry = {
-            let reg = self.download_registry.lock().await;
+            let reg = self.engine.download_registry.lock().await;
             reg.clone()
         };
 
@@ -710,13 +710,13 @@ impl App {
 
         registry::save_registry(&registry);
         {
-            let mut reg = self.download_registry.lock().await;
+            let mut reg = self.engine.download_registry.lock().await;
             *reg = registry;
         }
 
         let total_queued_bytes: u64 = files_to_download.iter().filter_map(|f| f.size).sum();
         {
-            let mut queue = self.download_queue.lock().await;
+            let mut queue = self.engine.download_queue.lock().await;
             queue.add(num_files, total_queued_bytes);
         }
 
@@ -750,7 +750,7 @@ impl App {
                 .is_ok()
             {
                 success_count += 1;
-                let mut items = self.download_queue_items.lock().await;
+                let mut items = self.engine.download_queue_items.lock().await;
                 items.push(crate::models::QueueItemSummary {
                     filename: file.rfilename.clone(),
                     total_size: file_size,
@@ -777,7 +777,7 @@ impl App {
                 .skip(success_count)
                 .filter_map(|f| f.size)
                 .sum();
-            let mut queue = self.download_queue.lock().await;
+            let mut queue = self.engine.download_queue.lock().await;
             queue.remove(failed_count, failed_bytes);
         }
     }

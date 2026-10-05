@@ -9,8 +9,9 @@ This submodule holds application state, event handling, and async orchestration 
 Files and roles
 - state.rs
   • struct App: central state with Arc<RwLock>/Arc<Mutex> fields for lists, caches, queues, progress
-  • `engine: EngineState` owns the engine-side shared state (download/status/verify/outcome channels, queue/registry/progress Arcs, verification counters); App::new constructs it once via `EngineState::new()`
-  • the engine-owned flattened fields on App (download_tx/rx, download_queue(+items), download_progress, status_tx/rx, download_registry, complete_downloads, verification_*, verify_tx/rx, outcome_tx/rx, verification_results) are temporary Arc/channel clones derived from `engine` (same underlying objects; #[allow(dead_code)] where nothing reads the mirror) — removed in W2.3b; engine_state() is now just `self.engine.clone()`
+  • `engine: EngineState` owns the engine-side shared state (download/status/verify/outcome channels, queue/registry/progress Arcs, verification counters); App::new constructs it once via `EngineState::new()`; every TUI access goes through explicit `self.engine.<field>` reads (no Deref, no flattened mirrors)
+  • `download_tx` is the only channel endpoint kept on App: the frontend-owned sender half of the engine's download queue (dropping it ends the manager loop once drained)
+  • engine_state() snapshot method is gone — App::run passes `self.engine.clone()` directly to engine::spawn_verification_worker / spawn_manager
   • App::new loads options from config; seeds filter defaults; prepares channels through EngineState::new
   • App::sync_options_to_config maps AppOptions → global atomics (download & verification configs)
   • Display flags: needs_search_models, needs_load_quantizations to defer heavy work until after a frame draw
@@ -45,10 +46,10 @@ Files and roles
   • resume/delete incomplete downloads operate on registry + filesystem
   • confirm_repository_download: non-GGUF repo case; preserves folder structure under base/author/model
 
-Important queues and channels
-- download_tx/rx: QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size }
-- status_tx/rx: strings consumed by run loop to update status and popups (e.g., AUTH_ERROR:<model_id>)
-- verification_queue(+size) and verification_progress: shared with verification worker
+Important queues and channels (all on `app.engine` except download_tx)
+- download_tx (on App): sends QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size } into the engine queue
+- engine.status_tx/rx: strings consumed by run loop to update status and popups (e.g., AUTH_ERROR:<model_id>)
+- engine.verification_queue(+size) and engine.verification_progress: shared with verification worker
 
 Caching strategy
 - ApiCache: metadata, quantizations, file trees, and search results by SearchKey (includes all filters)

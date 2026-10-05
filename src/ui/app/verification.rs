@@ -6,7 +6,7 @@ impl App {
     pub async fn verify_downloaded_file(&mut self) {
         let models = self.models.read().clone();
         let quant_groups = self.quantizations.read().clone();
-        let complete_downloads = self.complete_downloads.lock().await.clone();
+        let complete_downloads = self.engine.complete_downloads.lock().await.clone();
 
         let model_selected = self.list_state.selected();
         let quant_selected = self.quant_list_state.selected();
@@ -73,8 +73,8 @@ impl App {
                 };
 
                 crate::verification::queue_verification(
-                    self.verification_queue.clone(),
-                    self.verification_queue_size.clone(),
+                    self.engine.verification_queue.clone(),
+                    self.engine.verification_queue_size.clone(),
                     item,
                 )
                 .await;

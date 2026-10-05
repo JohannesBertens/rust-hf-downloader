@@ -4,14 +4,13 @@ use parking_lot::RwLock;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::Input;
 
-// The queue transport types live in the engine module (single source of
+// The queue transport type lives in the engine module (single source of
 // truth shared with the CLI frontend).
-pub use crate::engine::{DownloadReceiver, QueuedDownload};
+pub use crate::engine::QueuedDownload;
 
 /// Main application state container
 #[derive(Debug)]
@@ -39,45 +38,17 @@ pub struct App {
     /// A directory queues every file under it. Cleared on confirm/cancel.
     pub pending_tree_download: Option<(String, bool)>,
     /// Single owned bundle of engine-owned shared state (channels, queue/
-    /// registry/progress Arcs, verification counters). The flattened fields
-    /// below are temporary clones of this bundle's Arcs and channel
-    /// endpoints (same underlying objects); they exist so existing field
-    /// reads keep compiling and are removed in W2.3b.
+    /// registry/progress Arcs, verification counters). Every TUI access to
+    /// engine state goes through explicit `self.engine.<field>` reads — no
+    /// Deref, no flattened mirrors.
     pub engine: crate::engine::EngineState,
-    pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
+    /// Sender half of the engine's download queue channel, held by the TUI
+    /// for the whole session so the manager loop runs until App drops
+    /// (dropping the last clone ends the manager once the queue drains).
+    /// Not part of EngineState on purpose: the engine consumes the receiver,
+    /// the frontend owns the sender.
     pub download_tx: mpsc::UnboundedSender<QueuedDownload>,
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub download_rx: DownloadReceiver,
-    pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
-    /// Mirror of files waiting in the download channel, for HUD display
-    /// (names + sizes). Same lock level as `download_queue`.
-    pub download_queue_items: Arc<Mutex<Vec<crate::models::QueueItemSummary>>>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
-    pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub status_tx: mpsc::UnboundedSender<String>,
-    pub download_registry: Arc<Mutex<DownloadRegistry>>,
-    pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
-    pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<AtomicUsize>,
-    /// Verification tasks spawned but unfinished (engine drain signal;
-    /// unread by the TUI itself, rendered through verification_progress)
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub verification_in_flight: Arc<AtomicUsize>,
-    /// Typed verification results (engine channel; the TUI does not read it,
-    /// the CLI consumes it for events/exit codes). The sender half is held so
-    /// the channel stays connected for the engine's lifetime.
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
-    /// Per-file download outcomes streamed by the engine manager (the TUI
-    /// does not read this channel; the CLI renders live events from it).
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub outcome_tx: mpsc::UnboundedSender<FileOutcome>,
-    #[allow(dead_code)] // flattened mirror; removed in W2.3b
-    pub outcome_rx: Arc<Mutex<mpsc::UnboundedReceiver<FileOutcome>>>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
@@ -109,8 +80,6 @@ pub struct App {
     pub cached_download_queue_items: Vec<crate::models::QueueItemSummary>,
     pub cached_verification_queue_bytes: u64,
     pub cached_verification_progress: Vec<VerificationProgress>,
-    /// Session-lifetime hash verification result counters (HUD footer)
-    pub verification_results: crate::verification::VerificationResultCounters,
 }
 
 impl Default for App {
@@ -129,11 +98,9 @@ impl App {
 
         let quant_file_list_state = ListState::default();
 
-        // One engine bundle owns every shared channel and Arc below; the
-        // flattened App fields are initialized as clones from it (Arc clones
-        // share the same underlying objects; channel senders/receivers and
-        // atomics are identical handles), so App and engine tasks observe
-        // the same state.
+        // One engine bundle owns every shared channel and Arc the engine
+        // tasks communicate through; App keeps the download sender half to
+        // enqueue work (dropping it ends the manager loop once drained).
         let (engine, download_tx) = crate::engine::EngineState::new();
 
         // Load options from config file (or use defaults)
@@ -172,25 +139,9 @@ impl App {
             popup_mode: PopupMode::None,
             download_path_input,
             pending_tree_download: None,
-            engine: engine.clone(),
-            download_progress: engine.download_progress.clone(),
+            engine,
             download_tx,
-            download_rx: engine.download_rx.clone(),
-            download_queue: engine.download_queue.clone(),
-            download_queue_items: engine.download_queue_items.clone(),
             incomplete_downloads: Vec::new(),
-            status_rx: engine.status_rx.clone(),
-            status_tx: engine.status_tx.clone(),
-            download_registry: engine.download_registry.clone(),
-            complete_downloads: engine.complete_downloads.clone(),
-            verification_progress: engine.verification_progress.clone(),
-            verification_queue: engine.verification_queue.clone(),
-            verification_queue_size: engine.verification_queue_size.clone(),
-            verification_in_flight: engine.verification_in_flight.clone(),
-            verify_tx: engine.verify_tx.clone(),
-            verify_rx: engine.verify_rx.clone(),
-            outcome_tx: engine.outcome_tx.clone(),
-            outcome_rx: engine.outcome_rx.clone(),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -219,15 +170,7 @@ impl App {
             cached_download_queue_items: Vec::new(),
             cached_verification_queue_bytes: 0,
             cached_verification_progress: Vec::new(),
-            verification_results: engine.verification_results.clone(),
         }
-    }
-
-    /// Snapshot of this app's engine state (cheap: every field is an Arc or
-    /// a channel endpoint clone). Used to spawn the shared engine tasks and
-    /// keeps the App the single owner of the state the renderer reads.
-    pub fn engine_state(&self) -> crate::engine::EngineState {
-        self.engine.clone()
     }
 
     /// Synchronize options to global config atomics
