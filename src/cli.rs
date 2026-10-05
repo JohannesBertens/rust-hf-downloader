@@ -3956,10 +3956,12 @@ mod tests {
 
     #[test]
     fn absolute_path_anchors_relative_paths_at_cwd() {
-        assert_eq!(
-            absolute_path(Path::new("/cache/hub")),
-            PathBuf::from("/cache/hub")
-        );
+        // Platform-neutral: on Unix a leading-/ path is already absolute and
+        // passes through verbatim; on Windows it is drive-relative, so only
+        // assert absoluteness and the trailing components (same on both).
+        let abs = absolute_path(Path::new("/cache/hub"));
+        assert!(abs.is_absolute(), "rooted input must come back absolute");
+        assert!(abs.ends_with("cache/hub"), "components preserved: {abs:?}");
         let rel = absolute_path(Path::new("hub/models--a--b"));
         assert!(rel.is_absolute());
         assert!(rel.ends_with("hub/models--a--b"));
