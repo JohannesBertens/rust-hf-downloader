@@ -53,7 +53,7 @@ Files and roles
 
 Important queues and channels (all on `app.engine` except download_tx)
 - download_tx (on App): sends QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size } into the engine queue
-- engine.status_tx/rx: strings consumed by run loop to update status and popups (e.g., AUTH_ERROR:<model_id>)
+- engine.status_tx/rx: strings consumed by run loop to update status and popups; the auth line AUTH_ERROR:<model_id> is built and parsed only through engine::{auth_status_message, parse_auth_status} (W2.6) — one string contract shared with the human CLI's status_line
 - engine.verification_queue(+size) and engine.verification_progress: shared with verification worker
 
 Caching strategy

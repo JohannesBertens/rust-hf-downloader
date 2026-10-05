@@ -303,7 +303,7 @@ impl Reporter {
         if covered {
             return;
         }
-        if let Some(model_id) = message.strip_prefix("AUTH_ERROR:") {
+        if let Some(model_id) = crate::engine::parse_auth_status(message) {
             self.line_stderr(&format!(
                 "authentication required for {} (pass --token or set $HF_TOKEN)",
                 model_id

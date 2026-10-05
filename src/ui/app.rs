@@ -474,7 +474,7 @@ impl App {
         // Check for status messages from download tasks (non-blocking)
         if let Ok(mut rx) = self.engine.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
-                if let Some(model_id) = msg.strip_prefix("AUTH_ERROR:") {
+                if let Some(model_id) = crate::engine::parse_auth_status(&msg) {
                     let model_url = format!("https://huggingface.co/{}", model_id);
                     self.popup_mode = PopupMode::AuthError { model_url };
                     *self.status.write() = format!("Authentication required for {}", model_id);
