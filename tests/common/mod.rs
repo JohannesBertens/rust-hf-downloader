@@ -33,6 +33,13 @@ pub struct FileEntry {
     /// differ from the actual content to test hash mismatches; None = no LFS
     /// pointer, i.e. no verification possible).
     pub advertised_sha256: Option<String>,
+    /// Size advertised by the tree API and the resolve endpoint's
+    /// Content-Range total when it differs from the actual content length
+    /// (failure-injection: "advertised LFS size != served bytes" — range
+    /// requests starting at/after the real content length answer 416, like
+    /// the real Hub answering for a blob shorter than advertised).
+    /// None = advertise the actual content length.
+    pub advertised_size: Option<u64>,
 }
 
 pub struct MockRepo {
@@ -56,6 +63,12 @@ pub struct MockRepo {
     /// issue #28 layout where all files live on a branch. Unknown
     /// revisions 404, like the real Hub.
     pub branches: Vec<String>,
+    /// Failure injection: respond this HTTP status to every range-bearing
+    /// request AFTER the first one (the probe `bytes=0-0` succeeds; every
+    /// subsequent chunk request fails). None = serve normally. The counter
+    /// is global across paths (single-file scenarios), like a reverse
+    /// proxy starting to 500 mid-download.
+    pub fail_status_after_first_range: Option<u16>,
 }
 
 impl MockRepo {
@@ -87,15 +100,16 @@ impl MockRepo {
                     }));
                 }
             } else {
+                let size = f.advertised_size.unwrap_or(f.content.len() as u64);
                 let mut entry = json!({
                     "type": "file",
                     "path": f.path,
-                    "size": f.content.len(),
+                    "size": size,
                 });
                 if let Some(oid) = &f.advertised_sha256 {
                     entry["lfs"] = json!({
                         "oid": oid,
-                        "size": f.content.len(),
+                        "size": size,
                         "pointerSize": 136,
                     });
                 }
@@ -225,15 +239,27 @@ pub async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
         .and_then(|v| v.to_str().ok())
         .and_then(parse_range);
 
-    let total = entry.content.len() as u64;
+    // Served length is the ACTUAL content; the advertised total (tree
+    // `size`/`lfs.size` and the Content-Range total below) may be larger
+    // (failure-injection knob `advertised_size`). Ranges starting at/after
+    // the served length answer 416 with the `bytes */served` header — the
+    // real Hub's shape for a blob shorter than advertised. A straddling
+    // range serves up to the last served byte (the real Hub clamps `end`).
+    let served_total = entry.content.len() as u64;
+    let advertised_total = entry.advertised_size.unwrap_or(served_total);
     let (status, body, content_range) = match range {
+        Some((start, _)) if start >= served_total => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            Vec::new(),
+            format!("bytes */{}", served_total),
+        ),
         Some((start, end)) => {
-            let end = end.min(total - 1);
+            let end = end.min(served_total - 1);
             let slice = entry.content[start as usize..=(end as usize)].to_vec();
             (
                 StatusCode::PARTIAL_CONTENT,
                 slice,
-                format!("bytes {}-{}/{}", start, end, total),
+                format!("bytes {}-{}/{}", start, end, advertised_total),
             )
         }
         None => (StatusCode::OK, entry.content.clone(), String::new()),
@@ -261,16 +287,23 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
     // One-shot stall flag for the timeout/retry test; extracted before the
     // repo is frozen behind an Arc.
     let sleep_once = repo.sleep_once;
+    // Failure injection (see MockRepo::fail_status_after_first_range):
+    // counts range-bearing requests so exactly the first (the transport's
+    // probe) succeeds.
+    let fail_after_first = repo.fail_status_after_first_range;
+    let range_requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let repo = Arc::new(repo);
     let sleep_flag = Arc::new(Mutex::new(sleep_once));
 
     let make_service = make_service_fn(move |_| {
         let repo = repo.clone();
         let sleep_flag = sleep_flag.clone();
+        let range_requests = range_requests.clone();
         async move {
             Ok::<_, hyper::Error>(service_fn(move |req| {
                 let repo = repo.clone();
                 let sleep_flag = sleep_flag.clone();
+                let range_requests = range_requests.clone();
                 async move {
                     let is_resolve = req.uri().path().contains("/resolve/main/");
                     if is_resolve {
@@ -281,6 +314,23 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
                     }
                     if !repo.per_request_delay.is_zero() {
                         tokio::time::sleep(repo.per_request_delay).await;
+                    }
+                    // Failure injection: the transport's probe (`bytes=0-0`)
+                    // is the FIRST range-bearing request; every later one
+                    // (the chunk requests) gets the injected status.
+                    if let Some(status) = fail_after_first {
+                        if req.headers().contains_key("range") {
+                            let seen =
+                                range_requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if seen >= 1 {
+                                return Ok::<Response<Body>, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::from_u16(status).unwrap())
+                                        .body(Body::empty())
+                                        .unwrap(),
+                                );
+                            }
+                        }
                     }
                     Ok::<Response<Body>, hyper::Error>(handle(req, repo).await)
                 }

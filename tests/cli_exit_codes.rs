@@ -84,9 +84,11 @@ fn single_file_repo(content: &[u8]) -> MockRepo {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(content)),
+            advertised_size: None,
             content: content.to_vec(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: std::time::Duration::ZERO,
