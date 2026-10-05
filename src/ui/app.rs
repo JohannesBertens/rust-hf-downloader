@@ -63,7 +63,7 @@ impl App {
             if self.needs_load_quantizations {
                 self.needs_load_quantizations = false;
                 self.spawn_load_quantizations();
-                self.prefetch_adjacent_models();
+                self.prefetch_adjacent_models().await;
             }
 
             self.handle_crossterm_events(&mut event_stream).await?;

@@ -233,24 +233,17 @@ impl App {
 
         // Spawn background task (non-blocking)
         tokio::spawn(async move {
-            // Check metadata cache first (avoids expensive API call)
-            let cached_metadata = {
-                let cache = api_cache.read();
-                cache.metadata.get(&model_id).cloned()
-            };
-
-            let metadata = if let Some(meta) = cached_metadata {
-                meta // Use cached metadata
-            } else {
-                // Fetch and cache metadata
-                match fetch_model_metadata(&model_id, crate::api::DEFAULT_REVISION, token.as_ref())
-                    .await
+            // Metadata cache-first via the shared get-or-fetch helper
+            // (W4.11): read-lock fast path, unlocked fetch, Entry insert.
+            // A failed fetch surfaces the historical error path and is
+            // never cached — the next selection retries it.
+            let metadata =
+                match crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || {
+                    fetch_model_metadata(&model_id, crate::api::DEFAULT_REVISION, token.as_ref())
+                })
+                .await
                 {
-                    Ok(meta) => {
-                        let mut cache = api_cache.write();
-                        cache.metadata.insert(model_id.clone(), meta.clone());
-                        meta
-                    }
+                    Ok(meta) => meta,
                     Err(e) => {
                         *loading_quants.write() = false;
                         *error.write() = Some(format!("Failed to fetch model metadata: {}", e));
@@ -262,8 +255,7 @@ impl App {
                         *file_tree.write() = None;
                         return;
                     }
-                }
-            };
+                };
 
             // Classify the full recursive tree (pure function — issue #25:
             // GGUFs in arbitrarily named subdirectories used to be invisible
@@ -281,37 +273,21 @@ impl App {
                         "No quantization groups detected — showing full file tree".to_string();
                 }
 
-                // Clear quantizations
-                let mut quants_lock = quantizations.write();
-                quants_lock.clear();
-                drop(quants_lock);
+                // Clear quantizations (guard scoped to this statement —
+                // the tree fetch below awaits, and a parking_lot write
+                // guard is not Send across an await point)
+                quantizations.write().clear();
 
-                // Check file tree cache with read lock
-                let cached_tree = {
-                    let cache = api_cache.read();
-                    cache.file_trees.get(&model_id).cloned()
-                };
-
-                let tree_to_store = if let Some(tree) = cached_tree {
-                    tree // Use cached tree
-                } else {
-                    // Build tree
-                    let tree = build_file_tree(metadata.siblings.clone());
-
-                    // Double-check and cache using Entry API
-                    let tree_to_store = {
-                        let mut cache = api_cache.write();
-                        match cache.file_trees.entry(model_id.clone()) {
-                            std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
-                            std::collections::hash_map::Entry::Vacant(v) => {
-                                v.insert(tree.clone());
-                                tree
-                            }
-                        }
-                    };
-
-                    tree_to_store
-                };
+                // File tree: build on cache miss, get-or-insert via the
+                // shared helper (W4.11); the build is pure/infallible.
+                let tree_to_store =
+                    crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || async {
+                        Ok::<_, std::convert::Infallible>(build_file_tree(
+                            metadata.siblings.clone(),
+                        ))
+                    })
+                    .await
+                    .expect("build_file_tree is infallible");
 
                 // Store metadata and tree in UI state
                 *model_metadata.write() = Some(metadata.clone());
@@ -322,34 +298,15 @@ impl App {
                 // GGUF mode: show quantization groups
                 *display_mode.write() = ModelDisplayMode::Gguf;
 
-                // Check quantization cache with read lock
-                let cached_result = {
-                    let cache = api_cache.read();
-                    cache.quantizations.get(&model_id).cloned()
-                };
-
-                if let Some(cached_groups) = cached_result {
-                    let mut quants_lock = quantizations.write();
-                    *quants_lock = cached_groups;
-                    *loading_quants.write() = false;
-
-                    // Reset file tree state
-                    *model_metadata.write() = None;
-                    *file_tree.write() = None;
-                    return;
-                }
-
-                // Cache via Entry API (atomic get-or-insert with write lock)
-                let groups_to_store = {
-                    let mut cache = api_cache.write();
-                    match cache.quantizations.entry(model_id.clone()) {
-                        std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
-                        std::collections::hash_map::Entry::Vacant(v) => {
-                            v.insert(groups.clone());
-                            groups
-                        }
-                    }
-                };
+                // Quantization groups: cache-first via the shared helper
+                // (W4.11) — the hit and miss paths converge on the same
+                // tail (the old early-return hit arm did exactly this).
+                let groups_to_store =
+                    crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || async {
+                        Ok::<_, std::convert::Infallible>(groups.clone())
+                    })
+                    .await
+                    .expect("classify_quantizations output is infallible");
 
                 let mut quants_lock = quantizations.write();
                 *quants_lock = groups_to_store;
@@ -391,14 +348,15 @@ impl App {
 
     /// Pre-emptively load adjacent models into cache (1 before, 1 after current selection)
     /// Loads metadata, quantizations (GGUF), and file trees (Standard) with debouncing
-    pub fn prefetch_adjacent_models(&self) {
+    pub async fn prefetch_adjacent_models(&self) {
         const PREFETCH_DEBOUNCE_MS: u128 = 1000; // Wait 1000ms before prefetching
 
-        // Check debounce
+        // Check debounce (async since W4.11 — this was the UI's last
+        // futures::executor::block_on site; the only caller, App::run's
+        // main loop, is already async)
         let now = std::time::Instant::now();
         let should_prefetch = {
-            let mut last_time =
-                futures::executor::block_on(async { self.last_prefetch_time.lock().await });
+            let mut last_time = self.last_prefetch_time.lock().await;
             if now.duration_since(*last_time).as_millis() > PREFETCH_DEBOUNCE_MS {
                 *last_time = now;
                 true
@@ -448,37 +406,22 @@ impl App {
         // Spawn background prefetch task (fire-and-forget)
         tokio::spawn(async move {
             for model_id in model_ids {
-                // Check metadata cache with read lock
-                let metadata_cached = {
-                    let cache = api_cache.read();
-                    cache.metadata.get(&model_id).cloned()
-                };
-
-                let metadata = if let Some(meta) = metadata_cached {
-                    meta // Use cached
-                } else {
-                    // Fetch and cache metadata with double-check using Entry API
-                    let meta_to_store = match fetch_model_metadata(
-                        &model_id,
-                        crate::api::DEFAULT_REVISION,
-                        token.as_ref(),
-                    )
+                // Metadata: cache-first via the shared helper (W4.11); a
+                // failed fetch skips this model (never cached — retried
+                // on a later prefetch).
+                let metadata =
+                    match crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || {
+                        fetch_model_metadata(
+                            &model_id,
+                            crate::api::DEFAULT_REVISION,
+                            token.as_ref(),
+                        )
+                    })
                     .await
                     {
-                        Ok(meta) => {
-                            let mut cache = api_cache.write();
-                            match cache.metadata.entry(model_id.clone()) {
-                                std::collections::hash_map::Entry::Occupied(o) => o.get().clone(),
-                                std::collections::hash_map::Entry::Vacant(v) => {
-                                    v.insert(meta.clone());
-                                    meta
-                                }
-                            }
-                        }
+                        Ok(meta) => meta,
                         Err(_) => continue, // Skip on error
                     };
-                    meta_to_store
-                };
 
                 // Process based on classification of the recursive tree
                 // (pure — no second fetch; issue #25)
@@ -486,39 +429,20 @@ impl App {
 
                 if groups.is_empty() {
                     // Standard model: prefetch file tree
-                    let tree_cached = {
-                        let cache = api_cache.read();
-                        cache.file_trees.contains_key(&model_id)
-                    };
-
-                    if !tree_cached {
-                        // Build and cache file tree with double-check using Entry API
-                        let tree = build_file_tree(metadata.siblings.clone());
-                        let mut cache = api_cache.write();
-                        if matches!(
-                            cache.file_trees.entry(model_id.clone()),
-                            std::collections::hash_map::Entry::Vacant(_)
-                        ) {
-                            cache.file_trees.insert(model_id.clone(), tree);
-                        }
-                    }
+                    crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || async {
+                        Ok::<_, std::convert::Infallible>(build_file_tree(
+                            metadata.siblings.clone(),
+                        ))
+                    })
+                    .await
+                    .expect("build_file_tree is infallible");
                 } else {
                     // GGUF model: prefetch quantization groups
-                    let quants_cached = {
-                        let cache = api_cache.read();
-                        cache.quantizations.contains_key(&model_id)
-                    };
-
-                    if !quants_cached {
-                        // Cache classified groups with double-check using Entry API
-                        let mut cache = api_cache.write();
-                        if matches!(
-                            cache.quantizations.entry(model_id.clone()),
-                            std::collections::hash_map::Entry::Vacant(_)
-                        ) {
-                            cache.quantizations.insert(model_id.clone(), groups);
-                        }
-                    }
+                    crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || async {
+                        Ok::<_, std::convert::Infallible>(groups)
+                    })
+                    .await
+                    .expect("classify_quantizations output is infallible");
                 }
             }
         });

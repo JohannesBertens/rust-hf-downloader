@@ -27,7 +27,7 @@ app.rs
   • engine::spawn_manager (download manager consuming download_rx and calling download::start_download)
 - Main loop draws, then conditionally calls async loaders flagged by state:
   • needs_search_models → App::search_models()
-  • needs_load_quantizations → App::spawn_load_quantizations() and prefetch_adjacent_models()
+  • needs_load_quantizations → App::spawn_load_quantizations() and prefetch_adjacent_models() (async since W4.11 — awaited in the loop; it used to block_on the debounce mutex)
 - handle_crossterm_events polls key events and status messages, updates popup mode and status; both event branches (select! + drain loop) dispatch through one process_terminal_event helper (W4.8): Press-only keys, immediate click/scroll, mouse moves coalesced into the latest position for the throttled hover update
 
 render/ (mod.rs is the facade)

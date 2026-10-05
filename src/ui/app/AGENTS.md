@@ -44,12 +44,12 @@ Files and roles
   • Seeded from AppOptions::default_* via from_options; saved back by App::save_filter_settings — the config serde surface stays AppOptions (byte-identical config files)
 
 - models.rs (search + model-detail loading; renamed search.rs in W3.6)
-  • search_models: cache-first on ApiCache.searches; calls api::fetch_models_filtered; sets loading/status
+  • search_models: cache-first on ApiCache.searches; calls api::fetch_models_filtered; sets loading/status (this searches-map site keeps its inline Entry insert: SearchKey keying + per-path exact-match post-filtering and status wording make it a poor fit for the model-keyed helper)
   • show_model/quant/file_details: updates status/selection info lines
-  • spawn_load_quantizations: loads metadata (cache-first); chooses mode:
+  • spawn_load_quantizations: loads metadata via ApiCache::get_or_fetch (W4.11 — one helper for the read-check → unlocked fetch → Entry-insert pattern; lock is never held across a fetch, failures are never cached); chooses mode:
       - GGUF → classify_quantizations(metadata.siblings) grouped by quant type; clear Standard state
       - Standard → build_file_tree from metadata.siblings; clear GGUF state
-    Sets loading flags; uses display_mode to inform rendering; prefetch_adjacent_models debounced
+    Sets loading flags; uses display_mode to inform rendering; prefetch_adjacent_models debounced (async fn since W4.11 — the UI's last futures::executor::block_on site; called from the async App::run loop)
   • clear_search_results/clear_model_details give immediate UI feedback
 
 - downloads.rs
@@ -68,6 +68,7 @@ Important queues and channels (all on `app.engine` except download_tx)
 
 Caching strategy
 - ApiCache: metadata, quantizations, file trees, and search results by SearchKey (includes all filters)
+- Model-keyed reads go through ApiCache::get_or_fetch (models/cache.rs, W4.11): read-lock fast path, unlocked fetch (concurrent duplicate fetches are allowed — dedup at the Entry insert, first completed fetch wins), failed fetches returned as Err and never cached (retried next call); semantics pinned by the concurrency tests in models/cache.rs
 - Always check cache first; keep UI responsive and avoid repeated HTTP calls
 
 Safety and correctness notes
