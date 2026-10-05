@@ -2,12 +2,9 @@
 
 use std::io::Write;
 
-use super::args::ModelDto;
-use super::args::{merge_token, SearchArgs};
+use super::args::{merge_token, ModelDto, SearchArgs};
 use super::events::Event;
-use super::report::truncate_path;
-use super::report::ProgressMode;
-use super::report::Reporter;
+use super::report::{truncate_path, ProgressMode, Reporter};
 use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
@@ -36,7 +33,6 @@ pub(super) fn effective_search_params(
 /// Fixed-column human table on stdout; the result count goes to stderr so
 /// the table stays pipeable.
 fn render_search_table(models: &[ModelDto]) {
-    use std::io::Write;
     let id_width = models
         .iter()
         .map(|m| m.id.chars().count())

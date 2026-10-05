@@ -21,12 +21,49 @@
 
 use clap::{Parser, Subcommand};
 
-#[cfg(test)]
-use std::path::Path;
-
+mod args;
+mod download_cmd;
+mod events;
+mod hf_cache_cmd;
+mod report;
+mod resolve;
+mod search_cmd;
 mod update_cmd;
 
-mod args;
+#[cfg(test)]
+mod tests;
+
+use args::{DownloadArgs, HfCacheArgs, SearchArgs, UpdateArgs};
+use download_cmd::run_download;
+use hf_cache_cmd::run_hf_cache;
+use search_cmd::run_search;
+use update_cmd::run_update;
+
+#[cfg(test)]
+use crate::models::{ModelMetadata, QuantizationGroup};
+#[cfg(test)]
+use args::{
+    apply_rate_limit_overrides, merge_token, parse_rate_limit_mbps, parse_revision, valid_model_id,
+    HfCacheCommand, ModelDto,
+};
+#[cfg(test)]
+use events::{Event, FileDto, OverallProgress, Summary};
+#[cfg(test)]
+use hf_cache_cmd::{
+    absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
+    SyncSelectionError,
+};
+#[cfg(test)]
+use report::{
+    format_eta, format_file_progress, format_overall_progress, render_bar, truncate_path,
+    verification_heartbeat_line, ProgressMode,
+};
+#[cfg(test)]
+use resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};
+#[cfg(test)]
+use search_cmd::effective_search_params;
+#[cfg(test)]
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -57,57 +94,6 @@ pub enum Command {
     #[command(alias = "upgrade")]
     Update(UpdateArgs),
 }
-
-#[cfg(test)]
-mod tests;
-
-mod download_cmd;
-mod events;
-mod hf_cache_cmd;
-mod report;
-mod resolve;
-mod search_cmd;
-
-use args::{DownloadArgs, HfCacheArgs, SearchArgs, UpdateArgs};
-use download_cmd::run_download;
-use events::{Event, FileDto, Summary};
-use hf_cache_cmd::run_hf_cache;
-use report::Reporter;
-use search_cmd::run_search;
-
-#[cfg(test)]
-use args::{apply_rate_limit_overrides, merge_token, valid_model_id};
-#[cfg(test)]
-use events::OverallProgress;
-#[cfg(test)]
-use hf_cache_cmd::{absolute_path, ref_name_for_revision, symlinks_enabled};
-#[cfg(test)]
-use hf_cache_cmd::{select_sync_files, SelectionMode, SyncSelectionError};
-
-#[cfg(test)]
-use crate::models::{ModelMetadata, QuantizationGroup};
-#[cfg(test)]
-use args::HfCacheCommand;
-#[cfg(test)]
-use args::ModelDto;
-#[cfg(test)]
-use args::{parse_rate_limit_mbps, parse_revision};
-#[cfg(test)]
-use report::truncate_path;
-#[cfg(test)]
-use report::ProgressMode;
-#[cfg(test)]
-use report::{
-    format_eta, format_file_progress, format_overall_progress, render_bar,
-    verification_heartbeat_line,
-};
-#[cfg(test)]
-use resolve::ResolveError;
-#[cfg(test)]
-use resolve::{parse_selector, resolve_files, FileSpec, Selector};
-#[cfg(test)]
-use search_cmd::effective_search_params;
-use update_cmd::run_update;
 
 // ---------------------------------------------------------------------------
 // Exit codes (see plans/add-cli.md §2.4)
@@ -143,6 +129,3 @@ pub async fn run(command: Command) -> i32 {
         Command::Update(args) => run_update(args).await,
     }
 }
-
-// Tests
-// ---------------------------------------------------------------------------

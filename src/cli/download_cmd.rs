@@ -1,7 +1,6 @@
 //! Download orchestration: config -> resolve -> engine bootstrap -> event
-//! drain. `monitor`/`poll_once` implement the AGENTS.md lock hierarchy
-//! verbatim; the engine bootstrap here is one of exactly three
-//! production sites (TUI + download + hf-cache sync).
+//! drain. The bootstrap is one of three production sites; `monitor`/
+//! `poll_once` follow the AGENTS.md lock hierarchy.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -614,5 +613,3 @@ fn apply_verify_outcome(outcome: &VerifyOutcome, reporter: &mut Reporter, tally:
         }
     }
 }
-
-// ---------------------------------------------------------------------------

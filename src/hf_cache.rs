@@ -427,7 +427,7 @@ fn create_symlink(target: &str, link: &Path) -> io::Result<()> {
 /// points verbatim and does **not** translate `/` in relative targets —
 /// links created with forward-slash targets exist but fail to resolve
 /// with ERROR_INVALID_NAME (os error 123), which is why symlinks are
-/// also disabled by default on Windows (see `cli::symlinks_enabled`).
+/// also disabled by default on Windows (see `cli::hf_cache_cmd::symlinks_enabled`).
 #[cfg(windows)]
 fn create_symlink(target: &str, link: &Path) -> io::Result<()> {
     let windows_target = target.replace('/', "\\");

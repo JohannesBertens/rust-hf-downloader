@@ -1,12 +1,14 @@
 //! `hf-cache` subcommand group (plans/hf-cache-sync.md §2, §5.2): the
 //! hub-cache sync pipeline and pure path helper.
 
-use super::args::{apply_rate_limit_overrides, merge_token, valid_model_id};
-use super::args::{HfCacheArgs, HfCacheCommand, HfCachePathArgs, HfCacheSyncArgs};
+use super::args::{
+    apply_rate_limit_overrides, merge_token, valid_model_id, HfCacheArgs, HfCacheCommand,
+    HfCachePathArgs, HfCacheSyncArgs,
+};
 use super::download_cmd::{monitor, RunTally};
-use super::report::truncate_path;
+use super::events::{Event, FileDto, Summary};
+use super::report::{truncate_path, Reporter};
 use super::resolve::FileSpec;
-use super::{Event, FileDto, Reporter, Summary};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
 use crate::engine::EngineState;
 use crate::models::{FileOutcome, ModelMetadata, VerifyOutcome};
