@@ -22,7 +22,8 @@ src/
 │   ├── resolve.rs    # File resolution (FileSpec/Selector/parse_selector/resolve_files) — pure
 │   ├── events.rs     # Stable additive-only NDJSON event schema (Event/OverallProgress)
 │   ├── report.rs     # Reporter (human/NDJSON), --progress modes, progress-line formatters
-│   ├── download_cmd.rs # run_download + RunTally + monitor/poll_once drain (lock ordering!)
+│   ├── download_cmd.rs # run_download (config → resolve → enqueue → monitor → summary/exit)
+│   ├── run.rs          # Cross-command runner (W3.7+W4.2+W4.3): RunTally + monitor/poll_once drain (lock ordering!), tally_outcome, load_run_config/resolve_run_token, effective_revision, queue_run, metadata-error + run-tail emissions
 │   ├── search_cmd.rs # Query-only search (no engine)
 │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline (selection, sync lock, publish)
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)

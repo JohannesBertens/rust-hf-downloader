@@ -97,7 +97,7 @@ Key modules
 
 10) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
 - `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::bootstrap
-- Split by section: mod (Cli/Command/run), args, resolve, events, report, download_cmd, search_cmd, hf_cache_cmd, update_cmd, tests
+- Split by section: mod (Cli/Command/run), args, resolve, events, report, run (cross-command runner: RunTally/monitor/poll_once + load_run_config/queue_run/run-tail emissions), download_cmd, search_cmd, hf_cache_cmd, update_cmd, tests
 - Human reporter or JSON Lines (`--json`); documented exit-code table
 - `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
 

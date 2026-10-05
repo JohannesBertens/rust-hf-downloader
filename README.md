@@ -716,7 +716,8 @@ rust-hf-downloader/
     │   ├── resolve.rs      # File selection/resolution (pure)
     │   ├── events.rs       # NDJSON event schema
     │   ├── report.rs       # Human/JSON reporters, --progress modes
-    │   ├── download_cmd.rs # download orchestration + drain
+    │   ├── download_cmd.rs # download orchestration (run_download)
+    │   ├── run.rs          # cross-command runner: RunTally/monitor/poll_once drain, shared bootstrap helpers
     │   ├── search_cmd.rs   # search subcommand
     │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline
     │   ├── update_cmd.rs   # self-update subcommand

@@ -5,10 +5,10 @@ use super::args::{
     apply_rate_limit_overrides, merge_token, valid_model_id, HfCacheArgs, HfCacheCommand,
     HfCachePathArgs, HfCacheSyncArgs,
 };
-use super::download_cmd::{monitor, RunTally};
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::FileSpec;
+use super::run::{monitor, RunTally};
 use super::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
 use crate::models::{FileOutcome, ModelMetadata, VerifyOutcome};

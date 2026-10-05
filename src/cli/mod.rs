@@ -27,6 +27,7 @@ mod events;
 mod hf_cache_cmd;
 mod report;
 mod resolve;
+mod run;
 mod search_cmd;
 mod update_cmd;
 

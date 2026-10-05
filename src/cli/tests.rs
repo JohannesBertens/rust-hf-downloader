@@ -1830,7 +1830,7 @@ fn file_complete_status_wire_contract() {
 
 #[tokio::test]
 async fn plain_heartbeat_skips_when_progress_snapshot_missed() {
-    use super::download_cmd::{poll_once, RunTally};
+    use super::run::{poll_once, RunTally};
 
     let (state, _tx) = crate::engine::EngineState::new();
     state
