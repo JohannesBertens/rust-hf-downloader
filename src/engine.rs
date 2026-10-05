@@ -55,7 +55,7 @@ pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>;
 
 /// The bundle of shared handles the engine tasks and frontends communicate
 /// through. Every field is an Arc or a channel endpoint, so cloning is cheap.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EngineState {
     pub download_rx: DownloadReceiver,
     pub download_queue: Arc<Mutex<QueueState>>,

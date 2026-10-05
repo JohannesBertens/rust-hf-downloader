@@ -9,7 +9,9 @@ This submodule holds application state, event handling, and async orchestration 
 Files and roles
 - state.rs
   • struct App: central state with Arc<RwLock>/Arc<Mutex> fields for lists, caches, queues, progress
-  • App::new loads options from config; seeds filter defaults; prepares channels (download/status/verify/outcome)
+  • `engine: EngineState` owns the engine-side shared state (download/status/verify/outcome channels, queue/registry/progress Arcs, verification counters); App::new constructs it once via `EngineState::new()`
+  • the engine-owned flattened fields on App (download_tx/rx, download_queue(+items), download_progress, status_tx/rx, download_registry, complete_downloads, verification_*, verify_tx/rx, outcome_tx/rx, verification_results) are temporary Arc/channel clones derived from `engine` (same underlying objects; #[allow(dead_code)] where nothing reads the mirror) — removed in W2.3b; engine_state() is now just `self.engine.clone()`
+  • App::new loads options from config; seeds filter defaults; prepares channels through EngineState::new
   • App::sync_options_to_config maps AppOptions → global atomics (download & verification configs)
   • Display flags: needs_search_models, needs_load_quantizations to defer heavy work until after a frame draw
   • File tree state for Standard mode; display_mode is shared to switch GGUF vs Standard

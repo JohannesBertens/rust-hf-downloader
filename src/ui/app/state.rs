@@ -38,8 +38,15 @@ pub struct App {
     /// pressed on the Standard-mode file tree: (repo path, is_directory).
     /// A directory queues every file under it. Cleared on confirm/cancel.
     pub pending_tree_download: Option<(String, bool)>,
+    /// Single owned bundle of engine-owned shared state (channels, queue/
+    /// registry/progress Arcs, verification counters). The flattened fields
+    /// below are temporary clones of this bundle's Arcs and channel
+    /// endpoints (same underlying objects); they exist so existing field
+    /// reads keep compiling and are removed in W2.3b.
+    pub engine: crate::engine::EngineState,
     pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
     pub download_tx: mpsc::UnboundedSender<QueuedDownload>,
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub download_rx: DownloadReceiver,
     pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
     /// Mirror of files waiting in the download channel, for HUD display
@@ -47,6 +54,7 @@ pub struct App {
     pub download_queue_items: Arc<Mutex<Vec<crate::models::QueueItemSummary>>>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
     pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub status_tx: mpsc::UnboundedSender<String>,
     pub download_registry: Arc<Mutex<DownloadRegistry>>,
     pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
@@ -55,15 +63,20 @@ pub struct App {
     pub verification_queue_size: Arc<AtomicUsize>,
     /// Verification tasks spawned but unfinished (engine drain signal;
     /// unread by the TUI itself, rendered through verification_progress)
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub verification_in_flight: Arc<AtomicUsize>,
     /// Typed verification results (engine channel; the TUI does not read it,
     /// the CLI consumes it for events/exit codes). The sender half is held so
     /// the channel stays connected for the engine's lifetime.
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
     /// Per-file download outcomes streamed by the engine manager (the TUI
     /// does not read this channel; the CLI renders live events from it).
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub outcome_tx: mpsc::UnboundedSender<FileOutcome>,
+    #[allow(dead_code)] // flattened mirror; removed in W2.3b
     pub outcome_rx: Arc<Mutex<mpsc::UnboundedReceiver<FileOutcome>>>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
@@ -116,10 +129,12 @@ impl App {
 
         let quant_file_list_state = ListState::default();
 
-        let (download_tx, download_rx) = mpsc::unbounded_channel();
-        let (status_tx, status_rx) = mpsc::unbounded_channel();
-        let (verify_tx, verify_rx) = mpsc::unbounded_channel();
-        let (outcome_tx, outcome_rx) = mpsc::unbounded_channel();
+        // One engine bundle owns every shared channel and Arc below; the
+        // flattened App fields are initialized as clones from it (Arc clones
+        // share the same underlying objects; channel senders/receivers and
+        // atomics are identical handles), so App and engine tasks observe
+        // the same state.
+        let (engine, download_tx) = crate::engine::EngineState::new();
 
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
@@ -157,24 +172,25 @@ impl App {
             popup_mode: PopupMode::None,
             download_path_input,
             pending_tree_download: None,
-            download_progress: Arc::new(Mutex::new(None)),
+            engine: engine.clone(),
+            download_progress: engine.download_progress.clone(),
             download_tx,
-            download_rx: Arc::new(Mutex::new(download_rx)),
-            download_queue: Arc::new(Mutex::new(crate::models::QueueState::new(0, 0))),
-            download_queue_items: Arc::new(Mutex::new(Vec::new())),
+            download_rx: engine.download_rx.clone(),
+            download_queue: engine.download_queue.clone(),
+            download_queue_items: engine.download_queue_items.clone(),
             incomplete_downloads: Vec::new(),
-            status_rx: Arc::new(Mutex::new(status_rx)),
-            status_tx,
-            download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
-            complete_downloads: Arc::new(Mutex::new(HashMap::new())),
-            verification_progress: Arc::new(Mutex::new(Vec::new())),
-            verification_queue: Arc::new(Mutex::new(Vec::new())),
-            verification_queue_size: Arc::new(AtomicUsize::new(0)),
-            verification_in_flight: Arc::new(AtomicUsize::new(0)),
-            verify_tx,
-            verify_rx: Arc::new(Mutex::new(verify_rx)),
-            outcome_tx,
-            outcome_rx: Arc::new(Mutex::new(outcome_rx)),
+            status_rx: engine.status_rx.clone(),
+            status_tx: engine.status_tx.clone(),
+            download_registry: engine.download_registry.clone(),
+            complete_downloads: engine.complete_downloads.clone(),
+            verification_progress: engine.verification_progress.clone(),
+            verification_queue: engine.verification_queue.clone(),
+            verification_queue_size: engine.verification_queue_size.clone(),
+            verification_in_flight: engine.verification_in_flight.clone(),
+            verify_tx: engine.verify_tx.clone(),
+            verify_rx: engine.verify_rx.clone(),
+            outcome_tx: engine.outcome_tx.clone(),
+            outcome_rx: engine.outcome_rx.clone(),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -203,34 +219,15 @@ impl App {
             cached_download_queue_items: Vec::new(),
             cached_verification_queue_bytes: 0,
             cached_verification_progress: Vec::new(),
-            verification_results: crate::verification::VerificationResultCounters::default(),
+            verification_results: engine.verification_results.clone(),
         }
     }
 
-    /// Bundle this app's shared handles into an engine state snapshot
-    /// (cheap: every field is an Arc or a channel endpoint clone). Used to
-    /// spawn the shared engine tasks and keeps the App the single owner of
-    /// the state the renderer reads.
+    /// Snapshot of this app's engine state (cheap: every field is an Arc or
+    /// a channel endpoint clone). Used to spawn the shared engine tasks and
+    /// keeps the App the single owner of the state the renderer reads.
     pub fn engine_state(&self) -> crate::engine::EngineState {
-        crate::engine::EngineState {
-            download_rx: self.download_rx.clone(),
-            download_queue: self.download_queue.clone(),
-            download_queue_items: self.download_queue_items.clone(),
-            download_progress: self.download_progress.clone(),
-            complete_downloads: self.complete_downloads.clone(),
-            status_tx: self.status_tx.clone(),
-            status_rx: self.status_rx.clone(),
-            verification_queue: self.verification_queue.clone(),
-            verification_queue_size: self.verification_queue_size.clone(),
-            verification_in_flight: self.verification_in_flight.clone(),
-            verification_progress: self.verification_progress.clone(),
-            download_registry: self.download_registry.clone(),
-            verify_tx: self.verify_tx.clone(),
-            verify_rx: self.verify_rx.clone(),
-            outcome_tx: self.outcome_tx.clone(),
-            outcome_rx: self.outcome_rx.clone(),
-            verification_results: self.verification_results.clone(),
-        }
+        self.engine.clone()
     }
 
     /// Synchronize options to global config atomics
