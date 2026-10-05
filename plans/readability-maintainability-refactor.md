@@ -209,7 +209,13 @@ All work lands as sequential commits on `refactor/readability-maintainability-re
 
 Group 1 (P0 + harness) complete at 298/0. Known residual: ~1% pre-existing e2e flake (unattributed; guard = name-and-rerun policy). Workers: local big-ai GLM-5.3-Flash (slices 1-6), remote zai glm-5.3 (H5 onward, after big-ai retirement).
 
-**Group 2 (Phase 1 foundations) complete at 326/0:**
+****Dual-model review (gemini-3.8 regression + opus design) — combined:**
+- P1 FIXED (7330d40): W1.5 sync rename retries blocked the Tokio worker in download_chunked; async twin restores legacy tokio-cooperative backoff (hf_cache keeps sync — its legacy was sync).
+- P2 accepted-as-documented: W0.9 purge on all-failed sync runs (declared hygiene improvement); git_blob_sha1 UnexpectedEof on stat/read mismatch (declared amendment; FIFO caveat noted).
+- Opus design debt folded into remaining queue: EnqueuePolicy sealing (private fields + discipline-enum collapse + explicit on_invalid + RegistryMode::None rename), engine.rs split, register_pending -> registry.rs, mark_complete merge, ui/app/app.rs inception fix, hf_cache.rs/utils.rs naming pass, events.rs W3.9 split. Deferred #5 (atomic registry save) surfaced as the cheapest now-enabled defect fix — owner decision at wrap-up.
+- Gemini verified-clean (with equivalence arguments): all 6 enqueue policies, registry op isolation/ordering, 18 block_on removals, RenderCache, ErrorCode + 5 dynamic sites, PathError strings, http_client, multipart corpus, filter/sort oracle, EventStream move, token precedence, poll drain ordering.
+
+Group 2 (Phase 1 foundations) complete at 326/0:**
 | Commit | Items | Notes |
 |---|---|---|
 | 7f48993 | W1.1 | paths::sanitize; 8 tests moved; importers repointed (engine.rs, ui/app/downloads.rs only — CLI/hf_cache importers were speculative); hf_cache wrapper documented |
