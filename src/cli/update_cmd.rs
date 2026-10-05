@@ -1,6 +1,6 @@
 //! `update` subcommand (self-update; see plans/self-update.md).
 
-use super::UpdateArgs;
+use super::args::UpdateArgs;
 use super::{EXIT_CHECKSUM, EXIT_FAILURE, EXIT_OK, EXIT_UPDATE_AVAILABLE};
 use crate::utils::format_size;
 use serde::Serialize;

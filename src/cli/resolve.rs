@@ -1,7 +1,7 @@
 //! File resolution (pure, unit-testable): selectors, resolve errors,
 //! and mapping an HF tree listing to the concrete file list.
 
-use super::DownloadArgs;
+use super::args::DownloadArgs;
 use crate::models::{ModelMetadata, QuantizationGroup};
 use std::collections::HashSet;
 
