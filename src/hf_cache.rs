@@ -422,9 +422,16 @@ fn create_symlink(target: &str, link: &Path) -> io::Result<()> {
 /// Creates a file symlink at `link` pointing at the relative `target`.
 /// Requires developer mode or elevated privileges on Windows; failure
 /// falls back to a copy in [`publish_one`] (R4).
+///
+/// The target's separators are converted to `\`: Windows stores reparse
+/// points verbatim and does **not** translate `/` in relative targets —
+/// links created with forward-slash targets exist but fail to resolve
+/// with ERROR_INVALID_NAME (os error 123), which is why symlinks are
+/// also disabled by default on Windows (see `cli::symlinks_enabled`).
 #[cfg(windows)]
 fn create_symlink(target: &str, link: &Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_file(target, link)
+    let windows_target = target.replace('/', "\\");
+    std::os::windows::fs::symlink_file(&windows_target, link)
 }
 
 /// No symlink support to attempt on other platforms — [`publish_one`]

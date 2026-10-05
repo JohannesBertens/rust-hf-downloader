@@ -1933,10 +1933,27 @@ fn env_flag_is_true(value: &str) -> bool {
 }
 
 /// Whether snapshot entries should be symlinks (R4): `--no-symlinks`
-/// forces the copy fallback, and `HF_HUB_DISABLE_SYMLINKS` defaults the
-/// flag off (E10, hub parity).
+/// forces the copy fallback, and `HF_HUB_DISABLE_SYMLINKS` disables them
+/// too (E10, hub parity). On Windows symlinks are **off by default** —
+/// hub's own degraded-cache default — because relative targets with `/`
+/// separators fail to resolve (os error 123) and creation needs developer
+/// mode; snapshots get real files instead.
 fn symlinks_enabled(no_symlinks_flag: bool, env_value: Option<&str>) -> bool {
-    !no_symlinks_flag && !env_value.is_some_and(env_flag_is_true)
+    if no_symlinks_flag || env_value.is_some_and(env_flag_is_true) {
+        return false;
+    }
+    // huggingface_hub's own default on Windows is the degraded no-symlink
+    // cache: relative symlink targets with `/` separators resolve as
+    // ERROR_INVALID_NAME on Windows, and creation needs developer mode.
+    // Mirror that default (snapshots get real files); Unix keeps symlinks.
+    #[cfg(windows)]
+    {
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 /// Absolute form of `path` without canonicalization's symlink resolution:
@@ -3942,15 +3959,23 @@ mod tests {
 
     #[test]
     fn symlink_policy_honors_flag_and_hub_env_var() {
+        // Default: symlinks on Unix, hub's degraded no-symlink cache on
+        // Windows (relative `/`-separator targets fail to resolve there).
+        #[cfg(unix)]
         assert!(symlinks_enabled(false, None));
+        #[cfg(windows)]
+        assert!(!symlinks_enabled(false, None));
         // --no-symlinks forces the copy fallback (R4).
         assert!(!symlinks_enabled(true, None));
-        // HF_HUB_DISABLE_SYMLINKS defaults the flag off (E10, hub parity).
+        // HF_HUB_DISABLE_SYMLINKS disables too (E10, hub parity).
         assert!(!symlinks_enabled(false, Some("1")));
         assert!(!symlinks_enabled(false, Some("true")));
         assert!(!symlinks_enabled(false, Some(" YES ")));
-        assert!(symlinks_enabled(false, Some("0")));
-        assert!(symlinks_enabled(false, Some("")));
+        #[cfg(unix)]
+        {
+            assert!(symlinks_enabled(false, Some("0")));
+            assert!(symlinks_enabled(false, Some("")));
+        }
         assert!(!symlinks_enabled(true, Some("1")));
     }
 

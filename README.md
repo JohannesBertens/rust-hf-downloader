@@ -556,7 +556,10 @@ network), handy for pointing other tools at the right place.
 
 The standard hub layout, byte-compatible with what `hf download` would
 produce (LFS blobs named by sha256, non-LFS by git blob sha1, snapshot
-entries as relative symlinks so the cache survives any mount point):
+entries as relative symlinks so the cache survives any mount point — on
+Windows, where relative symlink targets need developer mode and backslash
+separators, the tool automatically uses hub's no-symlink cache mode
+instead: snapshot entries are real files, byte-identical to read):
 
 ```text
 ~/.cache/huggingface/hub/                          # default cache root
@@ -590,7 +593,7 @@ rust-hf-downloader hf-cache sync <MODEL_ID> [FILE…]      # FILE = repo-relativ
     --include <GLOB>        # repeatable, hf-download semantics (fnmatch)
     --exclude <GLOB>        # repeatable
     --cache-dir <DIR>       # default: $HF_HUB_CACHE > $HF_HOME/hub > ~/.cache/huggingface/hub
-    --no-symlinks           # copy files into snapshots/ (hub fallback mode)
+    --no-symlinks           # copy files into snapshots/ (default on Windows)
     --force                 # re-download even if the blob already exists
     --dry-run               # list what would be fetched/skipped; no writes
     --token / --json / --quiet / --no-verify /
