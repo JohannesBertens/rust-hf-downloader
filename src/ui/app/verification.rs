@@ -1,3 +1,4 @@
+//! Verification pane: drains verify outcomes into the UI progress views.
 use super::state::App;
 use crate::models::*;
 

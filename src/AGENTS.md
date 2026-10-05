@@ -9,9 +9,9 @@ Purpose: equip coding agents to quickly understand how core modules interact so 
 Key runtime: async TUI app orchestrating HuggingFace model search, browsing, downloading, and SHA256 verification.
 
 Data flow (high level):
-- UI events (src/ui/app/events.rs) mutate App state (src/ui/app/state.rs)
-- Searches call API (src/api.rs) via HTTP client (src/http_client.rs)
-- Model results and caches live in App state (ApiCache in src/models.rs)
+- UI events (src/ui/app/events/ (mod.rs dispatch + keys.rs handlers)) mutate App state (src/ui/app/state.rs)
+- Searches call API (src/api/ (client.rs)) via HTTP client (src/http_client.rs)
+- Model results and caches live in App state (ApiCache in src/models/cache.rs)
 - Selecting a model loads GGUF quantizations or repository metadata/file tree
 - Downloads (src/download/, W3.8: mod.rs facade + private chunked.rs) stream in parallel with progress; registry (src/registry.rs) persists metadata
 - Verification worker (src/verification.rs) validates SHA256 post‑download
@@ -25,7 +25,7 @@ Auth model:
 
 Key modules
 
-1) models.rs
+1) models/ facade (api/ui/engine/options/cache submodules)
 - Core types: ModelInfo, ModelMetadata(+RepoFile/LfsInfo), FileTreeNode
 - Quantization: QuantizationInfo, QuantizationGroup
 - Download tracking: DownloadMetadata/Registry, DownloadStatus, ChunkProgress, DownloadProgress
@@ -37,7 +37,7 @@ Key modules
 - build_client_with_token(token, timeout) -> reqwest::Client (adds Bearer header only if token is Some(non-empty))
 - get_with_optional_token(url, token) -> Response (unauthenticated if token empty/None)
 
-3) api.rs
+3) api/ facade (client/quant/tree submodules)
 - fetch_models_filtered(query, sort_field, sort_direction, min_downloads, min_likes, token)
   • API supports only descending reliably; client-side sorts for Name or Ascending
   • Client-side filters: min_downloads, min_likes

@@ -1,4 +1,8 @@
-// Declare submodules
+//! The TUI application: `App` (state, construction), the crossterm event
+//! loop + mouse handling (this file), input dispatch (`events`), download
+//! initiation (`downloads`), search/detail loading (`search`), filter state
+//! machine (`filters`), render cache (`state`), verification views
+//! (`verification`). Was `app.rs` before W3.9 (module-inception fix).
 mod downloads;
 mod events;
 mod filters;

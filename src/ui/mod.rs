@@ -1,4 +1,4 @@
-// Declare modules
+//! TUI frontend: app state machine (`app`) and rendering (`render`).
 pub mod app;
 pub mod render;
 // File-tree navigation model (flatten/toggle/count) shared by the renderer

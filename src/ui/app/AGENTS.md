@@ -37,7 +37,7 @@ Files and roles
   • Step tables DOWNLOAD_STEPS / LIKE_STEPS live here; off-table values (e.g. config-loaded 42) resolve to index 0
   • Seeded from AppOptions::default_* via from_options; saved back by App::save_filter_settings — the config serde surface stays AppOptions (byte-identical config files)
 
-- models.rs (search + model-detail loading; renamed search.rs in W3.6)
+- search.rs (search + model-detail loading; was models.rs before W3.6)
   • search_models: cache-first on ApiCache.searches; calls api::fetch_models_filtered; sets loading/status (this searches-map site keeps its inline Entry insert: SearchKey keying + per-path exact-match post-filtering and status wording make it a poor fit for the model-keyed helper)
   • show_model/quant/file_details: updates status/selection info lines
   • spawn_load_quantizations: loads metadata via ApiCache::get_or_fetch (W4.11 — one helper for the read-check → unlocked fetch → Entry-insert pattern; lock is never held across a fetch, failures are never cached); chooses mode:

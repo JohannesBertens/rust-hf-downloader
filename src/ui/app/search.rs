@@ -1,3 +1,6 @@
+//! Search + model-detail loading: query the hub, load quantizations and
+//! file trees into the caches (`ApiCache::get_or_fetch`, W4.11), and drive
+//! the background prefetch of adjacent models. Was `models.rs` before W3.6.
 use super::state::App;
 use crate::api::{build_file_tree, classify_quantizations, fetch_model_metadata};
 use crate::models::ModelDisplayMode;

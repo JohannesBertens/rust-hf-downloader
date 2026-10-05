@@ -29,19 +29,19 @@ src/
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
 │   └── tests.rs      # cli::tests — insta snapshots in src/cli/snapshots/
 ├── engine/           # Shared download engine (facade + private submodules, models/ precedent): mod.rs (EngineState + QueuedDownload + auth-status contract), enqueue.rs (EngineState::enqueue + sealed EnqueuePolicy knob types + characterization tests), workers.rs (spawn_manager / spawn_verification_worker + ManagerHandle drain contract), bootstrap.rs (bootstrap + seed_registry_mirror)
-├── models.rs         # Data structures and types (incl. FileOutcome / VerifyOutcome)
+├── models/           # Shared data types behind a facade (private submodules + pub use, W3.1): api.rs (HF DTOs), ui.rs (TUI enums + FileTreeNode), engine.rs (progress/queue/verification types incl. FileOutcome/VerifyOutcome + QueueState impl), options.rs (AppOptions — the config schema), cache.rs (ApiCache + aliases)
 ├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
 ├── cache_layout.rs   # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock (named cache_layout to disambiguate from cli/hf_cache/, the hf-cache command group)
 ├── patterns.rs       # Python-fnmatch parity glob matcher (`--include`/`--exclude`, `--for vllm` preset table)
 ├── update.rs         # Self-update (v2.10.0): latest.json manifest check, SHA256-verified asset download, self_replace swap; RHD_UPDATE_BASE override
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
-├── api.rs            # HuggingFace API client with auth; api_base() honors HF_ENDPOINT
+├── api/              # HuggingFace API client behind a facade (W3.2): client.rs (fetch + pure filter_models/sort_models W3.3 + auth; api_base() honors HF_ENDPOINT), quant.rs (GGUF classification + unified multipart parsing), tree.rs (file-tree building)
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5)
 ├── registry.rs       # Download metadata management + typed mutation ops (W2.4): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save; pure disk ops — the mismatch engine-mirror patch lives at the verification caller; see registry.rs module docs)
 ├── download/         # Download transport with auth; returns FileOutcome (v0.9.5). Facade (mod.rs) holds start_download = prepare_download_paths / handle_existing_file / execute_download_with_retry phases (W5.1a), retry glue, and the global DOWNLOAD_CONFIG/RATE_LIMITER atomics; private chunked.rs (W3.8) holds download_chunked = probe_file_size + spawn_chunk_tasks/wait_for_chunks phases (W5.1b), the per-chunk worker (bundled ChunkContext, W5.6), and chunk-size math. Error paths pinned by tests/download_failures.rs; the cross-chunk byte counter is an Arc<AtomicU64> (single-counter audit), the speed-pacing Instant+marker pair stays mutexed (compound)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
-├── utils.rs          # Helper functions
+├── utils.rs          # Exactly two helper families (slimmed W-final): streaming digests (stream_file_digest/sha256_file) + atomic rename with retry (sync + tokio twin). All human formatting lives in fmt.rs
 └── ui/
     ├── mod.rs        # UI module exports
     ├── app/          # App module (W3.9: mod.rs — no app.rs indirection): run loop + draw + crossterm event loop + mouse click/scroll/hover handlers + submodule re-exports (App)
@@ -155,7 +155,7 @@ Check `README.md` for more information.
 - **Filter State**: `src/ui/app/state.rs` - sort_field, sort_direction, filter_min_*
 - **Filter Logic**: `src/ui/app/events/` (keys.rs) - keyboard controls and presets; `src/ui/app/filters.rs` - filter state and mutation rules
 - **Filter UI**: `src/ui/render/toolbar.rs` - toolbar rendering with focus highlighting
-- **Filter API**: `src/api.rs` - fetch_models_filtered() with client-side filtering
+- **Filter API**: `src/api/client.rs` - fetch_models_filtered() with pure client-side filter_models/sort_models (W3.3)
 - **Filter Config**: `src/config.rs` - default_sort_*, default_min_* persistence
 
 ### Mouse Integration System

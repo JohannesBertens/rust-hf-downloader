@@ -45,7 +45,7 @@ render/ (mod.rs is the facade)
 
 Design notes
 - Rendering functions never mutate App; they read params built in the app/mod.rs run loop and RETURN hit-rects (W5.2: no &mut out-params — the render pass is pure; App::draw assigns the returned MouseAreas)
-- Large lists: keep allocations local; format helpers in utils.rs
+- Large lists: keep allocations local; format helpers in crate::fmt (fmt.rs)
 - Tree operations: ui/tree.rs is the single home for the navigation model
   • flatten_tree_for_navigation, toggle_node_expansion, count_tree_files
   • render draws the flattened list; app/events + app/downloads consume the same helpers
@@ -53,7 +53,7 @@ Design notes
 Where to add UI features
 - New pane/section → add a pure renderer in the owning render/<panel>.rs (new panel = new submodule) and pass data via the matching RenderParams group (extend that panel's context struct; register its hit-rect left-to-right after the Results list)
 - New status or badges → augment spans in list or right panels
-- New popup → add render_* in render/popups.rs (options dialog: render/options_popup.rs) and the key handler in events/keys.rs, popup state in models.rs, and mouse dispatch (if any) in app/mod.rs
+- New popup → add render_* in render/popups.rs (options dialog: render/options_popup.rs) and the key handler in events/keys.rs, popup state in models/ui.rs (enums) + render/options_popup.rs (OptionsDialogState), and mouse dispatch (if any) in app/mod.rs
 - New options field → append an OptionsFieldSpec to OPTIONS_FIELDS (render/options_popup.rs) plus a modify_option arm keyed by its OptionsFieldId; the cursor bound and rendering follow the table automatically
 
 Quality

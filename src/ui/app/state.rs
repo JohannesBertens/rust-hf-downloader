@@ -1,3 +1,7 @@
+//! App state: the `App` struct, its construction, and the non-blocking
+//! render cache (`RenderCache` + [`snapshot`] helper). Engine-owned state
+//! lives on `App::engine` (one `EngineState`, W2.3); only TUI concerns and
+//! `download_tx` are direct fields.
 use crate::models::*;
 use parking_lot::RwLock;
 use ratatui::widgets::ListState;

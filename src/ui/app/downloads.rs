@@ -1,3 +1,7 @@
+//! Download initiation: the confirm flows (quant group, repository, tree)
+//! and resume — thin gather-ers over `EngineState::enqueue` with per-flow
+//! policies (W2.1/W4.4). Observable behavior pinned byte-for-byte by the
+//! characterization tests at the bottom of this file.
 use super::state::App;
 use crate::api::fetch_multipart_sha256s;
 use crate::engine::{EnqueueOutcome, EnqueuePolicy, QueuedDownload};

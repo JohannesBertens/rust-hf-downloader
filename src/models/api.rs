@@ -37,6 +37,7 @@ pub struct ModelMetadata {
     /// [`crate::api::resolve_revision_sha`].
     #[serde(default)]
     #[allow(dead_code)]
+    // 2026-10 (R4): serde-only DTO field — parsed for schema completeness, no reader yet
     pub sha: Option<String>,
 }
 
@@ -50,6 +51,7 @@ pub struct ModelCardData {
     pub language: Option<Vec<String>>,
     #[serde(default)]
     #[allow(dead_code)]
+    // 2026-10 (R4): serde-only DTO field — parsed for schema completeness, no reader yet
     pub datasets: Option<Vec<String>>,
 }
 
@@ -62,9 +64,11 @@ pub struct RepoFile {
     /// blob name. Absent on plain siblings payloads.
     #[serde(default)]
     #[allow(dead_code)]
+    // 2026-10 (R4): serde-only DTO field — parsed for schema completeness, no reader yet
     pub oid: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
+    // 2026-10 (R4): serde-only DTO field — parsed for schema completeness, no reader yet
     pub lfs: Option<LfsInfo>, // Reuse existing LfsInfo struct
 }
 

@@ -9,12 +9,16 @@ use std::sync::Arc;
 pub struct ChunkProgress {
     pub chunk_id: usize,
     #[allow(dead_code)]
+    // 2026-10 (R4): serde round-trips full ChunkProgress; no reader yet — revisit with the HUD chunk-map detail view
     pub start: u64,
     #[allow(dead_code)]
+    // 2026-10 (R4): serde round-trips full ChunkProgress; no reader yet — revisit with the HUD chunk-map detail view
     pub end: u64,
-    #[allow(dead_code)] // populated for future detail view; HUD uses the bitmap
+    #[allow(dead_code)]
+    // 2026-10 (R4): populated for a future detail view; the HUD chunk map reads the bitmap instead
     pub downloaded: u64,
-    #[allow(dead_code)] // populated for future detail view; HUD uses the bitmap
+    #[allow(dead_code)]
+    // 2026-10 (R4): populated for a future detail view; the HUD chunk map reads the bitmap instead
     pub total: u64,
     pub speed_mbps: f64,
     pub is_active: bool,

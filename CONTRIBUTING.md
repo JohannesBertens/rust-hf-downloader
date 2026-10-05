@@ -127,7 +127,7 @@ Fixes: #123
 
 ### UI Changes
 
-- Follow existing patterns in `src/ui/render.rs`
+- Follow existing patterns in `src/ui/render/`
 - Update AGENTS.md if adding new modules or significant logic
 - Test mouse and keyboard interactions
 
@@ -140,8 +140,8 @@ Fixes: #123
 ### Configuration Changes
 
 - Update `src/config.rs` for persisted options
-- Update `src/models.rs` AppOptions struct
-- Update TUI options screen: field handling in `src/ui/app/events.rs` (`modify_option`, `handle_options_popup_input`) and rendering in `src/ui/render.rs` (`render_options_popup`)
+- Update `src/models/options.rs` AppOptions struct
+- Update TUI options screen: field handling in `src/ui/app/events/` (`modify_option`, `handle_options_popup_input`) and rendering in `src/ui/render/options_popup.rs`
 
 ### Documentation
 
