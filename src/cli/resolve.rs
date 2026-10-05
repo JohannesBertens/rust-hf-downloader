@@ -2,7 +2,8 @@
 //! and mapping an HF tree listing to the concrete file list.
 
 use super::args::DownloadArgs;
-use crate::models::{ModelMetadata, QuantizationGroup};
+use super::events::{Event, FileDto};
+use crate::models::{ModelMetadata, QuantizationGroup, RepoFile};
 use std::collections::HashSet;
 
 /// A concrete file selected for download.
@@ -11,6 +12,20 @@ pub struct FileSpec {
     pub filename: String,
     pub size_bytes: u64,
     pub sha256: Option<String>,
+}
+
+impl From<&RepoFile> for FileSpec {
+    /// The single sibling mapping (W4.9), shared by `resolve_files'`
+    /// available list and hf-cache sync's `tree_file_dtos`: filename
+    /// verbatim, tree size defaulting to 0 when absent, sha256 from the
+    /// LFS oid only (non-LFS git blob oids are not SHA256s).
+    fn from(f: &RepoFile) -> Self {
+        Self {
+            filename: f.rfilename.clone(),
+            size_bytes: f.size.unwrap_or(0),
+            sha256: f.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+        }
+    }
 }
 
 /// What the user asked for.
@@ -54,15 +69,30 @@ pub enum ResolveError {
     },
 }
 
-impl ResolveError {
-    pub(super) fn code(&self) -> &'static str {
+/// Selection failures across the CLI share one wire shape (W4.9): a
+/// stable `code`, a one-line human `message`, and — assembled by the
+/// caller — the `available` file list. Implemented by `download`'s
+/// [`ResolveError`] and `hf-cache sync`'s
+/// [`crate::cli::hf_cache::SyncSelectionError`];
+/// [`selection_error_event`] is the single emission path (both surfaces
+/// exit `EXIT_USAGE` after emitting).
+pub(in crate::cli) trait SelectionError {
+    /// Stable wire code (`ambiguous`, `no_files_match`,
+    /// `unknown_preset`, `empty_selection`).
+    fn code(&self) -> &'static str;
+    /// One-line human message.
+    fn message(&self) -> String;
+}
+
+impl SelectionError for ResolveError {
+    fn code(&self) -> &'static str {
         match self {
             ResolveError::Ambiguous { .. } => "ambiguous",
             ResolveError::NoFilesMatch { .. } => "no_files_match",
         }
     }
 
-    pub(super) fn message(&self) -> String {
+    fn message(&self) -> String {
         match self {
             ResolveError::Ambiguous { available } => format!(
                 "model has {} downloadable file(s); specify --quant <TYPE>, --file <PATH>, or --all",
@@ -72,6 +102,22 @@ impl ResolveError {
                 format!("no downloadable file matches {}", selector)
             }
         }
+    }
+}
+
+/// The one selection-error emission (W4.9): identical `Event::Error`
+/// shape for `download` and `hf-cache sync`. The `available` payload
+/// differs per surface (download: the size-filtered resolve list as
+/// DTOs; sync: the full tree DTOs) and stays the caller's input so the
+/// wire bytes cannot drift.
+pub(in crate::cli) fn selection_error_event<E: SelectionError>(
+    err: &E,
+    available: Vec<FileDto>,
+) -> Event {
+    Event::Error {
+        code: err.code().to_string(),
+        message: err.message(),
+        available: Some(available),
     }
 }
 
@@ -91,11 +137,7 @@ pub fn resolve_files(
         .siblings
         .iter()
         .filter(|f| f.size.is_some() && !f.rfilename.ends_with('/'))
-        .map(|f| FileSpec {
-            filename: f.rfilename.clone(),
-            size_bytes: f.size.unwrap_or(0),
-            sha256: f.lfs.as_ref().map(|lfs| lfs.oid.clone()),
-        })
+        .map(FileSpec::from)
         .collect();
 
     let mut picked: Vec<FileSpec> = match selector {

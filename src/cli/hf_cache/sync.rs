@@ -21,7 +21,7 @@ use super::{select_sync_files, tree_file_dtos, SelectionMode};
 use crate::cli::args::{valid_model_id, HfCacheSyncArgs};
 use crate::cli::events::{ErrorCode, Event, FileDto, Summary};
 use crate::cli::report::Reporter;
-use crate::cli::resolve::FileSpec;
+use crate::cli::resolve::{selection_error_event, FileSpec};
 use crate::cli::run::{
     effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
     queue_run, RunTally,
@@ -258,11 +258,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     ) {
         Ok(selection) => selection,
         Err(err) => {
-            reporter.emit(&Event::Error {
-                code: err.code().to_string(),
-                message: err.message(),
-                available: Some(tree_file_dtos(&metadata)),
-            });
+            reporter.emit(&selection_error_event(&err, tree_file_dtos(&metadata)));
             return EXIT_USAGE;
         }
     };

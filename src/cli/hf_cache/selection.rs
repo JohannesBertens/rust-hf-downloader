@@ -7,6 +7,7 @@
 //! [`super::sync`].
 
 use crate::cli::events::FileDto;
+use crate::cli::resolve::{FileSpec, SelectionError};
 use crate::models::ModelMetadata;
 
 /// How a sync's file selection was derived (§2.2) — `WholeRepo` triggers
@@ -39,11 +40,12 @@ pub enum SyncSelectionError {
     EmptySelection { available: Vec<String> },
 }
 
-impl SyncSelectionError {
-    // `pub(in crate::cli)` rather than `pub(super)`: the readers live in the
-    // sibling `sync` submodule *and* in `cli/tests.rs`, i.e. everywhere the
-    // single pre-split module reached.
-    pub(in crate::cli) fn code(&self) -> &'static str {
+impl SelectionError for SyncSelectionError {
+    // The impl is `pub(in crate::cli)`-visible through the trait; the
+    // trait itself lives in `cli/resolve.rs` next to `ResolveError` so
+    // both selection vocabularies share the one emission path
+    // (`resolve::selection_error_event`, W4.9).
+    fn code(&self) -> &'static str {
         match self {
             SyncSelectionError::MissingPositional { .. } => "no_files_match",
             SyncSelectionError::UnknownPreset { .. } => "unknown_preset",
@@ -51,7 +53,7 @@ impl SyncSelectionError {
         }
     }
 
-    pub(in crate::cli) fn message(&self) -> String {
+    fn message(&self) -> String {
         match self {
             SyncSelectionError::MissingPositional { path, .. } => {
                 format!("file not present in repository: {path}")
@@ -161,16 +163,16 @@ pub fn select_sync_files(
 }
 
 /// FileDto listing of a repo tree (selection-error `available` payloads,
-/// mirroring `resolve_files`' ambiguity lists).
-pub(super) fn tree_file_dtos(metadata: &ModelMetadata) -> Vec<FileDto> {
+/// mirroring `resolve_files`' ambiguity lists through the shared
+/// `FileSpec::from(&RepoFile)` mapping, W4.9).
+//
+// `pub(in crate::cli)` rather than `pub(super)`: read by the sibling
+// `sync` submodule *and* pinned by `cli/tests.rs`'s mapping-fixture test.
+pub(in crate::cli) fn tree_file_dtos(metadata: &ModelMetadata) -> Vec<FileDto> {
     metadata
         .siblings
         .iter()
         .filter(|f| !f.rfilename.ends_with('/'))
-        .map(|f| FileDto {
-            filename: f.rfilename.clone(),
-            size_bytes: f.size.unwrap_or(0),
-            sha256: f.lfs.as_ref().map(|lfs| lfs.oid.clone()),
-        })
+        .map(|f| FileDto::from(&FileSpec::from(f)))
         .collect()
 }

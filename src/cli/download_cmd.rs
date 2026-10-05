@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use super::args::{valid_model_id, DownloadArgs};
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
-use super::resolve::{parse_selector, resolve_files, Selector};
+use super::resolve::{parse_selector, resolve_files, selection_error_event, Selector};
 use super::run::{
     effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
     queue_run, RunTally,
@@ -73,11 +73,10 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     let files = match resolve_files(&metadata, &quants, &selector) {
         Ok(files) => files,
         Err(err) => {
-            reporter.emit(&Event::Error {
-                code: err.code().to_string(),
-                message: err.message(),
-                available: Some(err.available().iter().map(FileDto::from).collect()),
-            });
+            reporter.emit(&selection_error_event(
+                &err,
+                err.available().iter().map(FileDto::from).collect(),
+            ));
             return EXIT_USAGE;
         }
     };

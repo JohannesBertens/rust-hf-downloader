@@ -10,14 +10,16 @@ use super::args::{
 };
 use super::events::{Event, FileDto, FileStatus, OverallProgress, Summary};
 use super::hf_cache::{
-    absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
-    SyncSelectionError,
+    absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, tree_file_dtos,
+    SelectionMode, SyncSelectionError,
 };
 use super::report::{
     format_file_progress, format_overall_progress, verification_heartbeat_line, ProgressMode,
     Reporter,
 };
-use super::resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};
+use super::resolve::{
+    parse_selector, resolve_files, FileSpec, ResolveError, SelectionError, Selector,
+};
 use super::search_cmd::effective_search_params;
 use super::{Cli, Command};
 
@@ -105,6 +107,94 @@ fn resolve_quant_miss_lists_available() {
     let err = resolve_files(&metadata, &[], &Selector::Quant("Q8_0".to_string())).unwrap_err();
     assert!(matches!(err, ResolveError::NoFilesMatch { .. }));
     assert_eq!(err.code(), "no_files_match");
+}
+
+#[test]
+fn file_spec_from_repo_file_pins_the_sibling_mapping() {
+    // W4.9 collapsed the twin sibling-mapping loops (resolve_files'
+    // `available` and hf-cache selection's `tree_file_dtos`) into one
+    // `From<&RepoFile> for FileSpec`. Pin the mapped values — including
+    // size:None → 0 and lfs:None → sha256:None — and that both consumers
+    // agree on every non-directory fixture.
+    let lfs = |oid: &str| crate::models::LfsInfo {
+        oid: oid.to_string(),
+        size: 123,
+        pointer_size: 132,
+    };
+    let repo_file = |name: &str, size: Option<u64>, lfs: Option<crate::models::LfsInfo>| {
+        crate::models::RepoFile {
+            rfilename: name.to_string(),
+            size,
+            oid: None,
+            lfs,
+        }
+    };
+    let with_lfs = repo_file("model.Q4_K_M.gguf", Some(4_947), Some(lfs("cafebabe")));
+    let bare = repo_file("plain.bin", None, None);
+    let sized_no_lfs = repo_file("non-lfs.safetensors", Some(42), None);
+
+    assert_eq!(
+        FileSpec::from(&with_lfs),
+        FileSpec {
+            filename: "model.Q4_K_M.gguf".to_string(),
+            size_bytes: 4_947,
+            sha256: Some("cafebabe".to_string()),
+        }
+    );
+    assert_eq!(
+        FileSpec::from(&bare),
+        FileSpec {
+            filename: "plain.bin".to_string(),
+            size_bytes: 0,
+            sha256: None,
+        }
+    );
+    assert_eq!(
+        FileSpec::from(&sized_no_lfs),
+        FileSpec {
+            filename: "non-lfs.safetensors".to_string(),
+            size_bytes: 42,
+            sha256: None,
+        }
+    );
+
+    // The hf-cache selection payload (tree_file_dtos) is the same mapping
+    // on the wire (FileDto::from(&FileSpec::from(f))), directory markers
+    // filtered.
+    let metadata = ModelMetadata {
+        model_id: "a/b".to_string(),
+        library_name: None,
+        pipeline_tag: None,
+        card_data: None,
+        siblings: vec![
+            with_lfs,
+            bare,
+            sized_no_lfs,
+            repo_file("subdir/", Some(1), None),
+        ],
+        tags: Vec::new(),
+        sha: None,
+    };
+    assert_eq!(
+        tree_file_dtos(&metadata),
+        vec![
+            FileDto {
+                filename: "model.Q4_K_M.gguf".to_string(),
+                size_bytes: 4_947,
+                sha256: Some("cafebabe".to_string()),
+            },
+            FileDto {
+                filename: "plain.bin".to_string(),
+                size_bytes: 0,
+                sha256: None,
+            },
+            FileDto {
+                filename: "non-lfs.safetensors".to_string(),
+                size_bytes: 42,
+                sha256: None,
+            },
+        ]
+    );
 }
 
 #[test]
