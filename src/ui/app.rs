@@ -149,14 +149,10 @@ impl App {
             verified_fail,
         };
 
-        // Reserve a strip above the status bar; never steal rows the base
-        // layout needs (3 toolbar + 10 main + 12 bottom + 4 status = 29)
-        let base_layout_rows = 29u16;
-        let max_hud = frame.area().height.saturating_sub(base_layout_rows);
-        let hud_height = crate::ui::render::activity_hud_height(&hud_params).min(max_hud);
-
-        // Render main UI
-        crate::ui::render::render_ui(
+        // Main UI. render_ui owns the vertical layout (W4.10): it clamps
+        // the desired HUD strip height against the base layout and returns
+        // the reserved strip rect.
+        let hud_rect = crate::ui::render::render_ui(
             frame,
             crate::ui::render::RenderParams {
                 input: &self.input,
@@ -185,20 +181,14 @@ impl App {
                 panel_areas: &mut self.panel_areas,
                 hovered_panel: &self.hovered_panel,
                 filter_areas: &mut self.filter_areas,
-                hud_height,
+                hud_height: crate::ui::render::activity_hud_height(&hud_params),
             },
         );
 
-        // Render the activity HUD into the strip reserved above the status
-        // bar (render_ui shrank the main content accordingly)
-        if hud_height > 0 {
-            let hud_area = ratatui::layout::Rect {
-                x: 0,
-                y: frame.area().height.saturating_sub(4 + hud_height),
-                width: frame.area().width,
-                height: hud_height,
-            };
-            crate::ui::render::render_activity_hud(frame, hud_area, &hud_params);
+        // Render the activity HUD into the strip render_ui reserved above
+        // the status bar (render_ui shrank the main content accordingly)
+        if hud_rect.height > 0 {
+            crate::ui::render::render_activity_hud(frame, hud_rect, &hud_params);
         }
 
         // Render popups (must be last to appear on top)

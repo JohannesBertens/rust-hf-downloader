@@ -158,7 +158,8 @@ impl UiFixture {
 /// draw_render_ui` (no error/metadata/file-tree, GGUF mode, no
 /// filters) but parameterized on focus, hover and HUD height, then
 /// run `overlay` in the SAME draw closure — mirrors the app loop,
-/// where popups and the HUD render on top of the live UI.
+/// where popups and the HUD render on top of the live UI. Returns
+/// the HUD strip rect render_ui reserved (W4.10).
 #[allow(clippy::too_many_arguments)]
 fn draw_ui_with_overlay(
     terminal: &mut Terminal<TestBackend>,
@@ -169,7 +170,7 @@ fn draw_ui_with_overlay(
     status: &str,
     selection_info: &str,
     overlay: impl FnOnce(&mut Frame),
-) {
+) -> Rect {
     let error: Option<String> = None;
     let model_metadata: Option<ModelMetadata> = None;
     let file_tree: Option<FileTreeNode> = None;
@@ -178,9 +179,10 @@ fn draw_ui_with_overlay(
     let mut panel_areas = Vec::new();
     let mut filter_areas = Vec::new();
 
+    let mut hud_rect = Rect::default();
     terminal
         .draw(|frame| {
-            render_ui(
+            hud_rect = render_ui(
                 frame,
                 RenderParams {
                     input: &fixture.input,
@@ -215,6 +217,7 @@ fn draw_ui_with_overlay(
             overlay(frame);
         })
         .expect("failed to draw UI");
+    hud_rect
 }
 
 fn draw_ui(
@@ -502,5 +505,90 @@ fn hud_threshold_boundary_full_and_clamped() {
             },
         );
         snap_ui(&format!("hud_threshold_{label}"), &terminal);
+    }
+}
+
+#[test]
+fn hud_strip_rect_threshold_agreement() {
+    // W4.10: the HUD strip geometry used to be computed twice — App::draw's
+    // manual math (base_layout_rows 29; y = height - 4 - hud_height) and
+    // render_ui's Constraint list implied the same rect. render_ui now owns
+    // the layout and returns the strip rect; this test pins that rect
+    // against the historical formula at the visibility threshold (natural
+    // height 4 fixture -> boundary at 29 + 4 = 33 rows), proving agreement
+    // by construction.
+    let dl = DownloadProgress {
+        model_id: "meta-llama/Llama-3.1-8B".to_string(),
+        filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+        downloaded: 1_230_465_024,
+        total: 4_921_860_096,
+        speed_mbps: 32.8,
+        chunks: Vec::new(),
+        verifying: false,
+        num_chunks: 8,
+        chunk_completed: vec![true, true, true, false, false, false, false, false],
+    };
+    let progress = Some(dl);
+    let data = ActivityHudData {
+        download_progress: &progress,
+        queue_size: 0,
+        queue_bytes: 0,
+        queue_items: &[],
+        verification_progress: &[],
+        verification_queue_size: 0,
+        verification_queue_bytes: 0,
+        verified_ok: 0,
+        verified_fail: 0,
+    };
+    assert_eq!(activity_hud_height(&data), 4);
+
+    for (label, height, expected_rect) in [
+        ("below threshold", 32u16, Rect::new(0, 25, 100, 3)),
+        ("at threshold", 33, Rect::new(0, 25, 100, 4)),
+        ("above threshold", 34, Rect::new(0, 26, 100, 4)),
+    ] {
+        // Pinned formula (the historical App::draw math, kept here as the
+        // single copy): clamp the natural height against the reserved base
+        // rows, then place the strip manually above the 4-row status bar.
+        let hud_height = activity_hud_height(&data).min(height.saturating_sub(29));
+        let pinned = Rect::new(0, height - 4 - hud_height, 100, hud_height);
+        assert_eq!(
+            pinned, expected_rect,
+            "pinned formula at {label} (h={height})"
+        );
+
+        // render_ui owns the layout since W4.10: it takes the DESIRED
+        // (uncapped) height, clamps it against the base layout itself and
+        // returns the reserved strip rect — which must match the pin.
+        let mut fixture = UiFixture::with_selection();
+        let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+        let returned = draw_ui_with_overlay(
+            &mut terminal,
+            &mut fixture,
+            FocusedPane::Models,
+            None,
+            activity_hud_height(&data), // desired, uncapped — render_ui clamps
+            "Downloading Llama-3.1-8B-Q4_K_M.gguf",
+            "",
+            |_| {},
+        );
+        assert_eq!(returned, pinned, "render_ui rect at {label} (h={height})");
+
+        // And an independent re-split of the historical Constraint list
+        // still lands on the same rect (ratatui geometry re-pin).
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(12),
+                Constraint::Length(returned.height),
+                Constraint::Length(4),
+            ])
+            .split(Rect::new(0, 0, 100, height));
+        assert_eq!(
+            chunks[3], returned,
+            "constraint split at {label} (h={height})"
+        );
     }
 }

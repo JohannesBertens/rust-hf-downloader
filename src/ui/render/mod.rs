@@ -97,11 +97,26 @@ pub struct RenderParams<'a> {
     pub hovered_panel: &'a Option<FocusedPane>,
     // Filter toolbar click areas
     pub filter_areas: &'a mut Vec<(usize, Rect)>,
-    // Activity HUD strip height reserved above the status bar (0 = hidden)
+    // Activity HUD: DESIRED strip height above the status bar (the
+    // natural, uncapped activity_hud_height; render_ui clamps it against
+    // the base layout and returns the reserved strip rect — 0 = hidden)
     pub hud_height: u16,
 }
 
-pub fn render_ui(frame: &mut Frame, params: RenderParams) {
+/// Rows the base layout needs besides the HUD strip: 3 toolbar + 10
+/// main content (Min) + 12 bottom panels + 4 status bar. The desired HUD
+/// height is clamped against this budget so it never steals base-layout
+/// rows — W4.10 single-homed here (next to the Constraint list it
+/// guards); it previously lived in `App::draw` as `base_layout_rows = 29`
+/// with a second, manual strip-rect computation.
+const BASE_LAYOUT_ROWS: u16 = 3 + 10 + 12 + 4;
+
+/// Render the main UI and return the reserved Activity HUD strip rect
+/// (the strip directly above the status bar; zero height when idle or
+/// when the terminal is too short for the base layout). `App::draw`
+/// renders the activity HUD into the returned rect — one owner for the
+/// vertical layout since W4.10.
+pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
     let RenderParams {
         input,
         input_mode,
@@ -135,6 +150,10 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
     // Clear previous panel and filter areas
     panel_areas.clear();
     filter_areas.clear();
+
+    // Clamp the desired HUD strip so it never steals rows the base
+    // layout needs (see BASE_LAYOUT_ROWS); the strip rect is chunks[3].
+    let hud_height = hud_height.min(frame.area().height.saturating_sub(BASE_LAYOUT_ROWS));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -276,6 +295,11 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(status_widget, chunks[4]);
+
+    // The reserved HUD strip: the rect App::draw renders the activity HUD
+    // into. Whenever it is non-empty the constraints fit the terminal
+    // exactly, so it is always the rows directly above the status bar.
+    chunks[3]
 }
 
 /// Border style of a panel: yellow while the pane holds keyboard focus
