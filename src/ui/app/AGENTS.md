@@ -20,21 +20,15 @@ Files and roles
   • Display flags: needs_search_models, needs_load_quantizations to defer heavy work until after a frame draw
   • File tree state for Standard mode; display_mode is shared to switch GGUF vs Standard
 
-- events.rs
-  • App::on_key_event → dispatch by PopupMode and InputMode
+- events/ (W3.9 split: mod.rs facade + private keys.rs)
+  • App::on_key_event (mod.rs) → dispatch by PopupMode and InputMode; routes to keys.rs handlers
+  • keys.rs owns the per-context key maps: Normal mode ('/'-search, 'o'-options, 'd'-download, 'v'-verify, 'q'-quit, 's'/'S' sort, 'f'/'+/-'/'r' filters, presets 1/2/3/4, Tab/Left/Right focus, j/k/arrows navigation, Enter details) and the five popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError; would_change_settings lives here too (preset-key helper)
+  • mod.rs keeps the shared, non-keyboard-specific surface: navigation (models next/previous; quantization-group, quantization-file and file-tree cursors sharing one free fn advance(state, len, forward) (W4.6) — wrap-around both ends, unselected lists pick index 0 in both directions, len 0 no-op; the len×selection×direction tables in mod tests pin the contract), focus_pane/toggle_focus/toggle_quant_subfocus, file-tree expansion, modify_focused_filter/apply_filter_preset/save_filter_settings, and modify_option
   • 'd'/'v' key guards use FocusedPane::accepts_download()/accepts_verify() (defined next to the enum in models/ui.rs; pane sets pinned by unit test there)
-  • Normal mode keys:
-    - '/' open Search popup; 'o' Options; 'd' Download; 'v' Verify (on selection); 'q' Quit
-    - 's' cycle SortField; 'S' (Shift+s) toggle sort direction
-    - 'f' focus next filter field; '+'/'-' modify focused filter; 'r' reset
-    - Presets 1/2/3/4 → NoFilters/Popular/HighlyRated/Recent
-    - Tab toggles pane focus; Left/Right switches quant subfocus
-    - Enter: show details or toggle depending on pane (incl. file tree expansion)
-  • Popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError
   • Options dialog dispatch is id-keyed (W4.7): the cursor bound derives from the OPTIONS_FIELDS table length (16 rows → last index 15), Enter-edit matches OptionsFieldId::DefaultDirectory/HfToken, and modify_option matches the field ids with the per-field step/clamp/toggle bodies kept arm-by-arm (they differ per field); selected_field is serde-skipped so it can never exceed the table via stale config
-  • Navigation: models keep next/previous; the quantization-group, quantization-file and file-tree cursors share one free fn advance(state, len, forward) (W4.6) — wrap-around both ends, unselected lists pick index 0 in both directions, len 0 no-op; the len×selection×direction tables in mod tests pin the contract
   • Filter preset application and persistence (Ctrl+S saves as defaults)
-  • Filter VALUE mutations only route through App.filters (ui/app/filters.rs); events.rs owns key dispatch, status wording, and write order
+  • Filter VALUE mutations only route through App.filters (ui/app/filters.rs); events/ owns key dispatch, status wording, and write order
+  • Mouse handling is NOT in events/ — handle_mouse_*/hover live in ui/app/mod.rs next to the crossterm loop
 
 - filters.rs (W4.5)
   • FilterState { sort_field, sort_direction, min_downloads, min_likes } — the single home of the four filter values and their mutation rules
@@ -78,6 +72,6 @@ Safety and correctness notes
 - AUTH errors push a special message handled to show AuthError popup
 
 Adding features safely
-- New input actions → events.rs; update status messages and focused pane logic if needed
+- New input actions → events/keys.rs (key maps) or events/mod.rs (shared navigation); update status messages and focused pane logic if needed
 - New background operations → set a flag, spawn task, update Arc/RwLock fields, and clear loading flags
 - Persisted options → add to AppOptions (models/options.rs), map in sync_options_to_config, render in options popup

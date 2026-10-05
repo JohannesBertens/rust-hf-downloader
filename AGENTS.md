@@ -44,11 +44,11 @@ src/
 ├── utils.rs          # Helper functions
 └── ui/
     ├── mod.rs        # UI module exports
-    ├── app.rs        # Module re-exports (v0.9.5)
-    ├── app/          # App submodules (v0.9.5)
+    ├── app/          # App module (W3.9: mod.rs — no app.rs indirection): run loop + draw + crossterm event loop + mouse click/scroll/hover handlers + submodule re-exports (App)
     │   ├── state.rs      # App state container and initialization
-    │   ├── events.rs     # Keyboard/popup event handling
-    │   ├── models.rs     # Model browsing logic (search, details, quantizations)
+    │   ├── events/       # Keyboard dispatch (W3.9): mod.rs = on_key_event router + shared navigation/filter-value methods + W4.6 advance contract tests; keys.rs = normal-mode + popup key handlers
+    │   ├── filters.rs    # FilterState: single home of filter/sort values + cycle/step mutation rules (W4.5)
+    │   ├── search.rs     # Model browsing logic (search, details, quantizations)
     │   ├── downloads.rs  # Download management (trigger, confirm, resume/delete)
     │   └── verification.rs # Verification UI (manual verify action)
     ├── tree.rs       # File-tree navigation model (flatten_tree_for_navigation / toggle_node_expansion / count_tree_files), shared by render + app/events + app/downloads
@@ -150,7 +150,7 @@ Check `README.md` for more information.
 
 ### Filter & Sort System (v1.0.0)
 - **Filter State**: `src/ui/app/state.rs` - sort_field, sort_direction, filter_min_*
-- **Filter Logic**: `src/ui/app/events.rs` - keyboard controls and presets
+- **Filter Logic**: `src/ui/app/events/` (keys.rs) - keyboard controls and presets; `src/ui/app/filters.rs` - filter state and mutation rules
 - **Filter UI**: `src/ui/render/toolbar.rs` - toolbar rendering with focus highlighting
 - **Filter API**: `src/api.rs` - fetch_models_filtered() with client-side filtering
 - **Filter Config**: `src/config.rs` - default_sort_*, default_min_* persistence
@@ -163,7 +163,7 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - `filter_areas: Vec<(usize, Rect)>` - clickable regions for filter fields (0=sort, 1=downloads, 2=likes)
 - `hovered_panel: Option<FocusedPane>` - currently hovered panel for border highlighting
 
-**Event handling** (`src/ui/app.rs`):
+**Event handling** (`src/ui/app/mod.rs`):
 - `handle_mouse_click(column, row)` - focus panel or cycle filter on click
 - `handle_mouse_scroll(scroll_up, column, row)` - navigate panel or cycle filter on scroll
 - `handle_filter_click(field_idx)` - cycle filter value forward on click
