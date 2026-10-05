@@ -263,7 +263,7 @@ impl App {
     /// Handle keyboard input in Options popup
     pub(super) async fn handle_options_popup_input(&mut self, key: KeyEvent) {
         // If editing token, handle text input
-        if self.options.editing_token {
+        if self.options_dialog.editing_token {
             match key.code {
                 KeyCode::Enter => {
                     // Save the edited token (empty string becomes None)
@@ -273,7 +273,7 @@ impl App {
                     } else {
                         Some(new_token)
                     };
-                    self.options.editing_token = false;
+                    self.options_dialog.editing_token = false;
 
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
@@ -282,19 +282,19 @@ impl App {
                 }
                 KeyCode::Esc => {
                     // Cancel editing
-                    self.options.editing_token = false;
+                    self.options_dialog.editing_token = false;
                 }
                 _ => {
                     self.options_token_input.handle_event(&Event::Key(key));
                 }
             }
-        } else if self.options.editing_directory {
+        } else if self.options_dialog.editing_directory {
             match key.code {
                 KeyCode::Enter => {
                     // Save the edited directory
                     self.options.default_directory =
                         self.options_directory_input.value().to_string();
-                    self.options.editing_directory = false;
+                    self.options_dialog.editing_directory = false;
 
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
@@ -303,7 +303,7 @@ impl App {
                 }
                 KeyCode::Esc => {
                     // Cancel editing
-                    self.options.editing_directory = false;
+                    self.options_dialog.editing_directory = false;
                 }
                 _ => {
                     self.options_directory_input.handle_event(&Event::Key(key));
@@ -316,16 +316,16 @@ impl App {
                     self.popup_mode = PopupMode::None;
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    if self.options.selected_field > 0 {
-                        self.options.selected_field -= 1;
+                    if self.options_dialog.selected_field > 0 {
+                        self.options_dialog.selected_field -= 1;
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     // Bound derives from the field table (W4.7): 16
                     // entries → last index 15 — the exact historical
                     // `< 15` clamp.
-                    if self.options.selected_field < OPTIONS_FIELDS.len() - 1 {
-                        self.options.selected_field += 1;
+                    if self.options_dialog.selected_field < OPTIONS_FIELDS.len() - 1 {
+                        self.options_dialog.selected_field += 1;
                     }
                 }
                 KeyCode::Char('+') | KeyCode::Right => {
@@ -337,15 +337,15 @@ impl App {
                 KeyCode::Enter => {
                     // Enter edit mode for the two text fields (ids from the
                     // table — W4.7; the other 14 fields ignore Enter)
-                    if let Some(spec) = OPTIONS_FIELDS.get(self.options.selected_field) {
+                    if let Some(spec) = OPTIONS_FIELDS.get(self.options_dialog.selected_field) {
                         match spec.id {
                             OptionsFieldId::DefaultDirectory => {
-                                self.options.editing_directory = true;
+                                self.options_dialog.editing_directory = true;
                                 self.options_directory_input = tui_input::Input::default()
                                     .with_value(self.options.default_directory.clone());
                             }
                             OptionsFieldId::HfToken => {
-                                self.options.editing_token = true;
+                                self.options_dialog.editing_token = true;
                                 self.options_token_input = tui_input::Input::default().with_value(
                                     self.options.hf_token.as_deref().unwrap_or("").to_string(),
                                 );

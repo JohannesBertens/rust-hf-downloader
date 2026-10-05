@@ -159,9 +159,11 @@ Check `README.md` for more information.
 The TUI supports full mouse interaction with panels and filter toolbar:
 
 **State tracking** (`src/ui/app/state.rs`):
-- `panel_areas: Vec<(FocusedPane, Rect)>` - clickable regions for each panel
-- `filter_areas: Vec<(usize, Rect)>` - clickable regions for filter fields (0=sort, 1=downloads, 2=likes)
-- `hovered_panel: Option<FocusedPane>` - currently hovered panel for border highlighting
+- `mouse: MouseState` (W5.3) bundles the mouse interaction state:
+  - `areas: MouseAreas` — hit-rects of the last rendered frame: `panels: Vec<(FocusedPane, Rect)>` (clickable regions per panel) and `filters: Vec<(usize, Rect)>` (filter fields 0=sort, 1=downloads, 2=likes); written once per frame by `App::draw` from `RenderOutput::mouse`
+  - `hovered_panel: Option<FocusedPane>` — currently hovered panel for border highlighting
+  - `last_move: Instant` — hover-update throttle (~60fps)
+- `options_dialog: OptionsDialogState` (§8.9) — transient options-dialog UI state (cursor row + live-edit flags); never serialized (AppOptions is pure config schema)
 
 **Event handling** (`src/ui/app/mod.rs`):
 - `handle_mouse_click(column, row)` - focus panel or cycle filter on click

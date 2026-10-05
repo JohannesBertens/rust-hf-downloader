@@ -160,7 +160,7 @@ impl App {
                 focus: crate::ui::render::FocusCtx {
                     input_mode: self.input_mode,
                     focused_pane: self.focused_pane,
-                    hovered_panel: self.hovered_panel,
+                    hovered_panel: self.mouse.hovered_panel,
                 },
                 list: crate::ui::render::ListCtx {
                     input: &self.input,
@@ -201,8 +201,7 @@ impl App {
         // Register this frame's hit-rects for click/hover detection
         // (replaces the former &mut Vec out-params; same registration
         // order as always — first match wins on lookup).
-        self.panel_areas = out.mouse.panels;
-        self.filter_areas = out.mouse.filters;
+        self.mouse.areas = out.mouse;
 
         // Render the activity HUD into the strip render_ui reserved above
         // the status bar (render_ui shrank the main content accordingly)
@@ -225,6 +224,7 @@ impl App {
                 crate::ui::render::render_options_popup(
                     frame,
                     &self.options,
+                    &self.options_dialog,
                     &self.options_directory_input,
                     &self.options_token_input,
                 );
@@ -251,7 +251,7 @@ impl App {
         let pos = ratatui::layout::Position::new(column, row);
 
         // Check if click is within any filter area first
-        for (field_idx, area) in &self.filter_areas {
+        for (field_idx, area) in &self.mouse.areas.filters {
             if area.contains(pos) {
                 self.handle_filter_click(*field_idx);
                 return;
@@ -259,7 +259,7 @@ impl App {
         }
 
         // Check if click is within any panel area
-        for (pane, area) in &self.panel_areas {
+        for (pane, area) in &self.mouse.areas.panels {
             if area.contains(pos) {
                 // Use focus_pane() to also select first item if needed
                 self.focus_pane(*pane);
@@ -318,7 +318,7 @@ impl App {
         let pos = ratatui::layout::Position::new(column, row);
 
         // Check if scroll is within any filter area
-        for (field_idx, area) in &self.filter_areas {
+        for (field_idx, area) in &self.mouse.areas.filters {
             if area.contains(pos) {
                 self.handle_filter_scroll(*field_idx, scroll_up);
                 return;
@@ -379,19 +379,21 @@ impl App {
     fn update_hover_state(&mut self, column: u16, row: u16) {
         // Skip if popup is open
         if self.popup_mode != crate::models::PopupMode::None {
-            self.hovered_panel = None;
+            self.mouse.hovered_panel = None;
             return;
         }
 
         // Skip if no panel areas defined
-        if self.panel_areas.is_empty() {
-            self.hovered_panel = None;
+        if self.mouse.areas.panels.is_empty() {
+            self.mouse.hovered_panel = None;
             return;
         }
 
         // Find which panel (if any) the mouse is hovering over
-        self.hovered_panel = self
-            .panel_areas
+        self.mouse.hovered_panel = self
+            .mouse
+            .areas
+            .panels
             .iter()
             .find(|(_, area)| area.contains(ratatui::layout::Position::new(column, row)))
             .map(|(pane, _)| *pane);
@@ -494,8 +496,8 @@ impl App {
         // Apply coalesced hover update once (if mouse moved)
         if let Some((col, row)) = last_mouse_position {
             // Throttle hover updates to ~60fps
-            if self.last_mouse_event_time.elapsed() >= std::time::Duration::from_millis(16) {
-                self.last_mouse_event_time = std::time::Instant::now();
+            if self.mouse.last_move.elapsed() >= std::time::Duration::from_millis(16) {
+                self.mouse.last_move = std::time::Instant::now();
                 self.update_hover_state(col, row);
             }
         }

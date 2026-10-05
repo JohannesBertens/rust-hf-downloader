@@ -399,7 +399,13 @@ fn snapshot_options_popup() {
     let mut terminal = test_terminal();
     terminal
         .draw(|frame| {
-            render_options_popup(frame, &options, &directory_input, &token_input);
+            render_options_popup(
+                frame,
+                &options,
+                &OptionsDialogState::default(),
+                &directory_input,
+                &token_input,
+            );
         })
         .expect("failed to draw options popup");
     snap_ui("snapshot_options_popup", &terminal);

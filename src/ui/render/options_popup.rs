@@ -48,6 +48,23 @@ pub enum OptionsFieldKind {
     Toggle,
 }
 
+/// Transient options-dialog UI state (§8.9, moved out of `AppOptions`):
+/// the cursor row and the two live-edit flags. Never serialized —
+/// `AppOptions` is purely the persisted config schema now; `App` owns
+/// one of these. Lives next to [`OPTIONS_FIELDS`] because the cursor
+/// bound (`len - 1`) and the two Text fields' edit-mode rendering
+/// derive from that table.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptionsDialogState {
+    /// Cursor row into [`OPTIONS_FIELDS`] (0..=15; bound enforced by the
+    /// j/k handler).
+    pub selected_field: usize,
+    /// Live edit mode of the Default Directory text field.
+    pub editing_directory: bool,
+    /// Live edit mode of the HF Token text field.
+    pub editing_token: bool,
+}
+
 /// One row of the options dialog: label, interaction kind, identity and
 /// the value-string accessor. The per-field +/− step/clamp/toggle bodies
 /// deliberately stay in `App::modify_option` — they differ per field.
@@ -56,10 +73,16 @@ pub struct OptionsFieldSpec {
     pub label: &'static str,
     pub kind: OptionsFieldKind,
     pub id: OptionsFieldId,
-    /// Renders the field's current value; the two `Input` arguments are
-    /// the live directory/token edit buffers (read by the Text fields
-    /// while editing, ignored by the rest).
-    pub value: fn(&crate::models::AppOptions, &tui_input::Input, &tui_input::Input) -> String,
+    /// Renders the field's current value; the `Input` arguments are the
+    /// live directory/token edit buffers (read by the Text fields while
+    /// editing, ignored by the rest), and the dialog state carries the
+    /// editing flags (§8.9: no longer on `AppOptions`).
+    pub value: fn(
+        &crate::models::AppOptions,
+        &OptionsDialogState,
+        &tui_input::Input,
+        &tui_input::Input,
+    ) -> String,
 }
 
 /// The options dialog's 16 fields in display order — the single source
@@ -73,8 +96,8 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "Default Directory:",
         kind: OptionsFieldKind::Text,
         id: OptionsFieldId::DefaultDirectory,
-        value: |options, directory_input, _| {
-            if options.editing_directory {
+        value: |options, dialog, directory_input, _| {
+            if dialog.editing_directory {
                 directory_input.value().to_string()
             } else {
                 options.default_directory.clone()
@@ -85,8 +108,8 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "HF Token (optional):",
         kind: OptionsFieldKind::Text,
         id: OptionsFieldId::HfToken,
-        value: |options, _, token_input| {
-            if options.editing_token {
+        value: |options, dialog, _, token_input| {
+            if dialog.editing_token {
                 token_input.value().to_string()
             } else if let Some(token) = &options.hf_token {
                 if token.is_empty() {
@@ -104,56 +127,56 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "Concurrent Threads:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::ConcurrentThreads,
-        value: |options, _, _| options.concurrent_threads.to_string(),
+        value: |options, _, _, _| options.concurrent_threads.to_string(),
     },
     OptionsFieldSpec {
         label: "Target Number of Chunks:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::NumChunks,
-        value: |options, _, _| options.num_chunks.to_string(),
+        value: |options, _, _, _| options.num_chunks.to_string(),
     },
     OptionsFieldSpec {
         label: "Min Chunk Size:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::MinChunkSize,
-        value: |options, _, _| format_size(options.min_chunk_size),
+        value: |options, _, _, _| format_size(options.min_chunk_size),
     },
     OptionsFieldSpec {
         label: "Max Chunk Size:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::MaxChunkSize,
-        value: |options, _, _| format_size(options.max_chunk_size),
+        value: |options, _, _, _| format_size(options.max_chunk_size),
     },
     OptionsFieldSpec {
         label: "Max Retries:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::MaxRetries,
-        value: |options, _, _| options.max_retries.to_string(),
+        value: |options, _, _, _| options.max_retries.to_string(),
     },
     OptionsFieldSpec {
         label: "Download Timeout (sec):",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::DownloadTimeoutSecs,
-        value: |options, _, _| options.download_timeout_secs.to_string(),
+        value: |options, _, _, _| options.download_timeout_secs.to_string(),
     },
     OptionsFieldSpec {
         label: "Retry Delay (sec):",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::RetryDelaySecs,
-        value: |options, _, _| options.retry_delay_secs.to_string(),
+        value: |options, _, _, _| options.retry_delay_secs.to_string(),
     },
     OptionsFieldSpec {
         label: "Progress Update Interval (ms):",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::ProgressUpdateIntervalMs,
-        value: |options, _, _| options.progress_update_interval_ms.to_string(),
+        value: |options, _, _, _| options.progress_update_interval_ms.to_string(),
     },
     // Rate Limiting (indices 10-11)
     OptionsFieldSpec {
         label: "Rate Limit:",
         kind: OptionsFieldKind::Toggle,
         id: OptionsFieldId::RateLimitEnabled,
-        value: |options, _, _| {
+        value: |options, _, _, _| {
             (if options.download_rate_limit_enabled {
                 "Enabled"
             } else {
@@ -166,14 +189,14 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "Max Download Speed (MB/s):",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::RateLimitMbps,
-        value: |options, _, _| format!("{:.1}", options.download_rate_limit_mbps),
+        value: |options, _, _, _| format!("{:.1}", options.download_rate_limit_mbps),
     },
     // Verification (indices 12-15)
     OptionsFieldSpec {
         label: "Enable Verification:",
         kind: OptionsFieldKind::Toggle,
         id: OptionsFieldId::VerificationEnabled,
-        value: |options, _, _| {
+        value: |options, _, _, _| {
             (if options.verification_on_completion {
                 "Enabled"
             } else {
@@ -186,19 +209,19 @@ pub const OPTIONS_FIELDS: &[OptionsFieldSpec] = &[
         label: "Concurrent Verifications:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::ConcurrentVerifications,
-        value: |options, _, _| options.concurrent_verifications.to_string(),
+        value: |options, _, _, _| options.concurrent_verifications.to_string(),
     },
     OptionsFieldSpec {
         label: "Verification Buffer Size:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::VerificationBufferSize,
-        value: |options, _, _| format_size(options.verification_buffer_size as u64),
+        value: |options, _, _, _| format_size(options.verification_buffer_size as u64),
     },
     OptionsFieldSpec {
         label: "Verification Update Interval:",
         kind: OptionsFieldKind::Number,
         id: OptionsFieldId::VerificationUpdateInterval,
-        value: |options, _, _| options.verification_update_interval.to_string(),
+        value: |options, _, _, _| options.verification_update_interval.to_string(),
     },
 ];
 
@@ -227,6 +250,7 @@ const _: () = {
 pub fn render_options_popup(
     frame: &mut Frame,
     options: &crate::models::AppOptions,
+    dialog: &OptionsDialogState,
     directory_input: &tui_input::Input,
     token_input: &tui_input::Input,
 ) {
@@ -314,7 +338,7 @@ pub fn render_options_popup(
                 height: 1,
             };
 
-            let style = if field_idx == options.selected_field {
+            let style = if field_idx == dialog.selected_field {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
@@ -325,17 +349,17 @@ pub fn render_options_popup(
             let text = format!(
                 "{} {}",
                 spec.label,
-                (spec.value)(options, directory_input, token_input)
+                (spec.value)(options, dialog, directory_input, token_input)
             );
             let widget = Paragraph::new(text).style(style);
             frame.render_widget(widget, area);
 
             // Show cursor when editing directory or token
-            if options.editing_directory && spec.id == OptionsFieldId::DefaultDirectory {
+            if dialog.editing_directory && spec.id == OptionsFieldId::DefaultDirectory {
                 let cursor_x =
                     area.x + spec.label.len() as u16 + 1 + directory_input.visual_cursor() as u16;
                 frame.set_cursor_position((cursor_x, area.y));
-            } else if options.editing_token && spec.id == OptionsFieldId::HfToken {
+            } else if dialog.editing_token && spec.id == OptionsFieldId::HfToken {
                 let cursor_x =
                     area.x + spec.label.len() as u16 + 1 + token_input.visual_cursor() as u16;
                 frame.set_cursor_position((cursor_x, area.y));
@@ -355,14 +379,14 @@ pub fn render_options_popup(
     } else {
         inner.y + content_rows
     };
-    let help = if options.editing_directory {
+    let help = if dialog.editing_directory {
         vec![
             "",
             "Type to edit directory path",
             "Enter: Save | ESC: Cancel",
             "",
         ]
-    } else if options.editing_token {
+    } else if dialog.editing_token {
         vec![
             "",
             "Type to edit HF token (or clear to remove)",

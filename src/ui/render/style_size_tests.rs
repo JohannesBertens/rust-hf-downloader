@@ -366,7 +366,15 @@ fn style_options_popup_clear_and_border() {
         0,
         "Press / to search",
         "Selection: 2 of 3",
-        |frame| render_options_popup(frame, &options, &directory_input, &token_input),
+        |frame| {
+            render_options_popup(
+                frame,
+                &options,
+                &OptionsDialogState::default(),
+                &directory_input,
+                &token_input,
+            )
+        },
     );
     snap_style(
         "style_options_popup_clear_and_border",

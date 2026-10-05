@@ -291,7 +291,7 @@ impl App {
     /// historical catch-all no-op.
     pub fn modify_option(&mut self, delta: i32) {
         let field = OPTIONS_FIELDS
-            .get(self.options.selected_field)
+            .get(self.options_dialog.selected_field)
             .map(|f| f.id);
         match field {
             None | Some(OptionsFieldId::DefaultDirectory) => {} // use Enter to edit

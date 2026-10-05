@@ -1,6 +1,5 @@
 use crate::models::*;
 use parking_lot::RwLock;
-use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -63,11 +62,12 @@ pub struct App {
     // focused_filter_field is focus state and stays on App)
     pub filters: super::filters::FilterState,
     pub focused_filter_field: usize, // 0=sort, 1=downloads, 2=likes
-    // Mouse interaction state
-    pub panel_areas: Vec<(FocusedPane, Rect)>, // Store panel areas for click/hover detection
-    pub hovered_panel: Option<FocusedPane>,    // Currently hovered panel for visual feedback
-    pub last_mouse_event_time: std::time::Instant, // Track time of last processed mouse event
-    pub filter_areas: Vec<(usize, Rect)>, // Store filter field areas (0=sort, 1=downloads, 2=likes)
+    // Mouse interaction state (one bundle — the fields travel together
+    // through the render pass and the mouse handlers; see MouseState)
+    pub mouse: MouseState,
+    // Options-dialog transient UI state (§8.9: moved out of AppOptions —
+    // cursor row + live-edit flags; AppOptions is pure config schema)
+    pub options_dialog: crate::ui::render::OptionsDialogState,
     // Last-known-good snapshots of the engine's tokio::Mutex state for
     // non-blocking rendering: draw() refreshes each field via `snapshot`
     // when the lock is free and falls back to the previous snapshot when
@@ -147,10 +147,8 @@ impl App {
             filters,
             focused_filter_field: 0,
             // Mouse interaction state
-            panel_areas: Vec::new(),
-            hovered_panel: None,
-            last_mouse_event_time: std::time::Instant::now(),
-            filter_areas: Vec::new(),
+            mouse: MouseState::default(),
+            options_dialog: crate::ui::render::OptionsDialogState::default(),
             // Cached values for non-blocking render
             render_cache: RenderCache::default(),
         }
@@ -164,6 +162,33 @@ impl App {
     /// Terminate application
     pub fn quit(&mut self) {
         self.running = false;
+    }
+}
+
+/// Mouse interaction state (W5.3): the per-frame hit-rect registry the
+/// render pass RETURNS (stored here by `App::draw` — the render side is
+/// pure) plus the hover and throttle state the event handlers maintain.
+/// Hit-testing is first-match over each list; registration order is
+/// behavior (see `render::MouseAreas`).
+#[derive(Debug)]
+pub struct MouseState {
+    /// Hit-rects of the last rendered frame: clickable panel regions and
+    /// filter-field regions (0=sort, 1=downloads, 2=likes).
+    pub areas: crate::ui::render::MouseAreas,
+    /// Panel currently under the mouse cursor, for border feedback.
+    pub hovered_panel: Option<FocusedPane>,
+    /// Time of the last processed mouse move; hover updates are throttled
+    /// to ~60fps against it.
+    pub last_move: std::time::Instant,
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self {
+            areas: crate::ui::render::MouseAreas::default(),
+            hovered_panel: None,
+            last_move: std::time::Instant::now(),
+        }
     }
 }
 

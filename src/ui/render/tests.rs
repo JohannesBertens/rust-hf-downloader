@@ -257,32 +257,33 @@ fn options_fields_table_pins_dialog_shape() {
         ..AppOptions::default()
     };
     let empty = tui_input::Input::default();
+    let mut dialog = OptionsDialogState::default();
     // Token masking: a bullet per char, capped at 20.
     assert_eq!(
-        (OPTIONS_FIELDS[1].value)(&options, &empty, &empty),
+        (OPTIONS_FIELDS[1].value)(&options, &dialog, &empty, &empty),
         "•".repeat(20)
     );
     // The live edit buffer wins while editing the directory field.
-    options.editing_directory = true;
+    dialog.editing_directory = true;
     let typed = tui_input::Input::new("/tmp/typed".to_string());
     assert_eq!(
-        (OPTIONS_FIELDS[0].value)(&options, &typed, &empty),
+        (OPTIONS_FIELDS[0].value)(&options, &dialog, &typed, &empty),
         "/tmp/typed"
     );
     // Toggle rendering (both directions) and byte-size formatting.
-    options.editing_directory = false;
+    dialog.editing_directory = false;
     options.download_rate_limit_enabled = true;
     assert_eq!(
-        (OPTIONS_FIELDS[10].value)(&options, &empty, &empty),
+        (OPTIONS_FIELDS[10].value)(&options, &dialog, &empty, &empty),
         "Enabled"
     );
     options.verification_on_completion = false;
     assert_eq!(
-        (OPTIONS_FIELDS[12].value)(&options, &empty, &empty),
+        (OPTIONS_FIELDS[12].value)(&options, &dialog, &empty, &empty),
         "Disabled"
     );
     assert_eq!(
-        (OPTIONS_FIELDS[4].value)(&options, &empty, &empty),
+        (OPTIONS_FIELDS[4].value)(&options, &dialog, &empty, &empty),
         format_size(options.min_chunk_size)
     );
 }

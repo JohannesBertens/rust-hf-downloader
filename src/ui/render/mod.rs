@@ -109,6 +109,7 @@ pub struct StatusCtx<'a> {
 ///   Standard: ModelMetadata, FileTree.
 /// - `filters`: toolbar fields in display order (0 = sort, 1 = min
 ///   downloads, 2 = min likes).
+#[derive(Debug, Default)]
 pub struct MouseAreas {
     /// Panel rects in registration order (first match wins hit-tests).
     pub panels: Vec<(FocusedPane, Rect)>,
