@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+- **Fixed**: `--progress` no longer renders `[default: auto]` twice in
+  `--help`; doc examples of the aggregate progress line now match the real
+  output format (two-decimal sizes, one-decimal speed); the
+  `--progress plain` verification heartbeat skips a tick instead of
+  printing `0 in flight` when its progress snapshot is missed.
+
 ## [2.13.0] - 2026-10-05
 
 ### Version 2.13.0 (2026-10-05)
@@ -23,8 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Version 2.12.0 (2026-10-05)
 - **Added**: overall progress for multi-file CLI runs — human mode leads
-  with one aggregate line (`[3/17 files 43% │ 12.6/29.1 GB │ 88 MB/s eta
-  2m41s] ▸ <active file> <pct>%`), single-file rendering unchanged;
+  with one aggregate line (`[3/17 files 43% │ 12.63 GB/29.06 GB │
+  88.0 MB/s eta 3m11s] ▸ <active file> <pct>%`), single-file rendering
+  unchanged;
   `--json` `progress` events gain an optional `overall` object
   (`files_done`, `files_total`, `downloaded_bytes`, `total_bytes`) on
   multi-file runs (additive-only schema). Progress rewrites now erase to

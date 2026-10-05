@@ -61,8 +61,8 @@ may be dropped — rely on `file_complete`, not a 100 % progress).
 `files_done` counts fully processed files (downloaded + skipped +
 failed); `downloaded_bytes` adds the active file's partial bytes. Files
 are downloaded strictly serially, so `speed_mbps` is the aggregate wire
-rate and `total_bytes - downloaded_bytes` feeds an overall ETA. Absent
-(single-file runs) means omit the key entirely.
+rate and `total_bytes - downloaded_bytes` feeds an overall ETA. On
+single-file runs the key is omitted entirely, never `null`.
 
 ### `file_complete`
 

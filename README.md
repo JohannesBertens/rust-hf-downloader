@@ -469,7 +469,7 @@ done/total, overall %, bytes, speed, and overall ETA — with the active
 file demoted to name + percent:
 
 ```text
-[3/17 files 43% │ 12.6/29.1 GB │ 88 MB/s eta 2m41s] ▸ model-00004-of-00017.safetensors 61%
+[3/17 files 43% │ 12.63 GB/29.06 GB │ 88.0 MB/s eta 3m11s] ▸ model-00004-of-00017.safetensors 61%
 ```
 
 `--progress` controls human progress output (stderr): `auto` (default)

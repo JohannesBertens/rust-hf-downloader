@@ -249,7 +249,7 @@ pub struct DownloadArgs {
     pub quiet: bool,
 
     /// Progress output mode: auto (tty rewrites), plain (one line every
-    /// ~10 s, works without a tty), none [default: auto]
+    /// ~10 s, works without a tty), none
     #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
     pub progress: ProgressMode,
 
@@ -361,7 +361,7 @@ pub struct HfCacheSyncArgs {
     pub quiet: bool,
 
     /// Progress output mode: auto (tty rewrites), plain (one line every
-    /// ~10 s, works without a tty), none [default: auto]
+    /// ~10 s, works without a tty), none
     #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
     pub progress: ProgressMode,
 
@@ -819,7 +819,8 @@ impl Reporter {
 
     /// True when a `--progress plain` heartbeat line is due (and records
     /// the emission).
-    fn plain_progress_due(&mut self, now: Instant) -> bool {
+    fn plain_progress_due(&mut self) -> bool {
+        let now = Instant::now();
         if self
             .last_plain_progress
             .is_some_and(|last| now.duration_since(last) < PLAIN_PROGRESS_INTERVAL)
@@ -834,8 +835,8 @@ impl Reporter {
     /// finished, SHA256 still hashing — no `progress` events fire in that
     /// phase, so without this the tail of a run is silent between
     /// `✓ verified` milestones.
-    pub fn plain_verification(&mut self, active: usize, done: usize) {
-        if !self.progress_plain || !self.plain_progress_due(Instant::now()) {
+    fn plain_verification(&mut self, active: usize, done: usize) {
+        if !self.progress_plain || !self.plain_progress_due() {
             return;
         }
         self.line_stderr(&verification_heartbeat_line(active, done));
@@ -887,7 +888,6 @@ impl Reporter {
             return;
         }
 
-        use crate::utils::format_size;
         match event {
             Event::Resolved {
                 files, total_bytes, ..
@@ -909,29 +909,37 @@ impl Reporter {
                 overall,
                 ..
             } => {
-                let content = match overall {
-                    Some(overall) => format_overall_progress(
-                        filename,
-                        *downloaded_bytes,
-                        *total_bytes,
-                        overall,
-                        *speed_mbps,
-                    ),
-                    None => format_file_progress(filename, *downloaded_bytes, *total_bytes, *speed_mbps),
-                };
-                if self.progress_plain {
-                    // tty-independent heartbeat: one line per interval
-                    // through the normal line printer (no \r rewrites, so
-                    // piped/docker logs stay clean).
-                    if self.plain_progress_due(Instant::now()) {
-                        self.line_stderr(&content);
+                if self.progress_plain || self.progress_to_tty {
+                    let content = match overall {
+                        Some(overall) => format_overall_progress(
+                            filename,
+                            *downloaded_bytes,
+                            *total_bytes,
+                            overall,
+                            *speed_mbps,
+                        ),
+                        None => format_file_progress(
+                            filename,
+                            *downloaded_bytes,
+                            *total_bytes,
+                            *speed_mbps,
+                        ),
+                    };
+                    if self.progress_plain {
+                        // tty-independent heartbeat: one line per interval
+                        // through the normal line printer (no \r rewrites,
+                        // so piped/docker logs stay clean).
+                        if self.plain_progress_due() {
+                            self.line_stderr(&content);
+                        }
+                    } else {
+                        let mut stderr = std::io::stderr().lock();
+                        // \x1b[K erases to end of line so shrinking fields
+                        // (unit crossings, a vanishing eta) leave no
+                        // residue.
+                        let _ = write!(stderr, "\r{content}\x1b[K");
+                        self.progress_line_active = true;
                     }
-                } else if self.progress_to_tty {
-                    let mut stderr = std::io::stderr().lock();
-                    // \x1b[K erases to end of line so shrinking fields
-                    // (unit crossings, a vanishing eta) leave no residue.
-                    let _ = write!(stderr, "\r{content}\x1b[K");
-                    self.progress_line_active = true;
                 }
             }
             Event::FileComplete {
@@ -1731,10 +1739,12 @@ async fn poll_once(
         }
     }
 
-    // Verification starts (new entries in the active-progress list)
-    let mut verifying_active = 0usize;
+    // Verification starts (new entries in the active-progress list).
+    // None = the try_lock snapshot missed — skip the heartbeat that tick
+    // rather than print a lock artifact as an in-flight count.
+    let mut verifying_active: Option<usize> = None;
     if let Ok(progress) = state.verification_progress.try_lock() {
-        verifying_active = progress.len();
+        verifying_active = Some(progress.len());
         for entry in progress.iter() {
             if seen_verifying.insert(entry.filename.clone()) {
                 reporter.emit(&Event::VerificationStart {
@@ -1802,8 +1812,10 @@ async fn poll_once(
     // finished (or between files), SHA256 still hashing — no progress
     // events fire in that phase. Shares the plain throttle window with
     // the download line, so at most one heartbeat every ~10 s total.
-    if !download_active && (verifying_active > 0 || !state.verification_idle()) {
-        reporter.plain_verification(verifying_active, tally.verified);
+    if let Some(active) = verifying_active {
+        if !download_active && (active > 0 || !state.verification_idle()) {
+            reporter.plain_verification(active, tally.verified);
+        }
     }
 }
 
@@ -2969,7 +2981,6 @@ fn update_error_exit(err: &crate::update::UpdateError) -> i32 {
 
 pub async fn run_update(args: UpdateArgs) -> i32 {
     use crate::update;
-    use crate::utils::format_size;
 
     let human = !args.json && std::io::stderr().is_terminal();
     let mut last_emit = Instant::now();
@@ -3401,7 +3412,6 @@ mod tests {
 
     #[test]
     fn progress_mode_flag_parses_and_defaults() {
-        // default: auto
         let args = Cli::try_parse_from(["hf-downloader", "download", "a/b"]).unwrap();
         let crate::cli::Command::Download(args) = args.command.expect("subcommand") else {
             panic!("expected download subcommand");
@@ -3423,9 +3433,15 @@ mod tests {
         }
 
         // hf-cache sync accepts it too
-        let args =
-            Cli::try_parse_from(["hf-downloader", "hf-cache", "sync", "a/b", "--progress", "plain"])
-                .unwrap();
+        let args = Cli::try_parse_from([
+            "hf-downloader",
+            "hf-cache",
+            "sync",
+            "a/b",
+            "--progress",
+            "plain",
+        ])
+        .unwrap();
         let crate::cli::Command::HfCache(hf) = args.command.expect("subcommand") else {
             panic!("expected hf-cache subcommand");
         };
