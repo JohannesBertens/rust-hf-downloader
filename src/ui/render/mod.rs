@@ -13,9 +13,15 @@
 //! - `popups` — resume / search / download-path / auth-error overlays
 //! - `options_popup` — the 16-field options dialog
 //! - `toolbar` — the filter & sort toolbar with its click areas
+//!   ([`FilterCtx`] is its input group)
+//!
+//! The remaining [`RenderParams`] groups live here: [`FocusCtx`],
+//! [`ListCtx`], [`StatusCtx`] and the [`MouseAreas`] registry.
 //!
 //! Rendering never mutates `App`: everything arrives through
-//! [`RenderParams`], built once per frame by `ui::app`. The file-tree
+//! [`RenderParams`], built once per frame by `ui::app`, and the pass is
+//! pure — mouse hit-rects and the reserved HUD strip come back through
+//! [`RenderOutput`] for the caller to register. The file-tree
 //! navigation model these panels draw is in `crate::ui::tree` (W3.4a), not
 //! here.
 //!
@@ -26,17 +32,13 @@
 //! the macro call, i.e. `src/ui/render/snapshots/`. That is why the test
 //! modules are declared here as direct children instead of nesting deeper.
 
-use crate::models::{
-    FileTreeNode, FocusedPane, InputMode, ModelDisplayMode, ModelInfo, ModelMetadata,
-    QuantizationGroup,
-};
+use crate::models::{FocusedPane, InputMode, ModelDisplayMode, ModelInfo};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
-use std::collections::HashMap;
 use tui_input::Input;
 
 mod gguf;
@@ -52,9 +54,14 @@ pub use options_popup::*;
 pub use popups::*;
 pub use toolbar::*;
 
-use gguf::{render_gguf_panels, GgufPanelContext};
+// Panel-input groups consumed by [`RenderParams`] (W5.2): each bottom-
+// panel renderer owns its own context struct, re-exported so `ui::app`
+// can construct them next to the other groups.
+use gguf::render_gguf_panels;
+pub use gguf::GgufPanelContext;
 use models_list::model_list_items;
-use standard::{render_standard_panels, StandardPanelContext};
+use standard::render_standard_panels;
+pub use standard::StandardPanelContext;
 
 #[cfg(test)]
 mod hud_tests;
@@ -65,41 +72,75 @@ mod style_size_tests;
 #[cfg(test)]
 mod tests;
 
-/// Parameters for rendering the UI
-pub struct RenderParams<'a> {
-    pub input: &'a Input,
+/// Focus & hover state shared by every panel border (W5.2 group): the
+/// triple [`border_style`] consults for its focus > hover > plain
+/// precedence. One struct so the panel renderers no longer thread the
+/// three values separately.
+pub struct FocusCtx {
     pub input_mode: InputMode,
+    pub focused_pane: FocusedPane,
+    pub hovered_panel: Option<FocusedPane>,
+}
+
+/// Results-list inputs (the main content area). `input` is read only for
+/// the empty-state title ("No models found" vs "Enter a search query").
+pub struct ListCtx<'a> {
+    pub input: &'a Input,
     pub models: &'a [ModelInfo],
     pub list_state: &'a mut ListState,
     pub loading: bool,
-    pub quantizations: &'a [QuantizationGroup],
-    pub quant_file_list_state: &'a mut ListState,
-    pub quant_list_state: &'a mut ListState,
-    pub loading_quants: bool,
-    pub focused_pane: FocusedPane,
+}
+
+/// Status-bar inputs (the bottom block's two lines).
+pub struct StatusCtx<'a> {
     pub error: &'a Option<String>,
     pub status: &'a str,
     pub selection_info: &'a str,
-    pub complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
-    // Non-GGUF model support
+}
+
+/// Mouse hit-rects produced by one render pass (W5.2): the render side is
+/// pure — it RETURNS this registry instead of writing into caller-owned
+/// `&mut Vec` out-params, and `App::draw` stores it once per frame.
+/// Hit-testing (clicks, hover) is first-match over each list, so the
+/// REGISTRATION ORDER below is behavior:
+///
+/// - `panels`: Results list first, then the active display mode's bottom
+///   panels left-to-right — GGUF: QuantizationGroups, QuantizationFiles;
+///   Standard: ModelMetadata, FileTree.
+/// - `filters`: toolbar fields in display order (0 = sort, 1 = min
+///   downloads, 2 = min likes).
+pub struct MouseAreas {
+    /// Panel rects in registration order (first match wins hit-tests).
+    pub panels: Vec<(FocusedPane, Rect)>,
+    /// Toolbar field rects in registration order (first match wins).
+    pub filters: Vec<(usize, Rect)>,
+}
+
+/// Everything `App::draw` needs back from one render pass: the reserved
+/// Activity HUD strip rect and the frame's mouse hit-rect registry.
+pub struct RenderOutput {
+    /// The reserved HUD strip (zero height when idle or the terminal is
+    /// too short) — `App::draw` renders the activity HUD into it.
+    pub hud_strip: Rect,
+    /// This frame's hit-rects; the caller registers them on `App`.
+    pub mouse: MouseAreas,
+}
+
+/// Parameters for rendering the UI (W5.2: the former 27-field bag grouped
+/// into per-consumer contexts; the two `&mut Vec` out-params became the
+/// returned [`RenderOutput::mouse`]). The group for the inactive display
+/// mode is still supplied — `display_mode` picks which one is read.
+pub struct RenderParams<'a> {
     pub display_mode: ModelDisplayMode,
-    pub model_metadata: &'a Option<ModelMetadata>,
-    pub file_tree: &'a Option<FileTreeNode>,
-    pub file_tree_state: &'a mut ListState,
-    // Filter & Sort
-    pub sort_field: crate::models::SortField,
-    pub sort_direction: crate::models::SortDirection,
-    pub filter_min_downloads: u64,
-    pub filter_min_likes: u64,
-    pub focused_filter_field: usize,
-    // Mouse panel areas (for click/hover detection on panels)
-    pub panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
-    pub hovered_panel: &'a Option<FocusedPane>,
-    // Filter toolbar click areas
-    pub filter_areas: &'a mut Vec<(usize, Rect)>,
-    // Activity HUD: DESIRED strip height above the status bar (the
-    // natural, uncapped activity_hud_height; render_ui clamps it against
-    // the base layout and returns the reserved strip rect — 0 = hidden)
+    pub focus: FocusCtx,
+    pub list: ListCtx<'a>,
+    pub gguf: GgufPanelContext<'a>,
+    pub standard: StandardPanelContext<'a>,
+    pub filters: FilterCtx,
+    pub status: StatusCtx<'a>,
+    /// Activity HUD: DESIRED strip height above the status bar (the
+    /// natural, uncapped activity_hud_height; render_ui clamps it against
+    /// the base layout and returns the reserved strip rect — 0 = hidden)
     pub hud_height: u16,
 }
 
@@ -112,44 +153,40 @@ pub struct RenderParams<'a> {
 const BASE_LAYOUT_ROWS: u16 = 3 + 10 + 12 + 4;
 
 /// Render the main UI and return the reserved Activity HUD strip rect
-/// (the strip directly above the status bar; zero height when idle or
-/// when the terminal is too short for the base layout). `App::draw`
-/// renders the activity HUD into the returned rect — one owner for the
-/// vertical layout since W4.10.
-pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
+/// plus this frame's mouse hit-rects (see [`RenderOutput`]; zero strip
+/// height when idle or when the terminal is too short for the base
+/// layout). `App::draw` renders the activity HUD into the returned rect
+/// and stores the hit-rects — one owner for the vertical layout since
+/// W4.10, pure render pass since W5.2.
+pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
     let RenderParams {
-        input,
-        input_mode,
-        models,
-        list_state,
-        loading,
-        quantizations,
-        quant_file_list_state,
-        quant_list_state,
-        loading_quants,
-        focused_pane,
-        error,
-        status,
-        selection_info,
-        complete_downloads,
         display_mode,
-        model_metadata,
-        file_tree,
-        file_tree_state,
-        sort_field,
-        sort_direction,
-        filter_min_downloads,
-        filter_min_likes,
-        focused_filter_field,
-        panel_areas,
-        hovered_panel,
-        filter_areas,
+        focus,
+        list,
+        gguf,
+        standard,
+        filters,
+        status,
         hud_height,
     } = params;
 
-    // Clear previous panel and filter areas
-    panel_areas.clear();
-    filter_areas.clear();
+    let ListCtx {
+        input,
+        models,
+        list_state,
+        loading,
+    } = list;
+    let StatusCtx {
+        error,
+        status,
+        selection_info,
+    } = status;
+
+    // Hit-rects registered this frame, in lookup order (see MouseAreas).
+    let mut mouse = MouseAreas {
+        panels: Vec::new(),
+        filters: Vec::new(),
+    };
 
     // Clamp the desired HUD strip so it never steals rows the base
     // layout needs (see BASE_LAYOUT_ROWS); the strip rect is chunks[3].
@@ -166,17 +203,8 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
         ])
         .split(frame.area());
 
-    // Render filter toolbar
-    render_filter_toolbar(
-        frame,
-        chunks[0],
-        sort_field,
-        sort_direction,
-        filter_min_downloads,
-        filter_min_likes,
-        focused_filter_field,
-        filter_areas,
-    );
+    // Render filter toolbar (registers the three field hit-rects)
+    mouse.filters = render_filter_toolbar(frame, chunks[0], filters);
 
     // Results list (chunks[1])
     let items = model_list_items(models);
@@ -191,14 +219,11 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
         "Results"
     };
 
-    let list = panel_list(
-        items,
-        list_title,
-        border_style(FocusedPane::Models, input_mode, focused_pane, hovered_panel),
-    );
+    let list = panel_list(items, list_title, border_style(FocusedPane::Models, &focus));
 
-    // Store panel area for click/hover detection
-    panel_areas.push((FocusedPane::Models, chunks[1]));
+    // Register panel area for click/hover detection (registration order
+    // is behavior: first match wins — Models before the bottom panels)
+    mouse.panels.push((FocusedPane::Models, chunks[1]));
     frame.render_stateful_widget(list, chunks[1], list_state);
 
     // Split bottom panel into left and right sections
@@ -207,39 +232,19 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[2]);
 
-    // Render based on display mode
+    // Render based on display mode (each renderer registers its panels'
+    // areas left-to-right, after the Results list above)
     match display_mode {
         ModelDisplayMode::Gguf => {
-            render_gguf_panels(
-                frame,
-                bottom_panel_chunks,
-                GgufPanelContext {
-                    quantizations,
-                    quant_list_state,
-                    quant_file_list_state,
-                    loading_quants,
-                    input_mode,
-                    focused_pane,
-                    complete_downloads,
-                    hovered_panel,
-                    panel_areas,
-                },
-            );
+            render_gguf_panels(frame, bottom_panel_chunks, gguf, &focus, &mut mouse.panels);
         }
         ModelDisplayMode::Standard => {
             render_standard_panels(
                 frame,
                 bottom_panel_chunks,
-                StandardPanelContext {
-                    model_metadata,
-                    file_tree,
-                    file_tree_state,
-                    loading: loading_quants,
-                    input_mode,
-                    focused_pane,
-                    hovered_panel,
-                    panel_areas,
-                },
+                standard,
+                &focus,
+                &mut mouse.panels,
             );
         }
     }
@@ -262,10 +267,10 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
     };
 
     // Check if any filters are non-default
-    let has_filters = filter_min_downloads > 0
-        || filter_min_likes > 0
-        || sort_field != crate::models::SortField::Downloads
-        || sort_direction != crate::models::SortDirection::Descending;
+    let has_filters = filters.min_downloads > 0
+        || filters.min_likes > 0
+        || filters.sort_field != crate::models::SortField::Downloads
+        || filters.sort_direction != crate::models::SortDirection::Descending;
 
     let base_line2 = if let Some(err) = error {
         format!("Error: {}", err)
@@ -299,7 +304,10 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
     // The reserved HUD strip: the rect App::draw renders the activity HUD
     // into. Whenever it is non-empty the constraints fit the terminal
     // exactly, so it is always the rows directly above the status bar.
-    chunks[3]
+    RenderOutput {
+        hud_strip: chunks[3],
+        mouse,
+    }
 }
 
 /// Border style of a panel: yellow while the pane holds keyboard focus
@@ -307,15 +315,10 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> Rect {
 /// Single home for the guard the four panel renderers repeated verbatim
 /// (W3.4c); the H5 style-signature snapshots pin the precedence
 /// focus > hover > plain.
-pub(super) fn border_style(
-    pane: FocusedPane,
-    input_mode: InputMode,
-    focused_pane: FocusedPane,
-    hovered_panel: &Option<FocusedPane>,
-) -> Style {
-    if input_mode == InputMode::Normal && focused_pane == pane {
+pub(super) fn border_style(pane: FocusedPane, focus: &FocusCtx) -> Style {
+    if focus.input_mode == InputMode::Normal && focus.focused_pane == pane {
         Style::default().fg(Color::Yellow)
-    } else if hovered_panel.as_ref() == Some(&pane) {
+    } else if focus.hovered_panel == Some(pane) {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default()
@@ -325,7 +328,7 @@ pub(super) fn border_style(
 /// The shared list-panel shape: bordered block, pane title, pane border
 /// style and one selection highlight everywhere (W3.4c — the Results list,
 /// the file tree and both GGUF lists built this by hand). Callers still
-/// register their area in `panel_areas` for click/hover detection.
+/// register their area in the panel hit-rects for click/hover detection.
 pub(super) fn panel_list<'a>(items: Vec<ListItem<'a>>, title: &'a str, style: Style) -> List<'a> {
     List::new(items)
         .block(

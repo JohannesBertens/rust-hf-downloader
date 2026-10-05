@@ -14,9 +14,11 @@
 use super::snapshot_tests::{quantization_fixtures, three_model_fixtures};
 use super::*;
 use crate::models::{
-    AppOptions, DownloadMetadata, DownloadProgress, DownloadStatus, SortDirection, SortField,
+    AppOptions, DownloadMetadata, DownloadProgress, DownloadStatus, FileTreeNode, ModelMetadata,
+    QuantizationGroup, SortDirection, SortField,
 };
 use ratatui::{backend::TestBackend, Terminal};
+use std::collections::HashMap;
 
 // ----------------- style-signature helpers -----------------
 
@@ -176,8 +178,6 @@ fn draw_ui_with_overlay(
     let file_tree: Option<FileTreeNode> = None;
     let mut file_tree_state = ListState::default();
     let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
-    let mut panel_areas = Vec::new();
-    let mut filter_areas = Vec::new();
 
     let mut hud_rect = Rect::default();
     terminal
@@ -185,35 +185,47 @@ fn draw_ui_with_overlay(
             hud_rect = render_ui(
                 frame,
                 RenderParams {
-                    input: &fixture.input,
-                    input_mode: InputMode::Normal,
-                    models: &fixture.models,
-                    list_state: &mut fixture.list_state,
-                    loading: false,
-                    quantizations: &fixture.quantizations,
-                    quant_file_list_state: &mut fixture.quant_file_list_state,
-                    quant_list_state: &mut fixture.quant_list_state,
-                    loading_quants: false,
-                    focused_pane: focused,
-                    error: &error,
-                    status,
-                    selection_info,
-                    complete_downloads: &complete_downloads,
                     display_mode: ModelDisplayMode::Gguf,
-                    model_metadata: &model_metadata,
-                    file_tree: &file_tree,
-                    file_tree_state: &mut file_tree_state,
-                    sort_field: SortField::Downloads,
-                    sort_direction: SortDirection::Descending,
-                    filter_min_downloads: 0,
-                    filter_min_likes: 0,
-                    focused_filter_field: 5,
-                    panel_areas: &mut panel_areas,
-                    hovered_panel: &hovered,
-                    filter_areas: &mut filter_areas,
+                    focus: FocusCtx {
+                        input_mode: InputMode::Normal,
+                        focused_pane: focused,
+                        hovered_panel: hovered,
+                    },
+                    list: ListCtx {
+                        input: &fixture.input,
+                        models: &fixture.models,
+                        list_state: &mut fixture.list_state,
+                        loading: false,
+                    },
+                    gguf: GgufPanelContext {
+                        quantizations: &fixture.quantizations,
+                        quant_list_state: &mut fixture.quant_list_state,
+                        quant_file_list_state: &mut fixture.quant_file_list_state,
+                        loading_quants: false,
+                        complete_downloads: &complete_downloads,
+                    },
+                    standard: StandardPanelContext {
+                        model_metadata: &model_metadata,
+                        file_tree: &file_tree,
+                        file_tree_state: &mut file_tree_state,
+                        loading: false,
+                    },
+                    filters: FilterCtx {
+                        sort_field: SortField::Downloads,
+                        sort_direction: SortDirection::Descending,
+                        min_downloads: 0,
+                        min_likes: 0,
+                        focused_field: 5,
+                    },
+                    status: StatusCtx {
+                        error: &error,
+                        status,
+                        selection_info,
+                    },
                     hud_height,
                 },
-            );
+            )
+            .hud_strip;
             overlay(frame);
         })
         .expect("failed to draw UI");

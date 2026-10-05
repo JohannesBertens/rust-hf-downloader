@@ -1,8 +1,8 @@
 //! GGUF display mode: quantization groups and the files of the selected
 //! group (plan W3.4b split out of `render.rs`; bodies byte-identical).
 
-use super::{border_style, panel_list};
-use crate::models::{FocusedPane, InputMode, QuantizationGroup, QuantizationInfo};
+use super::{border_style, panel_list, FocusCtx};
+use crate::models::{FocusedPane, QuantizationGroup, QuantizationInfo};
 use crate::utils::format_size;
 use ratatui::{
     layout::Rect,
@@ -13,33 +13,30 @@ use ratatui::{
 };
 use std::collections::HashMap;
 
-pub(super) struct GgufPanelContext<'a> {
-    pub(super) quantizations: &'a [QuantizationGroup],
-    pub(super) quant_list_state: &'a mut ListState,
-    pub(super) quant_file_list_state: &'a mut ListState,
-    pub(super) loading_quants: bool,
-    pub(super) input_mode: InputMode,
-    pub(super) focused_pane: FocusedPane,
-    pub(super) complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
-    pub(super) hovered_panel: &'a Option<FocusedPane>,
-    pub(super) panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
+/// GGUF-mode panel inputs (W5.2 group; formerly flat `RenderParams`
+/// fields). Focus/hover styling and hit-rect registration travel
+/// separately — every panel renderer shares those.
+pub struct GgufPanelContext<'a> {
+    pub quantizations: &'a [QuantizationGroup],
+    pub quant_list_state: &'a mut ListState,
+    pub quant_file_list_state: &'a mut ListState,
+    pub loading_quants: bool,
+    pub complete_downloads: &'a HashMap<String, crate::models::DownloadMetadata>,
 }
 
 pub(super) fn render_gguf_panels(
     frame: &mut Frame,
     chunks: std::rc::Rc<[Rect]>,
-    ctx: GgufPanelContext,
+    ctx: GgufPanelContext<'_>,
+    focus: &FocusCtx,
+    panel_areas: &mut Vec<(FocusedPane, Rect)>,
 ) {
     let GgufPanelContext {
         quantizations,
         quant_list_state,
         quant_file_list_state,
         loading_quants,
-        input_mode,
-        focused_pane,
         complete_downloads,
-        hovered_panel,
-        panel_areas,
     } = ctx;
 
     // Left side: Quantization types
@@ -92,15 +89,11 @@ pub(super) fn render_gguf_panels(
     let quant_list = panel_list(
         quant_items,
         quant_title,
-        border_style(
-            FocusedPane::QuantizationGroups,
-            input_mode,
-            focused_pane,
-            hovered_panel,
-        ),
+        border_style(FocusedPane::QuantizationGroups, focus),
     );
 
-    // Store panel area for click/hover detection
+    // Register panel area for click/hover detection (left before right —
+    // registration order is behavior, see `MouseAreas`)
     panel_areas.push((FocusedPane::QuantizationGroups, chunks[0]));
     frame.render_stateful_widget(quant_list, chunks[0], quant_list_state);
 
@@ -159,15 +152,10 @@ pub(super) fn render_gguf_panels(
     let file_list = panel_list(
         file_items,
         file_title,
-        border_style(
-            FocusedPane::QuantizationFiles,
-            input_mode,
-            focused_pane,
-            hovered_panel,
-        ),
+        border_style(FocusedPane::QuantizationFiles, focus),
     );
 
-    // Store panel area for click/hover detection
+    // Register panel area for click/hover detection
     panel_areas.push((FocusedPane::QuantizationFiles, chunks[1]));
     frame.render_stateful_widget(file_list, chunks[1], quant_file_list_state);
 }

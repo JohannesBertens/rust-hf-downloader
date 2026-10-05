@@ -171,10 +171,11 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - `update_hover_state(column, row)` - update hovered panel for border effects
 - Event coalescing: drains pending events, coalesces mouse moves into single hover update
 
-**Rendering** (`src/ui/render/` — the panel areas register themselves in `mod.rs`/`standard.rs`/`gguf.rs`):
-- `RenderParams` includes `panel_areas`, `filter_areas`, `hovered_panel`
-- Each panel stores its area in `panel_areas` during render
-- `render_filter_toolbar()` calculates and stores `filter_areas`
+**Rendering** (`src/ui/render/` — the render pass is pure; panels return their hit-rects):
+- `RenderParams` groups inputs per consumer (`FocusCtx`, `ListCtx`, `GgufPanelContext`, `StandardPanelContext`, `FilterCtx`, `StatusCtx`); it no longer carries mouse out-params
+- `render_ui` RETURNS a `RenderOutput { hud_strip, mouse: MouseAreas }`; `App::draw` stores `mouse.panels`/`mouse.filters` on `App` each frame
+- Hit-testing is first-match over each list, so REGISTRATION ORDER is behavior: filter fields 0,1,2 in display order; Results list, then bottom panels left-to-right (GGUF: QuantizationGroups, QuantizationFiles; Standard: ModelMetadata, FileTree)
+- `render_filter_toolbar()` returns the three field rects
 - Border styles: `render/mod.rs::border_style` (single guard: yellow focused, cyan hovered, default otherwise); `render/mod.rs::panel_list` is the shared list-panel shape (title + border + selection highlight)
 
 **Non-blocking design**:

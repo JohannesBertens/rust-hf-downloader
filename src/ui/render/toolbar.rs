@@ -9,19 +9,40 @@ use ratatui::{
     Frame,
 };
 
-/// Render filter and sort toolbar
-#[allow(clippy::too_many_arguments)]
+/// Toolbar input group (W5.2; formerly flat `RenderParams` fields): the
+/// live filter/sort values plus which field the keyboard focus ring
+/// highlights. Owned by this module because only the toolbar reads it.
+#[derive(Debug, Clone, Copy)]
+pub struct FilterCtx {
+    pub sort_field: crate::models::SortField,
+    pub sort_direction: crate::models::SortDirection,
+    pub min_downloads: u64,
+    pub min_likes: u64,
+    pub focused_field: usize,
+}
+
+/// Render filter and sort toolbar; returns the three clickable field
+/// rects in display order — sort (0), min downloads (1), min likes (2) —
+/// for the caller's hit-rect registry (W5.2: returned instead of pushed
+/// into a `&mut` out-param, so the render pass stays pure).
 pub fn render_filter_toolbar(
     frame: &mut Frame,
     area: Rect,
-    sort_field: crate::models::SortField,
-    sort_direction: crate::models::SortDirection,
-    min_downloads: u64,
-    min_likes: u64,
-    focused_field: usize,
-    filter_areas: &mut Vec<(usize, Rect)>,
-) {
+    filters: FilterCtx,
+) -> Vec<(usize, Rect)> {
     use crate::models::{SortDirection, SortField};
+
+    let FilterCtx {
+        sort_field,
+        sort_direction,
+        min_downloads,
+        min_likes,
+        focused_field,
+    } = filters;
+
+    // Hit-rects built in display order below (registration order is
+    // behavior: first match wins hit-tests — see `MouseAreas`).
+    let mut filter_areas = Vec::new();
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -203,4 +224,6 @@ pub fn render_filter_toolbar(
 
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
+
+    filter_areas
 }

@@ -1,8 +1,8 @@
 //! Standard display mode: the model-metadata panel and the repository
 //! file tree (plan W3.4b split out of `render.rs`; bodies byte-identical).
 
-use super::{border_style, panel_list};
-use crate::models::{FileTreeNode, FocusedPane, InputMode, ModelMetadata};
+use super::{border_style, panel_list, FocusCtx};
+use crate::models::{FileTreeNode, FocusedPane, ModelMetadata};
 use crate::ui::tree::{count_tree_files, flatten_tree};
 use crate::utils::format_size;
 use ratatui::{
@@ -13,31 +13,29 @@ use ratatui::{
     Frame,
 };
 
-pub(super) struct StandardPanelContext<'a> {
-    pub(super) model_metadata: &'a Option<ModelMetadata>,
-    pub(super) file_tree: &'a Option<FileTreeNode>,
-    pub(super) file_tree_state: &'a mut ListState,
-    pub(super) loading: bool,
-    pub(super) input_mode: InputMode,
-    pub(super) focused_pane: FocusedPane,
-    pub(super) hovered_panel: &'a Option<FocusedPane>,
-    pub(super) panel_areas: &'a mut Vec<(FocusedPane, Rect)>,
+/// Standard-mode panel inputs (W5.2 group; formerly flat `RenderParams`
+/// fields). `loading` is the shared quant-loading flag — Standard mode
+/// reuses the GGUF loads' spinner. Focus/hover styling and hit-rect
+/// registration travel separately — every panel renderer shares those.
+pub struct StandardPanelContext<'a> {
+    pub model_metadata: &'a Option<ModelMetadata>,
+    pub file_tree: &'a Option<FileTreeNode>,
+    pub file_tree_state: &'a mut ListState,
+    pub loading: bool,
 }
 
 pub(super) fn render_standard_panels(
     frame: &mut Frame,
     chunks: std::rc::Rc<[Rect]>,
-    ctx: StandardPanelContext,
+    ctx: StandardPanelContext<'_>,
+    focus: &FocusCtx,
+    panel_areas: &mut Vec<(FocusedPane, Rect)>,
 ) {
     let StandardPanelContext {
         model_metadata,
         file_tree,
         file_tree_state,
         loading,
-        input_mode,
-        focused_pane,
-        hovered_panel,
-        panel_areas,
     } = ctx;
 
     // Left side: Model metadata
@@ -123,16 +121,12 @@ pub(super) fn render_standard_panels(
             Block::default()
                 .borders(Borders::ALL)
                 .title(meta_title)
-                .border_style(border_style(
-                    FocusedPane::ModelMetadata,
-                    input_mode,
-                    focused_pane,
-                    hovered_panel,
-                )),
+                .border_style(border_style(FocusedPane::ModelMetadata, focus)),
         )
         .wrap(Wrap { trim: false });
 
-    // Store panel area for click/hover detection
+    // Register panel area for click/hover detection (left before right —
+    // registration order is behavior, see `MouseAreas`)
     panel_areas.push((FocusedPane::ModelMetadata, chunks[0]));
     frame.render_widget(metadata_widget, chunks[0]);
 
@@ -142,22 +136,17 @@ pub(super) fn render_standard_panels(
         chunks[1],
         file_tree,
         file_tree_state,
-        input_mode,
-        focused_pane,
-        hovered_panel,
+        focus,
         panel_areas,
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_file_tree_panel(
     frame: &mut Frame,
     area: Rect,
     file_tree: &Option<FileTreeNode>,
     file_tree_state: &mut ListState,
-    input_mode: InputMode,
-    focused_pane: FocusedPane,
-    hovered_panel: &Option<FocusedPane>,
+    focus: &FocusCtx,
     panel_areas: &mut Vec<(FocusedPane, Rect)>,
 ) {
     let tree_title = if file_tree.is_none() {
@@ -226,15 +215,10 @@ fn render_file_tree_panel(
     let tree_list = panel_list(
         tree_items,
         tree_title,
-        border_style(
-            FocusedPane::FileTree,
-            input_mode,
-            focused_pane,
-            hovered_panel,
-        ),
+        border_style(FocusedPane::FileTree, focus),
     );
 
-    // Store panel area for click/hover detection
+    // Register panel area for click/hover detection
     panel_areas.push((FocusedPane::FileTree, area));
     frame.render_stateful_widget(tree_list, area, file_tree_state);
 }

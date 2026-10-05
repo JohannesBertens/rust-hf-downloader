@@ -151,44 +151,63 @@ impl App {
 
         // Main UI. render_ui owns the vertical layout (W4.10): it clamps
         // the desired HUD strip height against the base layout and returns
-        // the reserved strip rect.
-        let hud_rect = crate::ui::render::render_ui(
+        // the reserved strip rect plus this frame's hit-rects (W5.2: the
+        // render pass is pure — the caller owns the mouse-area registry).
+        let out = crate::ui::render::render_ui(
             frame,
             crate::ui::render::RenderParams {
-                input: &self.input,
-                input_mode: self.input_mode,
-                models: &models,
-                list_state: &mut self.list_state,
-                loading: *self.loading.read(),
-                quantizations: &quantizations,
-                quant_file_list_state: &mut self.quant_file_list_state,
-                quant_list_state: &mut self.quant_list_state,
-                loading_quants: *self.loading_quants.read(),
-                focused_pane: self.focused_pane,
-                error: &self.error.read(),
-                status: &self.status.read(),
-                selection_info: &self.selection_info.read(),
-                complete_downloads: &complete_downloads,
                 display_mode: *self.display_mode.read(),
-                model_metadata: &model_metadata,
-                file_tree: &file_tree,
-                file_tree_state: &mut self.file_tree_state,
-                sort_field: self.filters.sort_field,
-                sort_direction: self.filters.sort_direction,
-                filter_min_downloads: self.filters.min_downloads,
-                filter_min_likes: self.filters.min_likes,
-                focused_filter_field: self.focused_filter_field,
-                panel_areas: &mut self.panel_areas,
-                hovered_panel: &self.hovered_panel,
-                filter_areas: &mut self.filter_areas,
+                focus: crate::ui::render::FocusCtx {
+                    input_mode: self.input_mode,
+                    focused_pane: self.focused_pane,
+                    hovered_panel: self.hovered_panel,
+                },
+                list: crate::ui::render::ListCtx {
+                    input: &self.input,
+                    models: &models,
+                    list_state: &mut self.list_state,
+                    loading: *self.loading.read(),
+                },
+                gguf: crate::ui::render::GgufPanelContext {
+                    quantizations: &quantizations,
+                    quant_list_state: &mut self.quant_list_state,
+                    quant_file_list_state: &mut self.quant_file_list_state,
+                    loading_quants: *self.loading_quants.read(),
+                    complete_downloads: &complete_downloads,
+                },
+                standard: crate::ui::render::StandardPanelContext {
+                    model_metadata: &model_metadata,
+                    file_tree: &file_tree,
+                    file_tree_state: &mut self.file_tree_state,
+                    // Standard mode reuses the quant-loading spinner flag
+                    loading: *self.loading_quants.read(),
+                },
+                filters: crate::ui::render::FilterCtx {
+                    sort_field: self.filters.sort_field,
+                    sort_direction: self.filters.sort_direction,
+                    min_downloads: self.filters.min_downloads,
+                    min_likes: self.filters.min_likes,
+                    focused_field: self.focused_filter_field,
+                },
+                status: crate::ui::render::StatusCtx {
+                    error: &self.error.read(),
+                    status: &self.status.read(),
+                    selection_info: &self.selection_info.read(),
+                },
                 hud_height: crate::ui::render::activity_hud_height(&hud_params),
             },
         );
 
+        // Register this frame's hit-rects for click/hover detection
+        // (replaces the former &mut Vec out-params; same registration
+        // order as always — first match wins on lookup).
+        self.panel_areas = out.mouse.panels;
+        self.filter_areas = out.mouse.filters;
+
         // Render the activity HUD into the strip render_ui reserved above
         // the status bar (render_ui shrank the main content accordingly)
-        if hud_rect.height > 0 {
-            crate::ui::render::render_activity_hud(frame, hud_rect, &hud_params);
+        if out.hud_strip.height > 0 {
+            crate::ui::render::render_activity_hud(frame, out.hud_strip, &hud_params);
         }
 
         // Render popups (must be last to appear on top)

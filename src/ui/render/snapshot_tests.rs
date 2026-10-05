@@ -1,8 +1,10 @@
 use super::*;
 use crate::models::{
-    AppOptions, DownloadMetadata, DownloadStatus, QuantizationInfo, SortDirection, SortField,
+    AppOptions, DownloadMetadata, DownloadStatus, FileTreeNode, ModelMetadata, QuantizationGroup,
+    QuantizationInfo, SortDirection, SortField,
 };
 use ratatui::{backend::TestBackend, Terminal};
+use std::collections::HashMap;
 
 const TERMINAL_WIDTH: u16 = 100;
 const TERMINAL_HEIGHT: u16 = 30;
@@ -72,7 +74,7 @@ pub(super) fn quantization_fixtures() -> Vec<QuantizationGroup> {
 }
 
 /// Draw `render_ui` on the terminal with fixed defaults for every
-/// RenderParams field not worth varying between tests (all filters at
+/// RenderParams group not worth varying between tests (all filters at
 /// defaults, no error, no hovered panel, Gguf display mode).
 #[allow(clippy::too_many_arguments)]
 fn draw_render_ui(
@@ -92,41 +94,50 @@ fn draw_render_ui(
     let file_tree: Option<FileTreeNode> = None;
     let mut file_tree_state = ListState::default();
     let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
-    let mut panel_areas = Vec::new();
     let hovered_panel: Option<FocusedPane> = None;
-    let mut filter_areas = Vec::new();
 
     terminal
         .draw(|frame| {
             render_ui(
                 frame,
                 RenderParams {
-                    input,
-                    input_mode: InputMode::Normal,
-                    models,
-                    list_state,
-                    loading: false,
-                    quantizations,
-                    quant_file_list_state,
-                    quant_list_state,
-                    loading_quants: false,
-                    focused_pane,
-                    error: &error,
-                    status,
-                    selection_info,
-                    complete_downloads: &complete_downloads,
                     display_mode: ModelDisplayMode::Gguf,
-                    model_metadata: &model_metadata,
-                    file_tree: &file_tree,
-                    file_tree_state: &mut file_tree_state,
-                    sort_field: SortField::Downloads,
-                    sort_direction: SortDirection::Descending,
-                    filter_min_downloads: 0,
-                    filter_min_likes: 0,
-                    focused_filter_field: 5,
-                    panel_areas: &mut panel_areas,
-                    hovered_panel: &hovered_panel,
-                    filter_areas: &mut filter_areas,
+                    focus: FocusCtx {
+                        input_mode: InputMode::Normal,
+                        focused_pane,
+                        hovered_panel,
+                    },
+                    list: ListCtx {
+                        input,
+                        models,
+                        list_state,
+                        loading: false,
+                    },
+                    gguf: GgufPanelContext {
+                        quantizations,
+                        quant_list_state,
+                        quant_file_list_state,
+                        loading_quants: false,
+                        complete_downloads: &complete_downloads,
+                    },
+                    standard: StandardPanelContext {
+                        model_metadata: &model_metadata,
+                        file_tree: &file_tree,
+                        file_tree_state: &mut file_tree_state,
+                        loading: false,
+                    },
+                    filters: FilterCtx {
+                        sort_field: SortField::Downloads,
+                        sort_direction: SortDirection::Descending,
+                        min_downloads: 0,
+                        min_likes: 0,
+                        focused_field: 5,
+                    },
+                    status: StatusCtx {
+                        error: &error,
+                        status,
+                        selection_info,
+                    },
                     hud_height: 0,
                 },
             );
@@ -242,9 +253,7 @@ fn snapshot_search_popup_over_populated_ui() {
     let file_tree: Option<FileTreeNode> = None;
     let mut file_tree_state = ListState::default();
     let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
-    let mut panel_areas = Vec::new();
     let hovered_panel: Option<FocusedPane> = None;
-    let mut filter_areas = Vec::new();
 
     let mut terminal = test_terminal();
     terminal
@@ -252,32 +261,43 @@ fn snapshot_search_popup_over_populated_ui() {
             render_ui(
                 frame,
                 RenderParams {
-                    input: &input,
-                    input_mode: InputMode::Normal,
-                    models: &models,
-                    list_state: &mut list_state,
-                    loading: false,
-                    quantizations: &quantizations,
-                    quant_file_list_state: &mut quant_file_list_state,
-                    quant_list_state: &mut quant_list_state,
-                    loading_quants: false,
-                    focused_pane: FocusedPane::Models,
-                    error: &error,
-                    status: "Press / to search",
-                    selection_info: "Selection: 2 of 3",
-                    complete_downloads: &complete_downloads,
                     display_mode: ModelDisplayMode::Gguf,
-                    model_metadata: &model_metadata,
-                    file_tree: &file_tree,
-                    file_tree_state: &mut file_tree_state,
-                    sort_field: SortField::Downloads,
-                    sort_direction: SortDirection::Descending,
-                    filter_min_downloads: 0,
-                    filter_min_likes: 0,
-                    focused_filter_field: 5,
-                    panel_areas: &mut panel_areas,
-                    hovered_panel: &hovered_panel,
-                    filter_areas: &mut filter_areas,
+                    focus: FocusCtx {
+                        input_mode: InputMode::Normal,
+                        focused_pane: FocusedPane::Models,
+                        hovered_panel,
+                    },
+                    list: ListCtx {
+                        input: &input,
+                        models: &models,
+                        list_state: &mut list_state,
+                        loading: false,
+                    },
+                    gguf: GgufPanelContext {
+                        quantizations: &quantizations,
+                        quant_list_state: &mut quant_list_state,
+                        quant_file_list_state: &mut quant_file_list_state,
+                        loading_quants: false,
+                        complete_downloads: &complete_downloads,
+                    },
+                    standard: StandardPanelContext {
+                        model_metadata: &model_metadata,
+                        file_tree: &file_tree,
+                        file_tree_state: &mut file_tree_state,
+                        loading: false,
+                    },
+                    filters: FilterCtx {
+                        sort_field: SortField::Downloads,
+                        sort_direction: SortDirection::Descending,
+                        min_downloads: 0,
+                        min_likes: 0,
+                        focused_field: 5,
+                    },
+                    status: StatusCtx {
+                        error: &error,
+                        status: "Press / to search",
+                        selection_info: "Selection: 2 of 3",
+                    },
                     hud_height: 0,
                 },
             );
@@ -390,7 +410,6 @@ fn snapshot_filter_toolbar_unfocused() {
     // focused_field 5 is out of range (valid: 0=sort, 1=downloads,
     // 2=likes), so no field is highlighted. Default values also
     // trigger the "[No Filters]" preset indicator.
-    let mut filter_areas = Vec::new();
     let mut terminal = test_terminal();
     terminal
         .draw(|frame| {
@@ -402,12 +421,13 @@ fn snapshot_filter_toolbar_unfocused() {
                     width: TERMINAL_WIDTH,
                     height: 3,
                 },
-                SortField::Downloads,
-                SortDirection::Descending,
-                0,
-                0,
-                5,
-                &mut filter_areas,
+                FilterCtx {
+                    sort_field: SortField::Downloads,
+                    sort_direction: SortDirection::Descending,
+                    min_downloads: 0,
+                    min_likes: 0,
+                    focused_field: 5,
+                },
             );
         })
         .expect("failed to draw filter toolbar");
@@ -416,7 +436,6 @@ fn snapshot_filter_toolbar_unfocused() {
 
 #[test]
 fn snapshot_filter_toolbar_sort_focused() {
-    let mut filter_areas = Vec::new();
     let mut terminal = test_terminal();
     terminal
         .draw(|frame| {
@@ -428,12 +447,13 @@ fn snapshot_filter_toolbar_sort_focused() {
                     width: TERMINAL_WIDTH,
                     height: 3,
                 },
-                SortField::Likes,
-                SortDirection::Ascending,
-                2_500,
-                300,
-                0,
-                &mut filter_areas,
+                FilterCtx {
+                    sort_field: SortField::Likes,
+                    sort_direction: SortDirection::Ascending,
+                    min_downloads: 2_500,
+                    min_likes: 300,
+                    focused_field: 0,
+                },
             );
         })
         .expect("failed to draw filter toolbar");
@@ -442,7 +462,6 @@ fn snapshot_filter_toolbar_sort_focused() {
 
 #[test]
 fn snapshot_filter_toolbar_downloads_focused() {
-    let mut filter_areas = Vec::new();
     let mut terminal = test_terminal();
     terminal
         .draw(|frame| {
@@ -454,12 +473,13 @@ fn snapshot_filter_toolbar_downloads_focused() {
                     width: TERMINAL_WIDTH,
                     height: 3,
                 },
-                SortField::Downloads,
-                SortDirection::Descending,
-                10_000,
-                100,
-                1,
-                &mut filter_areas,
+                FilterCtx {
+                    sort_field: SortField::Downloads,
+                    sort_direction: SortDirection::Descending,
+                    min_downloads: 10_000,
+                    min_likes: 100,
+                    focused_field: 1,
+                },
             );
         })
         .expect("failed to draw filter toolbar");
