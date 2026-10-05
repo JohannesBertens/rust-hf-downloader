@@ -4,7 +4,7 @@
 //! idle when the queue is exhausted.
 
 use crate::engine::EngineState;
-use crate::models::{DownloadStatus, VerificationProgress, VerificationQueueItem, VerifyOutcome};
+use crate::models::{VerificationProgress, VerificationQueueItem, VerifyOutcome};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -97,23 +97,6 @@ pub struct VerificationResultCounters {
     pub failed: Arc<AtomicUsize>,
 }
 
-/// Whether a registry-recorded path string refers to the same file as
-/// `actual`. Registry entries record the user-facing path (original base,
-/// e.g. `/var/...` on macOS or `C:\...` on Windows) while download
-/// internals canonicalize (`/private/var/...`, `\\?\C:\...`), so raw
-/// string equality fails cross-platform. Canonicalize both sides when the
-/// raw forms differ; falls back to `false` when either side cannot be
-/// resolved.
-fn path_matches(recorded: &str, actual: &Path) -> bool {
-    if recorded == actual.to_string_lossy() {
-        return true;
-    }
-    match (Path::new(recorded).canonicalize(), actual.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 /// Verify a single file's SHA256 hash and report a typed
 /// [`VerifyOutcome`] through the engine's verify channel.
 async fn verify_file(item: VerificationQueueItem, state: EngineState) {
@@ -189,24 +172,7 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
                 // truth — the in-memory engine mirror may be empty, e.g. for
                 // CLI runs that never loaded it) and keep the mirror in sync
                 // for TUI views.
-                let mut registry = crate::registry::load_registry();
-                if let Some(entry) = registry
-                    .downloads
-                    .iter_mut()
-                    .find(|d| path_matches(&d.local_path, &local_path))
-                {
-                    entry.status = DownloadStatus::HashMismatch;
-                }
-                crate::registry::save_registry(&registry);
-
-                let mut mirror = state.download_registry.lock().await;
-                if let Some(entry) = mirror
-                    .downloads
-                    .iter_mut()
-                    .find(|d| path_matches(&d.local_path, &local_path))
-                {
-                    entry.status = DownloadStatus::HashMismatch;
-                }
+                crate::registry::mark_mismatch(&state.download_registry, &local_path).await;
             }
         }
         Err(e) => {
@@ -342,36 +308,6 @@ pub async fn queue_verification(
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn path_matches_accepts_raw_string_equality() {
-        let f = temp_file("path-eq", 4, 1);
-        let s = f.to_string_lossy().to_string();
-        assert!(path_matches(&s, &f));
-        let _ = std::fs::remove_file(&f);
-    }
-
-    /// Registry entries record the user-facing path while download
-    /// internals canonicalize; on macOS the temp dir lives behind the
-    /// /var -> /private/var symlink, on Windows canonicalize adds a
-    /// \\?\ prefix. A symlinked alias reproduces the divergence on any
-    /// Unix: the raw strings differ but both resolve to the same file.
-    #[cfg(unix)]
-    #[test]
-    fn path_matches_resolves_symlinked_aliases() {
-        let f = temp_file("path-symlink", 4, 1);
-        let dir = std::env::temp_dir().join(format!("rhd-verify-alias-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let alias_dir = dir.join("alias");
-        std::os::unix::fs::symlink(f.parent().unwrap(), &alias_dir).unwrap();
-        let alias_path = alias_dir.join(f.file_name().unwrap());
-        let recorded = alias_path.to_string_lossy().to_string();
-        assert_ne!(recorded, f.to_string_lossy().to_string());
-        assert!(path_matches(&recorded, &f));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_file(&f);
-    }
 
     fn temp_file(name: &str, size_bytes: usize, fill: u8) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(

@@ -179,13 +179,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
             .unwrap_or(0);
 
         // Update registry as complete
-        let mut registry = registry::load_registry();
-        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-            entry.status = DownloadStatus::Complete;
-            let mut complete = complete_downloads.lock().await;
-            complete.insert(filename.clone(), entry.clone());
-        }
-        registry::save_registry(&registry);
+        registry::mark_complete(&complete_downloads, &url, &filename).await;
 
         // Queue verification if enabled AND hash is available
         let verification_enabled = DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
@@ -244,21 +238,14 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
                 // Verify the download is complete
                 if final_size == expected_size && expected_size > 0 {
                     // Update registry: mark as complete and update URL if it changed (raw fallback)
-                    let mut registry = registry::load_registry();
-                    if let Some(entry) = registry
-                        .downloads
-                        .iter_mut()
-                        .find(|d| d.url == url || d.url == successful_url)
-                    {
-                        entry.status = DownloadStatus::Complete;
-                        entry.downloaded_size = final_size;
-                        entry.url = successful_url.clone(); // Update with successful URL
-
-                        // Update in-memory complete downloads map
-                        let mut complete = complete_downloads.lock().await;
-                        complete.insert(filename.clone(), entry.clone());
-                    }
-                    registry::save_registry(&registry);
+                    registry::mark_complete_with_url(
+                        &complete_downloads,
+                        &url,
+                        &successful_url,
+                        final_size,
+                        &filename,
+                    )
+                    .await;
 
                     // Queue verification if enabled AND hash is available
                     let verification_enabled =
@@ -330,12 +317,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
                         }
 
                         // Update registry with failed state
-                        let mut registry = registry::load_registry();
-                        if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-                            entry.status = DownloadStatus::Incomplete;
-                            entry.downloaded_size = 0;
-                        }
-                        registry::save_registry(&registry);
+                        registry::mark_failed(&url);
 
                         outcome = FileOutcome::AuthRequired {
                             model_id: model_id.clone(),
@@ -352,12 +334,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
                 }
 
                 // Update registry with failed state
-                let mut registry = registry::load_registry();
-                if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-                    entry.status = DownloadStatus::Incomplete;
-                    entry.downloaded_size = 0;
-                }
-                registry::save_registry(&registry);
+                registry::mark_failed(&url);
 
                 outcome = FileOutcome::Failed {
                     filename: filename.clone(),
@@ -511,30 +488,21 @@ async fn download_chunked(
     }
 
     // Update metadata entry in registry
-    let mut registry = registry::load_registry();
-
-    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-        entry.total_size = total_size;
-        entry.downloaded_size = 0;
-    } else {
-        registry.downloads.push(DownloadMetadata {
-            model_id: model_id.to_string(),
-            filename: filename.to_string(),
-            url: url.to_string(),
-            local_path: local_path_str.clone(),
-            total_size,
-            downloaded_size: 0,
-            status: DownloadStatus::Incomplete,
-            expected_sha256: expected_sha256.clone(),
-            revision: if revision == crate::api::DEFAULT_REVISION {
-                None
-            } else {
-                Some(revision.to_string())
-            },
-        });
-    }
-
-    registry::save_registry(&registry);
+    registry::upsert_metadata(DownloadMetadata {
+        model_id: model_id.to_string(),
+        filename: filename.to_string(),
+        url: url.to_string(),
+        local_path: local_path_str.clone(),
+        total_size,
+        downloaded_size: 0,
+        status: DownloadStatus::Incomplete,
+        expected_sha256: expected_sha256.clone(),
+        revision: if revision == crate::api::DEFAULT_REVISION {
+            None
+        } else {
+            Some(revision.to_string())
+        },
+    });
 
     // Calculate dynamic chunk size based on file size
     let chunk_size = calculate_chunk_size(total_size);

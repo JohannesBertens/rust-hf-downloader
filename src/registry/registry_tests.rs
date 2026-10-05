@@ -13,10 +13,12 @@
 //!   between concurrent writers is a known deferred defect (plan §8) that
 //!   these tests PIN, not fix.
 //!
-//! The `*_seq` helpers below replicate the exact inline sequences (same
-//! statements, same order) from their source sites. When W2.4b replaces
-//! them with typed ops, the byte assertions here must pass UNCHANGED —
-//! that is the migration's behavior-preservation proof.
+//! The golden tests drive the real typed ops (`super::mark_complete`,
+//! `mark_failed`, `upsert_metadata`, `mark_mismatch`, and the real
+//! `engine::register_pending`). In W2.4a the very same assertions pinned
+//! byte-for-byte identical replicas of the pre-refactor inline sequences —
+//! passing unchanged through the W2.4b swap is the migration's
+//! behavior-preservation proof.
 
 use super::*;
 use crate::models::{CompleteDownloads, DownloadMetadata, DownloadRegistry, DownloadStatus};
@@ -208,114 +210,17 @@ fn fixture_registry(tmp: &Path) -> DownloadRegistry {
 }
 
 // -------------------------------------------------------------------------
-// Replicas of today's inline mutation sequences (W2.4a)
+// Golden tests
 //
-// Each `*_seq` helper copies the exact load-modify-save statements (and the
-// mirror update, in the same order) from its source site. W2.4b swaps these
-// for the typed ops; the golden assertions must not change.
+// (W2.4a pinned these against `*_seq` replicas of the inline sequences;
+// W2.4b swapped the replicas for the typed ops in `registry` — the byte
+// assertions are UNCHANGED, and that is the migration's
+// behavior-preservation proof.)
 // -------------------------------------------------------------------------
-
-/// Replica of download.rs `start_download` "file already exists" site (find
-/// by url -> Complete; complete-map insert happens BEFORE the save).
-async fn mark_complete_seq(
-    complete_downloads: &Arc<Mutex<CompleteDownloads>>,
-    url: &str,
-    filename: &str,
-) {
-    let mut registry = load_registry();
-    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-        entry.status = DownloadStatus::Complete;
-        let mut complete = complete_downloads.lock().await;
-        complete.insert(filename.to_string(), entry.clone());
-    }
-    save_registry(&registry);
-}
-
-/// Replica of download.rs success site (find by url OR successful_url ->
-/// Complete + downloaded_size + url rewrite; complete-map insert happens
-/// BEFORE the save).
-async fn mark_complete_with_url_seq(
-    complete_downloads: &Arc<Mutex<CompleteDownloads>>,
-    url: &str,
-    successful_url: &str,
-    downloaded_size: u64,
-    filename: &str,
-) {
-    let mut registry = load_registry();
-    if let Some(entry) = registry
-        .downloads
-        .iter_mut()
-        .find(|d| d.url == url || d.url == successful_url)
-    {
-        entry.status = DownloadStatus::Complete;
-        entry.downloaded_size = downloaded_size;
-        entry.url = successful_url.to_string();
-
-        let mut complete = complete_downloads.lock().await;
-        complete.insert(filename.to_string(), entry.clone());
-    }
-    save_registry(&registry);
-}
-
-/// Replica of the download.rs failure sites (the 401 path and the
-/// final-failure path perform the identical sequence: find by url ->
-/// Incomplete, downloaded_size = 0; no mirror update).
-fn mark_failed_seq(url: &str) {
-    let mut registry = load_registry();
-    if let Some(entry) = registry.downloads.iter_mut().find(|d| d.url == url) {
-        entry.status = DownloadStatus::Incomplete;
-        entry.downloaded_size = 0;
-    }
-    save_registry(&registry);
-}
-
-/// Replica of the download.rs `download_chunked` metadata-upsert site (find
-/// by url -> total_size + downloaded_size = 0; else append a fresh
-/// `Incomplete` entry; no mirror update).
-fn upsert_metadata_seq(entry: DownloadMetadata) {
-    let mut registry = load_registry();
-    if let Some(existing) = registry.downloads.iter_mut().find(|d| d.url == entry.url) {
-        existing.total_size = entry.total_size;
-        existing.downloaded_size = 0;
-    } else {
-        registry.downloads.push(entry);
-    }
-    save_registry(&registry);
-}
-
-/// Replica of the verification.rs mismatch site. The real site matches
-/// entries with `path_matches` (raw string equality with a canonicalizing
-/// fallback); the tests below use raw-equal path strings, so a plain string
-/// comparison is behaviorally identical here. The mirror is patched AFTER
-/// the save, regardless of the save's (silently swallowed) outcome.
-async fn mark_mismatch_seq(download_registry: &Arc<Mutex<DownloadRegistry>>, local_path: &str) {
-    let mut registry = load_registry();
-    if let Some(entry) = registry
-        .downloads
-        .iter_mut()
-        .find(|d| d.local_path == local_path)
-    {
-        entry.status = DownloadStatus::HashMismatch;
-    }
-    save_registry(&registry);
-
-    let mut mirror = download_registry.lock().await;
-    if let Some(entry) = mirror
-        .downloads
-        .iter_mut()
-        .find(|d| d.local_path == local_path)
-    {
-        entry.status = DownloadStatus::HashMismatch;
-    }
-}
 
 fn empty_complete_map() -> Arc<Mutex<CompleteDownloads>> {
     Arc::new(Mutex::new(HashMap::new()))
 }
-
-// -------------------------------------------------------------------------
-// Golden tests
-// -------------------------------------------------------------------------
 
 /// Anchors the whole module: the fixture bytes are pinned by one fully
 /// inline literal (no `block` helpers), the `block` helpers reproduce those
@@ -378,7 +283,7 @@ async fn golden_mark_complete_already_exists_pins_bytes_and_complete_map() {
     write_fixture(&tmp);
 
     let complete = empty_complete_map();
-    mark_complete_seq(&complete, URL_INCOMPLETE, "incomplete.bin").await;
+    mark_complete(&complete, URL_INCOMPLETE, "incomplete.bin").await;
 
     assert_eq!(
         read_registry_file(),
@@ -410,7 +315,7 @@ async fn golden_mark_complete_already_exists_pins_bytes_and_complete_map() {
     // No matching url: the site still saves (load-modify-save round trip,
     // byte-stable) and never touches the map.
     let before = read_registry_file();
-    mark_complete_seq(
+    mark_complete(
         &complete,
         "https://huggingface.co/no/such/resolve/main/x.bin",
         "x.bin",
@@ -436,7 +341,7 @@ async fn golden_mark_complete_with_url_rewrite_pins_bytes_and_complete_map() {
     write_fixture(&tmp);
 
     let complete = empty_complete_map();
-    mark_complete_with_url_seq(&complete, URL_QUANT, URL_RAW_QUANT, 999_999, "quant.gguf").await;
+    mark_complete_with_url(&complete, URL_QUANT, URL_RAW_QUANT, 999_999, "quant.gguf").await;
 
     assert_eq!(
         read_registry_file(),
@@ -478,7 +383,7 @@ fn golden_mark_failed_pins_bytes() {
     let _guard = DataDirGuard::install(&tmp);
     write_fixture(&tmp);
 
-    mark_failed_seq(URL_COMPLETE);
+    mark_failed(URL_COMPLETE);
 
     assert_eq!(
         read_registry_file(),
@@ -527,7 +432,7 @@ fn golden_upsert_metadata_updates_and_appends_pins_bytes() {
         expected_sha256: None,
         revision: None,
     };
-    upsert_metadata_seq(refresh);
+    upsert_metadata(refresh);
 
     assert_eq!(
         read_registry_file(),
@@ -561,7 +466,7 @@ fn golden_upsert_metadata_updates_and_appends_pins_bytes() {
         expected_sha256: Some("ff00".to_string()),
         revision: Some("nightly".to_string()),
     };
-    upsert_metadata_seq(fresh);
+    upsert_metadata(fresh);
 
     assert_eq!(
         read_registry_file(),
@@ -599,7 +504,7 @@ async fn golden_mark_mismatch_pins_bytes_and_registry_mirror() {
 
     // Phase 1: seeded mirror (the TUI case) — both disk and mirror update.
     let mirror = Arc::new(Mutex::new(fixture_registry(&tmp)));
-    mark_mismatch_seq(&mirror, &local(&tmp, "org/model/complete.gguf")).await;
+    mark_mismatch(&mirror, Path::new(&local(&tmp, "org/model/complete.gguf"))).await;
 
     assert_eq!(
         read_registry_file(),
@@ -628,7 +533,11 @@ async fn golden_mark_mismatch_pins_bytes_and_registry_mirror() {
     // Phase 2: EMPTY mirror (the CLI-before-bootstrap case) — the disk still
     // updates (source of truth), the mirror has nothing to patch.
     let empty_mirror = Arc::new(Mutex::new(DownloadRegistry::default()));
-    mark_mismatch_seq(&empty_mirror, &local(&tmp, "org/model/incomplete.bin")).await;
+    mark_mismatch(
+        &empty_mirror,
+        Path::new(&local(&tmp, "org/model/incomplete.bin")),
+    )
+    .await;
 
     assert_eq!(
         read_registry_file(),
@@ -798,7 +707,7 @@ async fn save_failure_mismatch_mirror_still_patched_and_error_silent() {
     }));
 
     // Must not panic; the io error is silently swallowed by save_registry.
-    mark_mismatch_seq(&mirror, &dead_path).await;
+    mark_mismatch(&mirror, Path::new(&dead_path)).await;
 
     // The save failed: no registry file can exist at the dead path.
     assert!(!crate::paths::registry_path().exists());
@@ -824,7 +733,7 @@ async fn save_failure_complete_map_insert_requires_disk_entry() {
     let _guard = DataDirGuard::install(&not_a_dir);
 
     let complete = empty_complete_map();
-    mark_complete_seq(&complete, URL_COMPLETE, "complete.gguf").await;
+    mark_complete(&complete, URL_COMPLETE, "complete.gguf").await;
 
     assert!(
         !crate::paths::registry_path().exists(),
@@ -844,7 +753,10 @@ async fn save_failure_complete_map_insert_requires_disk_entry() {
 // Both writers replicate the verification-site sequence against the same
 // registry file, with a rendezvous BETWEEN load and save that forces the
 // un-serialized load-modify-save race deterministically: both writers load
-// the pre-state, then overwrite each other's save. The pins:
+// the pre-state, then overwrite each other's save. The typed op exposes
+// no such rendezvous seam, so this test pins the SHAPE the ops must keep
+// (no cross-op lock); `two_writers_through_the_real_ops_stay_safe` below
+// drives the real `mark_mismatch` op concurrently. The pins:
 //
 // - both ops complete (no panic, no deadlock),
 // - the final file parses,
@@ -945,6 +857,136 @@ async fn two_writers_complete_ops_final_file_parses_mirror_matches_last_write() 
 
     // Mirror reflects BOTH writers' patches — each writer updated it after
     // its own save, regardless of the disk outcome.
+    let m = mirror.lock().await;
+    assert_eq!(m.downloads[0].status, DownloadStatus::HashMismatch);
+    assert_eq!(m.downloads[1].status, DownloadStatus::HashMismatch);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// -------------------------------------------------------------------------
+// path_matches (moved from verification.rs with the mark_mismatch op)
+// -------------------------------------------------------------------------
+
+fn small_temp_file(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "rhd-registry-pathmatch-{name}-{}",
+        std::process::id()
+    ));
+    std::fs::write(&path, [1u8; 4]).expect("create temp file");
+    path
+}
+
+#[test]
+fn path_matches_accepts_raw_string_equality() {
+    let f = small_temp_file("path-eq");
+    let s = f.to_string_lossy().to_string();
+    assert!(path_matches(&s, &f));
+    let _ = std::fs::remove_file(&f);
+}
+
+/// Registry entries record the user-facing path while download internals
+/// canonicalize; on macOS the temp dir lives behind the /var ->
+/// /private/var symlink, on Windows canonicalize adds a \\?\ prefix. A
+/// symlinked alias reproduces the divergence on any Unix: the raw strings
+/// differ but both resolve to the same file.
+#[cfg(unix)]
+#[test]
+fn path_matches_resolves_symlinked_aliases() {
+    let f = small_temp_file("path-symlink");
+    let dir = std::env::temp_dir().join(format!("rhd-registry-alias-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let alias_dir = dir.join("alias");
+    std::os::unix::fs::symlink(f.parent().unwrap(), &alias_dir).unwrap();
+    let alias_path = alias_dir.join(f.file_name().unwrap());
+    let recorded = alias_path.to_string_lossy().to_string();
+    assert_ne!(recorded, f.to_string_lossy().to_string());
+    assert!(path_matches(&recorded, &f));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&f);
+}
+
+// -------------------------------------------------------------------------
+// Two-writer interleaving through the REAL ops (plan H7)
+//
+// Unlike the barrier-forced test above (which drives the load-modify-save
+// shape directly, with a rendezvous the typed op cannot expose), this test
+// runs the actual `mark_mismatch` op concurrently from two tasks. The
+// un-serialized race means either writer's save may be lost — the pins are
+// the safety properties, not a specific interleaving: both ops complete,
+// the final file parses, the last completed write is on disk (at least one
+// entry updated), and the mirror reflects every writer's patch.
+// -------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes env-mutating tests
+async fn two_writers_through_the_real_ops_stay_safe() {
+    let _env = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tmp("two-writers-ops");
+    let _guard = DataDirGuard::install(&tmp);
+
+    std::fs::write(
+        crate::paths::registry_path(),
+        expected_file(&[
+            block(
+                "a.bin",
+                "https://huggingface.co/org/model/resolve/main/a.bin",
+                &local(&tmp, "a.bin"),
+                10,
+                10,
+                "Incomplete",
+                None,
+                None,
+            ),
+            block(
+                "b.bin",
+                "https://huggingface.co/org/model/resolve/main/b.bin",
+                &local(&tmp, "b.bin"),
+                20,
+                20,
+                "Incomplete",
+                None,
+                None,
+            ),
+        ]),
+    )
+    .expect("write fixture");
+
+    let mirror = Arc::new(Mutex::new(load_registry()));
+    let a = tokio::spawn({
+        let mirror = mirror.clone();
+        let path = PathBuf::from(local(&tmp, "a.bin"));
+        async move { mark_mismatch(&mirror, &path).await }
+    });
+    let b = tokio::spawn({
+        let mirror = mirror.clone();
+        let path = PathBuf::from(local(&tmp, "b.bin"));
+        async move { mark_mismatch(&mirror, &path).await }
+    });
+    a.await.expect("op A completed without panic");
+    b.await.expect("op B completed without panic");
+
+    // Final file parses.
+    let disk: DownloadRegistry =
+        toml::from_str(&read_registry_file()).expect("final registry parses");
+
+    // The last completed write is on disk: whichever op saved last always
+    // includes its own entry's patch, so at least one entry is marked (the
+    // other may or may not be — that is the pinned race).
+    let mismatches = disk
+        .downloads
+        .iter()
+        .filter(|d| d.status == DownloadStatus::HashMismatch)
+        .count();
+    assert!(
+        (1..=2).contains(&mismatches),
+        "expected the last write (1) or both writes (2) to survive, got {mismatches}"
+    );
+
+    // The mirror reflects every writer's patch.
     let m = mirror.lock().await;
     assert_eq!(m.downloads[0].status, DownloadStatus::HashMismatch);
     assert_eq!(m.downloads[1].status, DownloadStatus::HashMismatch);

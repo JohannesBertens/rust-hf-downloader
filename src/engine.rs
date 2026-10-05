@@ -276,35 +276,34 @@ pub fn register_pending(
     files: &[(String, u64, Option<String>)],
     base_path: &str,
 ) -> Result<(), crate::paths::sanitize::PathError> {
-    let mut registry = crate::registry::load_registry();
-
+    // Validate and build every entry first: the first invalid filename
+    // aborts (via `?`) before anything is written — no partial save. The
+    // registry write itself is the shared `upsert_pending` op (one load,
+    // append-only-missing-urls, one save).
+    let mut entries = Vec::with_capacity(files.len());
     for (filename, size, sha256) in files {
         let validated_path =
             crate::paths::sanitize::validate_and_sanitize_path(base_path, model_id, filename)?;
 
         let url = crate::api::resolve_url(model_id, filename, revision);
-        let local_path_str = validated_path.to_string_lossy().to_string();
-
-        if !registry.downloads.iter().any(|d| d.url == url) {
-            registry.downloads.push(DownloadMetadata {
-                model_id: model_id.to_string(),
-                filename: filename.clone(),
-                url,
-                local_path: local_path_str,
-                total_size: *size,
-                downloaded_size: 0,
-                status: DownloadStatus::Incomplete,
-                expected_sha256: sha256.clone(),
-                revision: if revision == crate::api::DEFAULT_REVISION {
-                    None
-                } else {
-                    Some(revision.to_string())
-                },
-            });
-        }
+        entries.push(DownloadMetadata {
+            model_id: model_id.to_string(),
+            filename: filename.clone(),
+            url,
+            local_path: validated_path.to_string_lossy().to_string(),
+            total_size: *size,
+            downloaded_size: 0,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: sha256.clone(),
+            revision: if revision == crate::api::DEFAULT_REVISION {
+                None
+            } else {
+                Some(revision.to_string())
+            },
+        });
     }
 
-    crate::registry::save_registry(&registry);
+    crate::registry::upsert_pending(&entries);
     Ok(())
 }
 
