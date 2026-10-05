@@ -55,3 +55,8 @@ pub fn get_complete_downloads(
         .map(|d| (d.filename.clone(), d.clone()))
         .collect()
 }
+
+/// W2.4 golden + contract tests for the registry mutation ops (see the
+/// module docs inside).
+#[cfg(test)]
+mod registry_tests;

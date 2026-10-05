@@ -312,10 +312,13 @@ pub fn register_pending(
 mod tests {
     use super::*;
 
-    /// Env-mutating tests share this mutex: `cargo test` runs unit tests in
-    /// parallel threads within one process, and `HOME`/`HF_ENDPOINT` are
-    /// process-global.
-    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Env-mutating tests share the crate-wide mutex from `paths`: these
+    // tests redirect `HOME` (which moves the registry path), the registry
+    // golden tests in `registry_tests` redirect `ENV_DATA_DIR` (which moves
+    // it too) — one mutex serializes every test that touches the
+    // process-global registry location. (`cargo test` runs unit tests in
+    // parallel threads within one process.)
+    use crate::paths::ENV_MUTEX;
 
     /// Find a guaranteed-closed localhost port (bind then drop the listener).
     fn closed_port() -> u16 {
