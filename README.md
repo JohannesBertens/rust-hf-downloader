@@ -710,11 +710,11 @@ rust-hf-downloader/
 ├── changelog/              # Release notes for all versions
 └── src/
     ├── main.rs             # Entry point (TUI by default; `download` subcommand dispatch)
-    ├── cli/                # One-shot download CLI, split by section:
+    ├── cli/                # One-shot CLI subcommands (download/search/update/hf-cache), split by section:
     │   ├── mod.rs          # Cli/Command clap roots, run() dispatcher
     │   ├── args.rs         # Argument structs + parse/merge helpers
     │   ├── resolve.rs      # File selection/resolution (pure)
-    │   ├── events/            # mod.rs (dispatch) + keys.rs (popup keys)       # NDJSON event schema
+    │   ├── events.rs       # Stable additive-only NDJSON event schema
     │   ├── report.rs       # Human/JSON reporters, --progress modes
     │   ├── download_cmd.rs # download orchestration (run_download)
     │   ├── run.rs          # cross-command runner: RunTally/monitor/poll_once drain, shared bootstrap helpers
@@ -722,42 +722,34 @@ rust-hf-downloader/
     │   ├── hf_cache/       # hf-cache group: selection (pure) / sync (pipeline) / path
     │   ├── update_cmd.rs   # self-update subcommand
     │   └── tests.rs        # cli::tests — insta snapshots in src/cli/snapshots/
-    ├── engine/            # mod.rs, enqueue.rs (sealed EnqueuePolicy), workers.rs, bootstrap.rs           # Shared download engine (manager + verification bootstrap)
-    ├── models/            # api/ui/engine/options/cache behind a facade           # Data structures & types
-    ├── paths.rs            # Cross-platform config/registry/download path resolution
+    ├── engine/            # Shared download engine behind a facade: mod.rs (EngineState), enqueue.rs (sealed EnqueuePolicy), workers.rs (manager+verification spawns), bootstrap.rs
+    ├── models/            # Shared data types behind a facade: api/ui/engine/options/cache
+    ├── paths.rs           # Cross-platform config/registry/download path resolution
+    ├── fmt.rs             # Human formatting (file sizes, durations, speeds; per-surface wrappers — see fmt.rs contract)
     ├── cache_layout.rs    # HuggingFace hub cache layout writer (cache_layout: the on-disk shape; cli/hf_cache/ is the command group)
-    ├── patterns.rs         # Python-fnmatch parity glob matcher (--include/--exclude)
-    ├── update.rs           # Self-update backend (latest.json manifest + verified swap)
-    ├── config.rs           # Configuration persistence (v0.9.0)
-    ├── utils.rs            # Streaming-digest + atomic-rename primitives (formatting lives in fmt.rs)
-    ├── api/               # client/quant/tree behind a facade              # HuggingFace API client with auth (v0.9.5)
-    ├── http_client.rs      # Authenticated HTTP requests (v0.9.5)
-    ├── registry.rs         # Download registry persistence
-    ├── download/          # mod.rs (phases) + chunked.rs         # Download manager & security
-    ├── rate_limiter.rs     # Token bucket rate limiter (v1.2.0)
-    ├── verification.rs     # SHA256 verification worker
+    ├── patterns.rs        # Python-fnmatch parity glob matcher (--include/--exclude)
+    ├── update.rs          # Self-update backend (latest.json manifest + verified swap)
+    ├── config.rs          # Configuration persistence
+    ├── utils.rs           # Streaming-digest + atomic-rename primitives
+    ├── api/               # HuggingFace API client behind a facade: client/quant/tree
+    ├── http_client.rs     # Authenticated HTTP requests (shared per-run client)
+    ├── registry.rs        # Download registry persistence (typed mutation ops)
+    ├── download/          # Download transport: mod.rs (phase decomposition) + chunked.rs (chunk workers, JoinSet abort)
+    ├── rate_limiter.rs    # Token bucket rate limiter
+    ├── verification.rs    # SHA256 verification worker
     └── ui/
-        ├── mod.rs          # UI module declaration
-        ├── mod.rs             # App + run loop + mouse (was app.rs)          # Module re-exports (v0.9.5)
-        ├── app/            # App submodules (v0.9.5)
-        │   ├── state.rs        # AppState initialization
-        │   ├── events/            # mod.rs (dispatch) + keys.rs (popup keys)       # Event handling
-        │   ├── models/            # api/ui/engine/options/cache behind a facade       # Model browsing logic
-        │   ├── downloads.rs    # Download management
-        │   └── verification.rs # Verification UI
-        ├── tree.rs         # File-tree navigation model (flatten/toggle/count)
-        └── render/         # TUI rendering logic (facade + one file per panel)
+        ├── mod.rs         # UI module declaration + re-exports
+        ├── tree.rs        # File-tree navigation model (flatten/toggle/count, zero-clone traversal)
+        ├── render/        # TUI rendering (facade + one file per panel; pure pass returning hit-rects)
+        └── app/           # App submodule: run loop + draw + mouse + events/
+            ├── mod.rs         # App + run loop + mouse handlers
+            ├── state.rs       # App state container (render cache, mouse, options dialog state)
+            ├── filters.rs     # FilterState: filter/sort values + mutation rules
+            ├── events/        # events/mod.rs (dispatch router) + keys.rs (key handlers)
+            ├── search.rs      # Model browsing logic (search, details, quantizations)
+            ├── downloads.rs   # Download management
+            └── verification.rs # Verification UI
 ```
-
-**Version 0.7.0** introduces a modular architecture with clear separation of concerns:
-- **Focused top-level modules** for business logic
-- **Separate UI submodules** for presentation layer
-- **Improved maintainability, testability, and readability**
-
-**Version 0.9.5** further refines the architecture:
-- **Split app.rs** into 5 focused submodules
-- **New http_client module** for authentication
-- **Better code organization** with clear responsibility separation
 
 ## Dependencies
 
