@@ -3,4 +3,4 @@ source: tests/cli_exit_codes.rs
 expression: normalize(&stderr)
 ---
 Checking for updates…
-rust-hf-downloader is up to date (v2.13.1)
+rust-hf-downloader is up to date (v2.13.2)
