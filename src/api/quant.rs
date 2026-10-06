@@ -1147,6 +1147,65 @@ mod tests {
         }
     }
 
+    /// G8 (test-hardening): LITERAL output anchors for the three
+    /// multipart parsers — the differential test above compares the
+    /// production parsers to the frozen oracle copies, which cannot
+    /// catch a hand-applied change to BOTH; these five rows can (one per
+    /// parser per grammar family, plus the shared no-multipart case).
+    /// One literal-anchor row: (input, base_name, quant_type, part/total).
+    type MultipartRow = (
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        Option<(u32, u32)>,
+    );
+
+    #[test]
+    fn multipart_parser_outputs_are_literal_pinned() {
+        let table: &[MultipartRow] = &[
+            (
+                "model-Q6_K-00003-of-00009.gguf",
+                "model-Q6_K.gguf",
+                Some("Q6_K"),
+                Some((3, 9)),
+            ),
+            (
+                "model.Q4_K_M.gguf.part1of2",
+                "model.Q4_K_M.gguf",
+                Some("Q4_K_M"),
+                Some((1, 2)),
+            ),
+            // plain quantized file: base and quant unchanged, no parts
+            (
+                "Qwen3.5-27B-heretic.Q8_0.gguf",
+                "Qwen3.5-27B-heretic.Q8_0.gguf",
+                Some("Q8_0"),
+                None,
+            ),
+            // non-quantized multipart: quant None, parts still parsed;
+            // the base-name grammar only re-attaches `.gguf` — any other
+            // extension is dropped (historical quirk, pinned).
+            (
+                "model-00002-of-00005.safetensors",
+                "model",
+                None,
+                Some((2, 5)),
+            ),
+            // current > total is REJECTED by the part parser (and the
+            // 5-digit grammar still strips the suffix for base/quant)
+            ("model.gguf.part2of1", "model.gguf", None, None),
+        ];
+        for (name, base, quant, parts) in table {
+            assert_eq!(get_multipart_base_name(name), *base, "base of {name:?}");
+            assert_eq!(
+                extract_quantization_type(name).as_deref(),
+                *quant,
+                "quant of {name:?}"
+            );
+            assert_eq!(parse_multipart_filename(name), *parts, "parts of {name:?}");
+        }
+    }
+
     #[test]
     fn parse_multipart_info_recognizes_both_grammars() {
         let info = parse_multipart_info("model.Q4_K_M-00002-of-00005.gguf").unwrap();

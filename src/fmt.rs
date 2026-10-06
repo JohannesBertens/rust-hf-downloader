@@ -682,6 +682,38 @@ mod tests {
         assert_eq!(truncate_name_middle_hud(name, 12), "shard-~nsors");
     }
 
+    /// G8 (test-hardening): one LITERAL output anchor for every frozen-
+    /// oracle wrapper family that `surface_divergences_are_pinned` did
+    /// not already cover (`remaining_gb`, `number`, `bar_cli`). The
+    /// oracle-differential tests above prove the wrappers match their
+    /// frozen copies; these literals anchor the copies themselves, so a
+    /// hand-edited "fix" to both production and oracle still fails.
+    #[test]
+    fn oracle_families_have_literal_anchors() {
+        // remaining_gb: empty at 0, `<1GB` below 1 GiB (boundary: exactly
+        // 1 GiB rounds UP from the byte below), ceil to whole GB above.
+        assert_eq!(remaining_gb(0), "");
+        assert_eq!(remaining_gb(1024), "<1GB");
+        assert_eq!(remaining_gb(1_073_741_823), "<1GB");
+        assert_eq!(remaining_gb(1_073_741_824), "1GB");
+        assert_eq!(remaining_gb(5 * 1_073_741_824 + 1), "6GB");
+
+        // number: base-1000 with one decimal above 1K, verbatim below.
+        assert_eq!(number(999), "999");
+        assert_eq!(number(1_500), "1.5K");
+        assert_eq!(number(1_234_567), "1.2M");
+
+        // bar_cli: 20 cells, full bar at total 0, clamped at over-100%.
+        assert_eq!(bar_cli(0, 0), format!("[{}]", "█".repeat(20)));
+        let half = format!("[{}{}]", "█".repeat(10), "░".repeat(10));
+        assert_eq!(bar_cli(500, 1000), half);
+        assert_eq!(
+            bar_cli(11, 10),
+            format!("[{}]", "█".repeat(20)),
+            "over-100% clamps"
+        );
+    }
+
     /// Moved from `ui::render::hud_tests` in W1.4b (the helpers these tests
     /// targeted were deleted there); assertions unchanged, calls retargeted
     /// to the wrappers.
