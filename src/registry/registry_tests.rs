@@ -6,7 +6,7 @@
 //!
 //! - **Disk is the source of truth.** Every op loads the on-DISK registry,
 //!   mutates, saves (non-atomic `fs::File::create`, errors silently
-//!   swallowed — deliberately, see plan §8.5) — never the reverse.
+//!   swallowed — deliberately, see docs/DEFERRED.md#registry-atomic-save) — never the reverse.
 //! - **`mark_complete` updates its mirror regardless of whether the save
 //!   succeeded** (today's silent-failure behavior). `mark_mismatch` no
 //!   longer touches a mirror (final layering pass): the engine-mirror
@@ -15,7 +15,7 @@
 //!   the full caller-sequence shape (disk op + mirror patch) by
 //!   replication.
 //! - **No lock is held across load-modify-save.** The lost-update race
-//!   between concurrent writers is a known deferred defect (plan §8) that
+//!   between concurrent writers is a known deferred defect (docs/DEFERRED.md#registry-cross-process-lock) that
 //!   these tests PIN, not fix.
 //!
 //! The golden tests drive the real typed ops (`super::mark_complete`,
@@ -775,7 +775,8 @@ async fn save_failure_complete_map_insert_requires_disk_entry() {
 // - both ops complete (no panic, no deadlock),
 // - the final file parses,
 // - the last completed write wins on disk (exactly one entry updated —
-//   the lost-update race of plan §8, pinned, not fixed),
+//   the lost-update race, docs/DEFERRED.md#registry-cross-process-lock,
+//   pinned, not fixed),
 // - the mirror reflects every writer's patch (it is updated per write,
 //   regardless of the disk outcome — so after a race the mirror can hold
 //   MORE than the disk: today's divergence, pinned).
@@ -866,7 +867,8 @@ async fn two_writers_complete_ops_final_file_parses_mirror_matches_last_write() 
         .count();
     assert_eq!(
         mismatches, 1,
-        "last completed write must win (lost-update race of plan §8, pinned)"
+        "last completed write must win (lost-update race, \
+        docs/DEFERRED.md#registry-cross-process-lock, pinned)"
     );
 
     // Mirror reflects BOTH writers' patches — each writer updated it after

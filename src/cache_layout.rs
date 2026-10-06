@@ -10,11 +10,11 @@
 //!     refs/<branch>            # resolved commit SHA (R2)
 //!     blobs/<oid>              # LFS: sha256 | non-LFS: git blob sha1 (R1)
 //!     snapshots/<sha>/<path>   # relative symlink → ../../blobs/<oid> (R3)
-//!     .rhd-staging/<path>      # engine working dir (§5.1), renamed into
+//!     .rhd-staging/<path>      # engine working dir (plans/hf-cache-sync.md §5.1), renamed into
 //!                              # blobs/ atomically at publish time (R5)
 //! ```
 //!
-//! The split mirrors §4.3: [`plan`] decides what to fetch using
+//! The split mirrors plans/hf-cache-sync.md §4.3: [`plan`] decides what to fetch using
 //! `metadata()` calls only (never reads file contents), while
 //! [`publish_one`] performs the atomic staging→blob rename plus the
 //! snapshot entry, falling back to a copy when symlinks are unavailable
@@ -49,23 +49,23 @@ const SNAPSHOTS_DIR: &str = "snapshots";
 const REFS_DIR: &str = "refs";
 
 /// Cache-root subdirectory holding huggingface_hub's per-file publish
-/// locks (§5.2 step 6). Exact hub naming is verified against an installed
-/// hub client in M4 (§11.2).
+/// locks (plans/hf-cache-sync.md §5.2 step 6). Exact hub naming is verified against an installed
+/// hub client in M4 (plans/hf-cache-sync.md §11.2).
 const LOCKS_DIR: &str = ".locks";
 
-/// Engine working directory inside a repo folder (§5.1): downloads land
+/// Engine working directory inside a repo folder (plans/hf-cache-sync.md §5.1): downloads land
 /// here and are renamed into `blobs/` on publish — same filesystem, so
 /// the rename is instant and atomic.
 const STAGING_DIR_NAME: &str = ".rhd-staging";
 
 /// Name of the per-repo sync lock file inside the staging directory
-/// (§5.2 step 6). Serializes concurrent `hf-cache sync` runs on the same
+/// (plans/hf-cache-sync.md §5.2 step 6). Serializes concurrent `hf-cache sync` runs on the same
 /// repo.
 const SYNC_LOCK_FILE: &str = ".sync.lock";
 
 /// A sync lock older than this is considered abandoned and stolen on the
-/// next acquire (first-guess policy; §5.2 step 6, observed before freezing
-/// per §11.4).
+/// next acquire (first-guess policy; plans/hf-cache-sync.md §5.2 step 6, observed before freezing
+/// per plans/hf-cache-sync.md §11.4).
 const STALE_SYNC_LOCK: Duration = Duration::from_secs(24 * 60 * 60);
 
 // ---------------------------------------------------------------------------
@@ -125,7 +125,7 @@ pub fn snapshot_symlink_target(oid: &str, repo_path: &str) -> String {
     format!("{}{BLOBS_DIR}/{oid}", "../".repeat(depth))
 }
 
-/// Engine staging directory `<repo_dir>/.rhd-staging` (§5.1). Downloads
+/// Engine staging directory `<repo_dir>/.rhd-staging` (plans/hf-cache-sync.md §5.1). Downloads
 /// write here; publishing renames into `blobs/` on the same filesystem.
 pub fn staging_dir(repo_dir: &Path) -> PathBuf {
     repo_dir.join(STAGING_DIR_NAME)
@@ -153,7 +153,7 @@ pub struct FetchItem {
     pub sha256: Option<String>,
 }
 
-/// What a sync needs to do against the current cache contents (§5.2
+/// What a sync needs to do against the current cache contents (plans/hf-cache-sync.md §5.2
 /// step 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncPlan {
@@ -176,7 +176,7 @@ pub struct SyncPlan {
 /// resolved at publish time by hashing the staged content (R1 fallback),
 /// and such files can never be `up_to_date` (the blob name is unknown at
 /// plan time). Duplicate tree entries for one path must agree on oid and
-/// size, else the plan is rejected (E2 in §9).
+/// size, else the plan is rejected (E2 in plans/hf-cache-sync.md §9).
 pub fn plan(
     cache: &Path,
     model_id: &str,
@@ -244,7 +244,7 @@ fn effective_size(file: &RepoFile) -> Option<u64> {
 
 /// Whether a blob file is provably current: a regular file whose length
 /// equals the expected size. Unknown expected size (`None`) is *not*
-/// provably current — plan conservatively re-fetches (§5.3); verification
+/// provably current — plan conservatively re-fetches (plans/hf-cache-sync.md §5.3); verification
 /// gates the publish anyway (R5).
 fn blob_is_current(blob: &Path, expected_size: Option<u64>) -> bool {
     match (fs::metadata(blob), expected_size) {
@@ -267,7 +267,7 @@ fn blob_is_current(blob: &Path, expected_size: Option<u64>) -> bool {
 ///    against the staged content first (bad bytes never enter `blobs/`),
 /// 2. rename `staged_path` → `blobs/<oid>` — atomic because
 ///    staging lives inside the repo dir, so source and destination share a
-///    filesystem (§5.1); concurrent readers never observe partial files,
+///    filesystem (plans/hf-cache-sync.md §5.1); concurrent readers never observe partial files,
 /// 3. create the snapshot entry `snapshots/<sha>/<repo_path>` as a
 ///    depth-aware relative symlink into `../../blobs/<oid>` (R3),
 ///    replacing any existing (dangling or stale) entry,
@@ -277,10 +277,10 @@ fn blob_is_current(blob: &Path, expected_size: Option<u64>) -> bool {
 ///
 /// A best-effort hub-style per-file lock
 /// `.locks/<repo-dir>/<repo_path-with-underscores>.lock` is held for the
-/// duration of the call (§5.2 step 6); lock failures never block the
+/// duration of the call (plans/hf-cache-sync.md §5.2 step 6); lock failures never block the
 /// publish — the rename protocol itself guarantees cache integrity. The
 /// exact hub lock filename is verified against an installed hub client in
-/// M4 (§11.2).
+/// M4 (plans/hf-cache-sync.md §11.2).
 ///
 /// Note: `sha` is passed separately from [`FetchItem`] — the item is
 /// repo-scoped (reusable across revisions), while the snapshot directory
@@ -470,11 +470,11 @@ fn create_symlink(_target: &str, _link: &Path) -> io::Result<()> {
 
 /// Best-effort hub-style per-file publish lock,
 /// `.locks/<repo-dir-name>/<repo_path with '/' → '_'>.lock` under the
-/// cache root (§5.2 step 6): a coexistence gesture toward a concurrently
+/// cache root (plans/hf-cache-sync.md §5.2 step 6): a coexistence gesture toward a concurrently
 /// running `hf download`. Every failure to acquire yields `None` — the
 /// staging + rename protocol (R5) is what actually protects the cache.
 /// Dropping the guard deletes the lock file. The exact hub naming is
-/// verified in M4 (§11.2).
+/// verified in M4 (plans/hf-cache-sync.md §11.2).
 struct HubFileLock {
     path: PathBuf,
 }
@@ -527,7 +527,7 @@ pub fn write_refs(repo_dir: &Path, ref_name: Option<&str>, sha: &str) -> io::Res
 }
 
 // ---------------------------------------------------------------------------
-// Sync lock (§5.2 step 6)
+// Sync lock (plans/hf-cache-sync.md §5.2 step 6)
 // ---------------------------------------------------------------------------
 
 /// Guard for the per-repo sync lock; dropping it deletes the lock file.
@@ -538,7 +538,7 @@ pub struct SyncLockGuard {
     path: PathBuf,
 }
 
-/// Acquires `<staging>/.sync.lock` with an exclusive create (§5.2 step 6),
+/// Acquires `<staging>/.sync.lock` with an exclusive create (plans/hf-cache-sync.md §5.2 step 6),
 /// serializing concurrent `hf-cache sync` runs on the same repo. An
 /// existing lock older than 24h is considered abandoned and stolen with a
 /// warning; a fresh one fails with [`io::ErrorKind::AlreadyExists`]. The
@@ -611,7 +611,8 @@ fn sync_lock_age(path: &Path, now: SystemTime) -> Duration {
 }
 
 /// Pure staleness rule for sync locks: older than 24h ⇒ stealable on the
-/// next acquire (§5.2 step 6; policy observed before freezing, §11.4).
+/// next acquire (plans/hf-cache-sync.md §5.2 step 6; policy observed before
+/// freezing, plans/hf-cache-sync.md §11.4).
 /// Kept pure — taking the age explicitly — so the threshold is
 /// unit-testable without touching real lock files.
 pub fn sync_lock_is_stale(age: Duration) -> bool {
@@ -627,10 +628,10 @@ impl Drop for SyncLockGuard {
 }
 
 // ---------------------------------------------------------------------------
-// Staging cleanup (§5.2 step 10)
+// Staging cleanup (plans/hf-cache-sync.md §5.2 step 10)
 // ---------------------------------------------------------------------------
 
-/// Best-effort removal of staging remnants of published files (§5.2
+/// Best-effort removal of staging remnants of published files (plans/hf-cache-sync.md §5.2
 /// step 10): each staged file that still exists is deleted (the normal
 /// publish path already renamed it away; this covers copy-mode leftovers
 /// and crashed runs), then now-empty parent directories are pruned up to —
@@ -668,7 +669,7 @@ pub fn cleanup_staging(repo_dir: &Path, published: &[String]) -> io::Result<()> 
 /// Rejects repo-relative paths and ref names that could escape their
 /// anchor directory: absolute paths, `..`, non-plain components, and
 /// backslashes (a Windows separator — rejected for cross-platform layout
-/// determinism, E1 in §9). The engine's staging validation already covers
+/// determinism, E1 in plans/hf-cache-sync.md §9). The engine's staging validation already covers
 /// downloads; this guards the snapshot and refs paths this module creates
 /// itself.
 ///
@@ -947,7 +948,7 @@ mod tests {
         let mismatched = plan(&cache, "a/b", &tree, &selected, COMMIT_SHA, false).unwrap();
         assert_eq!(mismatched.fetch.len(), 1);
         assert!(mismatched.up_to_date.is_empty());
-        // Size now matches, but --force → re-fetch anyway (§5.3).
+        // Size now matches, but --force → re-fetch anyway (plans/hf-cache-sync.md §5.3).
         fs::write(blobs.join(LFS_OID), vec![0u8; 100]).expect("fix blob size");
         let forced = plan(&cache, "a/b", &tree, &selected, COMMIT_SHA, true).unwrap();
         assert_eq!(forced.fetch.len(), 1);
@@ -1311,7 +1312,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ---- sync lock (§5.2 step 6) ----
+    // ---- sync lock (plans/hf-cache-sync.md §5.2 step 6) ----
 
     #[test]
     fn sync_lock_create_conflict_and_drop() {
@@ -1376,7 +1377,7 @@ mod tests {
         assert!(sync_lock_is_stale(Duration::from_secs(24 * 60 * 60 + 1)));
     }
 
-    // ---- staging cleanup (§5.2 step 10) ----
+    // ---- staging cleanup (plans/hf-cache-sync.md §5.2 step 10) ----
 
     #[test]
     fn cleanup_staging_removes_published_files_and_prunes_empty_parents() {

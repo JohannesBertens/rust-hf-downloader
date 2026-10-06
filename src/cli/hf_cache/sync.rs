@@ -1,4 +1,4 @@
-//! `hf-cache sync` (§5.2 pipeline, followed exactly): config bootstrap →
+//! `hf-cache sync` (plans/hf-cache-sync.md §5.2 pipeline, followed exactly): config bootstrap →
 //! tree + commit SHA → selection → cache plan → engine run → publish gate
 //! → refs/staging cleanup → summary and snapshot path.
 //!
@@ -30,7 +30,7 @@ use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE}
 use crate::engine::{EnqueuePolicy, QueuedDownload};
 use crate::models::{FileOutcome, VerifyOutcome};
 
-/// Whole-repo sync hint (§2.2 precedence step 4).
+/// Whole-repo sync hint (plans/hf-cache-sync.md §2.2 precedence step 4).
 const TIP_USE_FOR_VLLM: &str = "tip: use --for vllm to fetch only what vLLM reads";
 
 // --- sync-pipeline helpers (pure or filesystem-local) ----------------------
@@ -125,7 +125,7 @@ fn relink_up_to_date(
     Ok(())
 }
 
-/// Human dry-run table (§5.2 step 4): per-file fetch/cached rows with
+/// Human dry-run table (plans/hf-cache-sync.md §5.2 step 4): per-file fetch/cached rows with
 /// sizes (hf CLI parity). `--json` mode prints only the `SyncPlanned`
 /// event, so this is human-only output.
 fn print_sync_dry_run(
@@ -189,7 +189,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     );
 
     // --- 1. Configuration (Runner fold: run::load_run_config, no output
-    //        override — the destination is the hub cache, §4.1) ------------
+    //        override — the destination is the hub cache, plans/hf-cache-sync.md §4.1) ------------
     let (_options, token) = load_run_config(
         args.run_output.token.clone(),
         None,
@@ -199,7 +199,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         args.run_output.no_verify,
     );
 
-    // --- 2. Validate usage (§5.2 step 1: revision already parsed by
+    // --- 2. Validate usage (plans/hf-cache-sync.md §5.2 step 1: revision already parsed by
     //        clap's parse_revision) ----------------------------------------
     if !valid_model_id(&args.model_id) {
         reporter.emit(&Event::error(
@@ -213,7 +213,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     }
     let revision = effective_revision(&args.revision);
 
-    // --- 3. Tree + commit SHA in parallel (§5.2 step 2) --------------------
+    // --- 3. Tree + commit SHA in parallel (plans/hf-cache-sync.md §5.2 step 2) --------------------
     let (metadata_res, sha_res) = tokio::join!(
         crate::api::fetch_model_metadata(&args.model_id, &revision, token.as_ref()),
         crate::api::resolve_revision_sha(&args.model_id, &revision, token.as_ref()),
@@ -239,12 +239,12 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
                 ),
                 available: None,
             });
-            // Unknown revision (404) is a usage error (§2.4).
+            // Unknown revision (404) is a usage error (plans/hf-cache-sync.md §2.4).
             return if not_found { EXIT_USAGE } else { EXIT_FAILURE };
         }
     };
 
-    // --- 4. Selection precedence (§2.2) -------------------------------------
+    // --- 4. Selection precedence (plans/hf-cache-sync.md §2.2) -------------------------------------
     let tree_paths: Vec<&str> = metadata
         .siblings
         .iter()
@@ -268,7 +268,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         reporter.status_line(TIP_USE_FOR_VLLM);
     }
 
-    // --- 5. Plan against the current cache (R6) + SyncPlanned (§2.4) --------
+    // --- 5. Plan against the current cache (R6) + SyncPlanned (plans/hf-cache-sync.md §2.4) --------
     let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
     let plan = match crate::cache_layout::plan(
         &cache_dir,
@@ -304,7 +304,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         total_bytes,
     });
 
-    // --- 6. Dry run: the plan is the output; no writes (§5.2 step 4) --------
+    // --- 6. Dry run: the plan is the output; no writes (plans/hf-cache-sync.md §5.2 step 4) --------
     if args.dry_run {
         if !args.run_output.json {
             print_sync_dry_run(
@@ -320,7 +320,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         return EXIT_OK;
     }
 
-    // --- 7. Fully-cached no-op (§5.2 step 3): write refs, relink entries,
+    // --- 7. Fully-cached no-op (plans/hf-cache-sync.md §5.2 step 3): write refs, relink entries,
     //        print the snapshot path, exit 0.
     let repo_dir = cache_dir.join(crate::cache_layout::repo_dir_name(&args.model_id));
     let staging = crate::cache_layout::staging_dir(&repo_dir);
@@ -369,7 +369,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             &sha,
         ));
         // SyncComplete's human rendering is the snapshot path itself —
-        // the last line, hf CLI parity (§2.4).
+        // the last line, hf CLI parity (plans/hf-cache-sync.md §2.4).
         reporter.emit(&Event::SyncComplete {
             snapshot_path: snapshot_path.display().to_string(),
             revision: revision.clone(),
@@ -379,7 +379,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         return EXIT_OK;
     }
 
-    // --- 8. Layout dirs + CACHEDIR.TAG (§5.2 step 5) -------------------------
+    // --- 8. Layout dirs + CACHEDIR.TAG (plans/hf-cache-sync.md §5.2 step 5) -------------------------
     let snapshot_root = crate::cache_layout::snapshot_dir(&cache_dir, &args.model_id, &sha);
     for dir in [repo_dir.join("blobs"), snapshot_root, staging.clone()] {
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -402,7 +402,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         return EXIT_FAILURE;
     }
 
-    // --- 9. Sync lock (§5.2 step 6) ------------------------------------------
+    // --- 9. Sync lock (plans/hf-cache-sync.md §5.2 step 6) ------------------------------------------
     let _sync_lock = match acquire_sync_lock_or_fail(&staging, &mut reporter) {
         Ok(guard) => guard,
         Err(code) => return code,
@@ -418,9 +418,9 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         return EXIT_FAILURE;
     }
 
-    // --- 10. Engine bootstrap + enqueue (§5.2 step 7; Runner queue_run) -----
+    // --- 10. Engine bootstrap + enqueue (plans/hf-cache-sync.md §5.2 step 7; Runner queue_run) -----
     // Note: no pending registry entries are deliberately registered — the
-    // flat-download registry is TUI-resume state (§4.6). The engine still
+    // flat-download registry is TUI-resume state (plans/hf-cache-sync.md §4.6). The engine still
     // writes registry entries for files it fetches (staging paths); those
     // are swept after the run and at the start of the next one so the
     // TUI's resume/complete views stay clean. The no-register choice is
@@ -436,7 +436,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             sha256: item.sha256.clone(),
         })
         .collect();
-    // base_path = staging dir, filename = repo path (§5.1); the
+    // base_path = staging dir, filename = repo path (plans/hf-cache-sync.md §5.1); the
     // revision is the resolved commit SHA, so a moving branch cannot
     // race the plan. Expected sha = LFS oid; total size from the tree.
     let queued: Vec<QueuedDownload> = plan
@@ -458,7 +458,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     // policy; this policy cannot abort).
     let (state, manager, _outcome) = queue_run(&queued, &EnqueuePolicy::hf_cache_sync()).await;
 
-    // --- 11. Monitor until drained (§5.2 step 8, reusing run_download's
+    // --- 11. Monitor until drained (plans/hf-cache-sync.md §5.2 step 8, reusing run_download's
     //         monitor/verification-idle machinery) ---------------------------
     let mut tally = RunTally {
         files: selected.len(),
@@ -467,7 +467,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     };
     let interrupted = monitor(&state, manager, &files, &mut tally, &mut reporter).await;
 
-    // --- 12. Publish gate (§5.2 step 9) --------------------------------------
+    // --- 12. Publish gate (plans/hf-cache-sync.md §5.2 step 9) --------------------------------------
     let verification_active = crate::download::DOWNLOAD_CONFIG
         .enable_verification
         .load(Ordering::Relaxed);
@@ -516,7 +516,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             Some(_) => match verify_of.get(item.repo_path.as_str()) {
                 Some(VerifyOutcome::Ok { .. }) => {}
                 Some(VerifyOutcome::Mismatch { .. }) => {
-                    // The bad bytes never enter the cache (§2.4).
+                    // The bad bytes never enter the cache (plans/hf-cache-sync.md §2.4).
                     let _ = std::fs::remove_file(&staged);
                     publish_failures.push(format!(
                         "{}: SHA256 mismatch; staged copy deleted",
@@ -552,7 +552,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         }
     }
 
-    // --- 13. refs + staging cleanup (§5.2 step 10) ----------------------------
+    // --- 13. refs + staging cleanup (plans/hf-cache-sync.md §5.2 step 10) ----------------------------
     let mut failed = tally.failed > 0
         || tally.hash_mismatch > 0
         || tally.auth_required
@@ -571,7 +571,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         }
     }
 
-    // --- 14. Summary + snapshot path (§5.2 step 11, §2.4) ---------------------
+    // --- 14. Summary + snapshot path (plans/hf-cache-sync.md §5.2 step 11, §2.4) ---------------------
     let summary = Summary {
         files: selected.len(),
         downloaded: tally.downloaded,
@@ -602,7 +602,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             revision: revision.clone(),
             sha: sha.clone(),
         });
-        // SyncComplete's human rendering IS the last line (§2.4) — the
+        // SyncComplete's human rendering IS the last line (plans/hf-cache-sync.md §2.4) — the
         // snapshot path, printed even under --quiet since it is the
         // command's scripted output.
         return EXIT_OK;
@@ -617,7 +617,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     EXIT_FAILURE
 }
 
-/// Acquire the per-repo sync lock (§5.2 step 6), emitting the error event
+/// Acquire the per-repo sync lock (plans/hf-cache-sync.md §5.2 step 6), emitting the error event
 /// and exit code on failure.
 fn acquire_sync_lock_or_fail(
     staging: &Path,
@@ -632,7 +632,7 @@ fn acquire_sync_lock_or_fail(
     })
 }
 
-/// Registry hygiene (§4.6): drop every on-disk registry entry whose
+/// Registry hygiene (plans/hf-cache-sync.md §4.6): drop every on-disk registry entry whose
 /// `local_path` lives in a `.rhd-staging` directory. The engine records
 /// hf-cache fetches there (it cannot tell cache syncs from flat
 /// downloads); those paths are renamed away or cleaned at publish, so the

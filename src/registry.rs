@@ -17,7 +17,8 @@
 //!    it, save it — never write from the in-memory mirror.
 //! 2. **The save stays non-atomic** (`fs::File::create` semantics, errors
 //!    silently swallowed) — making it atomic is deliberately deferred
-//!    (plan §8.5); crash-truncation behavior is unchanged.
+//!    (docs/DEFERRED.md#registry-atomic-save — atomic save is fix in
+//!    flight, M1); crash-truncation behavior is unchanged.
 //! 3. **`mark_complete` updates its mirror after the save, regardless of
 //!    whether the save succeeded** — today's silent-failure behavior,
 //!    pinned by the golden tests in `registry_tests`. `mark_mismatch` no
@@ -27,7 +28,8 @@
 //!    after the op, independent of the save outcome — is pinned by the
 //!    verification-side tests.
 //! 4. **No lock is held across load-modify-save.** The lost-update race
-//!    between concurrent writers is a known deferred defect (plan §8);
+//!    between concurrent writers is a known deferred defect
+//!    (docs/DEFERRED.md#registry-cross-process-lock);
 //!    the ops must not add cross-op serialization.
 //!
 //! The byte-level behavior of every op (exact TOML after each mutation)

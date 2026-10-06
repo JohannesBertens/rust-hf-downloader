@@ -37,7 +37,7 @@ pub const VLLM_ALLOW: &[&str] = &[
 /// the formats vLLM never reads — fallback weight formats, ONNX exports,
 /// docs, and the untouched `original/` upstream weights.
 pub const VLLM_IGNORE: &[&str] = &[
-    "original/**", // redundant-but-readable next to `*` crossing `/` (§7)
+    "original/**", // redundant-but-readable next to `*` crossing `/` (plans/hf-cache-sync.md §7)
     "*.bin",       // pytorch fallback
     "*.pt",
     "*.gguf",
@@ -66,7 +66,7 @@ pub fn fnmatch(pattern: &str, name: &str) -> bool {
     regex::Regex::new(&anchored).is_ok_and(|re| re.is_match(name))
 }
 
-/// Filter `paths` by include/exclude glob lists (§2.2 precedence).
+/// Filter `paths` by include/exclude glob lists (plans/hf-cache-sync.md §2.2 precedence).
 ///
 /// - An empty `include` list means "everything".
 /// - Otherwise a path survives only if it matches **any** include pattern.
@@ -224,7 +224,7 @@ mod tests {
     }
 
     /// `*` crosses `/` — the property that makes `*.safetensors` select
-    /// sharded weights in subfolders (§7), and the reason `original/*`
+    /// sharded weights in subfolders (plans/hf-cache-sync.md §7), and the reason `original/*`
     /// alone would already cover nested originals.
     #[test]
     fn star_crosses_directory_separator() {
@@ -234,7 +234,7 @@ mod tests {
         assert!(fnmatch("original/*", "original/consolidated.safetensors"));
         assert!(fnmatch("original/*", "original/a/b/c.bin"));
         assert!(!fnmatch("original/*", "originals/a.bin"));
-        // `**` is not special — identical behavior to `*` (§7 tests both)
+        // `**` is not special — identical behavior to `*` (plans/hf-cache-sync.md §7 tests both)
         assert!(fnmatch("original/**", "original/a/b.bin"));
         assert_eq!(
             fnmatch("original/**", "original/a/b.bin"),
@@ -288,7 +288,7 @@ mod tests {
     /// class at the FIRST `]` and reads `[[:digit:]]` as the literal
     /// member set `[:digit` followed by a literal `]`. The `regex` crate
     /// *does* support POSIX classes — the translator escapes `[` inside
-    /// class bodies so both engines agree (§7 parity).
+    /// class bodies so both engines agree (plans/hf-cache-sync.md §7 parity).
     #[test]
     fn posix_class_syntax_stays_literal_like_python() {
         assert!(!fnmatch("[[:digit:]]", "1")); // would match if read as a POSIX class
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(filter_paths(&paths, &include, &[]), vec!["a.py", "c.py"]);
     }
 
-    /// Empty include list means "everything" (§2.2); exclude still applies.
+    /// Empty include list means "everything" (plans/hf-cache-sync.md §2.2); exclude still applies.
     #[test]
     fn filter_paths_empty_include_means_everything() {
         let paths = ["config.json", "model.bin", "README.md"];
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(filter_paths(&paths, &[], &exclude), vec!["config.json"]);
     }
 
-    /// Include is applied first, exclude last (§2.2) — an include match is
+    /// Include is applied first, exclude last (plans/hf-cache-sync.md §2.2) — an include match is
     /// still dropped when an exclude pattern hits.
     #[test]
     fn filter_paths_exclude_overrides_include() {
@@ -340,7 +340,7 @@ mod tests {
         );
     }
 
-    /// The preset tables are normative (§2.3) — pin them so a vLLM-drift
+    /// The preset tables are normative (plans/hf-cache-sync.md §2.3) — pin them so a vLLM-drift
     /// fix stays a deliberate, one-line change.
     #[test]
     fn vllm_preset_tables_match_plan() {
@@ -367,7 +367,7 @@ mod tests {
         );
     }
 
-    /// Preset sanity (§2.3/§7): exactly the vLLM-relevant files survive
+    /// Preset sanity (plans/hf-cache-sync.md §2.3/§7): exactly the vLLM-relevant files survive
     /// `VLLM_ALLOW` + `VLLM_IGNORE`.
     #[test]
     fn vllm_preset_selects_expected_files() {

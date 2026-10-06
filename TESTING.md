@@ -1,105 +1,101 @@
 # Testing Guide for Rust HF Downloader
 
-This document describes how to run tests, benchmarks, and quality checks for the project.
+How to actually run this crate's tests. The suite is **bin-only**: unit
+tests live inline (`#[cfg(test)]`) in `src/**` modules of the binary crate,
+integration tests live in `tests/*.rs` (one cargo target per file), and the
+snapshot goldens (`insta`) pin the TUI render/style output and the CLI
+human-output bytes. There are **no** benchmark, doc-test, or coverage
+targets — and no PR/push CI: the only CI is the tag-triggered release
+workflow, which runs `cargo test --locked` on the three native runners
+(Linux, macOS, Windows). Local gates are therefore the primary guard.
 
-## Quick Reference
+`tests/docs_guards.rs::testing_md_targets_exist` checks that every target
+named here exists — keep this file truthful.
+
+## Quick Reference (real targets only)
 
 ```bash
-# Format code
-cargo fmt
+# Format / lint
+cargo fmt --check            # or: cargo fmt
+cargo clippy -- -D warnings
 
-# Run linter
-cargo clippy
-
-# Run all tests
+# Everything (inline unit tests + all integration targets)
 cargo test
 
-# Run tests with output
+# One integration target
+cargo test --test cli_download
+
+# Filter by name, across all targets (substring match)
+cargo test enqueue           # e.g. the 8 EnqueuePolicy characterization tests
+cargo test --test cli_exit_codes -- auth   # filter inside one target
+
+# Snapshot gate: run with snapshot writes DISABLED (see below)
+INSTA_UPDATE=no cargo test
+
+# Show println output
 cargo test -- --nocapture
-
-# Build release
-cargo build --release
-
-# Check for warnings
-cargo build --release --all-features
 ```
 
-## Test Suite
+There is no library target (no `src/lib.rs`) — do not look for a lib-only
+test invocation; `cargo test <filter>` already scopes by name.
 
-### Unit Tests
+## Integration targets (`tests/`)
 
-Located alongside the code they test:
+Each `tests/<name>.rs` file is one cargo target; run with
+`cargo test --test <name>`.
 
-- `src/config.rs` - Configuration loading/saving tests
-- `src/api.rs` - API response parsing tests
+| Target | What it pins |
+|---|---|
+| `tests/cli_download.rs` | `download` subcommand end-to-end: real binary vs in-process mock HuggingFace server (hyper, Range-aware), full isolation via `RUST_HF_DOWNLOADER_CONFIG_DIR`/`_DATA_DIR` |
+| `tests/cli_exit_codes.rs` | Exit-code matrix (H3) + non-TTY human-output goldens (H4), incl. the update/checksum codes |
+| `tests/download_failures.rs` | Wire-level download failure injection: exit codes, on-disk state, final registry state through the W5.1a/b phases |
+| `tests/hf_cache_sync.rs` | `hf-cache sync` / `hf-cache path` end-to-end: staging→publish, layout, exit codes |
+| `tests/update_e2e.rs` | Self-update flow against a fake release dir served over local HTTP (temp-copy binary swaps itself) |
+| `tests/docs_guards.rs` | Documentation truth guards: AGENTS.md lock-hierarchy completeness, §-anchor/DEFERRED hygiene, TESTING.md target existence |
 
-Run unit tests:
-```bash
-cargo test --lib
-```
+`tests/common/mod.rs` is the shared harness (mock server, env isolation) —
+not a target itself.
 
-### Integration Tests
+## Unit-test inventory (inline `#[cfg(test)]` in `src/**`)
 
-Located in `tests/` directory (if present). Run with:
-```bash
-cargo test --test integration
-```
+Skeleton: module → what it pins → how to run. M6 of
+[plans/architecture-simplification-review.md](plans/architecture-simplification-review.md)
+deepens this into a per-module what-it-pins table with per-subject CLI
+test splits.
 
-### Documentation Tests
+| Module | What it pins | Run |
+|---|---|---|
+| `src/config.rs` | config load/save/apply paths | `cargo test config` |
+| `src/paths.rs` | path-resolution precedence + sanitize security | `cargo test paths` |
+| `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, concurrency/failure contracts | `cargo test registry` |
+| `src/engine/enqueue.rs` | 8 EnqueuePolicy characterization tests (the single enqueue transaction) | `cargo test enqueue` |
+| `src/engine/workers.rs` | manager drain/join contract | `cargo test workers` |
+| `src/engine/bootstrap.rs` | bootstrap sequence | `cargo test bootstrap` |
+| `src/engine/mod.rs` | `verification_idle` semantics | `cargo test verification_idle` |
+| `src/fmt.rs` | frozen-oracle tables for every formatter variant | `cargo test fmt` |
+| `src/patterns.rs` | Python-fnmatch parity + `--for vllm` preset tables | `cargo test patterns` |
+| `src/api/*` | model filter/sort oracles, quant classification, tree building | `cargo test api` |
+| `src/models/*` | AppOptions TOML golden (config schema), engine/cache type invariants | `cargo test models` |
+| `src/cli/run.rs` | Runner helpers, token precedence matrix | `cargo test run` |
+| `src/cli/mod.rs` | dispatch + exit-code constants | `cargo test cli` |
+| `src/cli/tests.rs` | CLI insta goldens (`src/cli/snapshots/`) | `cargo test cli::` |
+| `src/rate_limiter.rs` | token-bucket refill math | `cargo test rate` |
+| `src/verification.rs` | verify outcomes, result counters | `cargo test verification` |
+| `src/update.rs` | version compare, manifest/asset selection | `cargo test update` |
+| `src/utils.rs` | digest streaming + atomic rename with retry | `cargo test utils` |
+| `src/cache_layout.rs` | hub-cache layout math, blob/refs naming, sync lock | `cargo test cache_layout` |
+| `src/ui/app/*` | filter cycle/step rules, keyboard dispatch/advance contract, download flows, mouse hit-areas | `cargo test app` |
+| `src/ui/render/*_tests.rs` | snapshot / hud / style-size suites (`src/ui/render/snapshots/`) | `cargo test render` |
+| `src/ui/tree.rs` | flatten/toggle navigation model | `cargo test tree` |
 
-Examples in documentation are tested automatically:
-```bash
-cargo test --doc
-```
+## Snapshot tests (insta) — the local gate
 
-## Quality Checks
-
-### Code Formatting
-
-```bash
-# Check if formatted correctly
-cargo fmt --check
-
-# Auto-format
-cargo fmt
-```
-
-### Linting
-
-```bash
-# Run clippy with all warnings as errors
-cargo clippy --all-features -- -D warnings
-```
-
-### Compilation
-
-```bash
-# Check compilation without building
-cargo check
-
-# Check all features
-cargo check --all-features
-```
-
-### Documentation
-
-```bash
-# Generate docs
-cargo doc --no-deps
-
-# Check docs compile
-cargo doc --no-deps --check
-```
-
-### Snapshot tests (insta) — the local gate
-
-The TUI render/style snapshots (`src/ui/render/snapshots/`) and the CLI
-human-output goldens (insta snapshots under `tests/`) are pinned with
-`insta`. CI only runs plain `cargo test`, which FAILS on drifted or
+The TUI render/style snapshots (`src/ui/render/snapshots/`), the CLI
+goldens (`src/cli/snapshots/`), and the human-output goldens under
+`tests/` are pinned with `insta`. Plain `cargo test` FAILS on drifted or
 missing snapshots but never tells you which `.snap.new` files were left
 behind or which `.snap` files are now dead — those are LOCAL gate steps
-(USER-DIRECTED deviation G6: documented here instead of automated in
-CI):
+(documented here rather than automated, per the release-only CI reality):
 
 ```bash
 # 1. Run with writes DISABLED — a red test means a snapshot drifted (or
@@ -127,97 +123,55 @@ ls src/ui/render/snapshots | sed 's/\.snap$//; s/.*__//' \
 Never edit a `.snap` by hand to make a test pass — regenerate it and
 review the diff.
 
-## Benchmarking
+## Tests that touch env vars or global atomics MUST take `ENV_MUTEX`
 
-To run performance benchmarks:
+Cargo runs unit tests as parallel threads of one process; the ambient
+environment and the crate-wide atomics (`DOWNLOAD_CONFIG`,
+`VERIFICATION_CONFIG`, `RATE_LIMITER`) are shared global state. Every test
+that reads/sets env vars (`HF_TOKEN`, `HF_ENDPOINT`,
+`RUST_HF_DOWNLOADER_*`, …) or mutates those atomics serializes on
+`paths::ENV_MUTEX` (`src/paths.rs`), holding it for the whole test:
 
-```bash
-cargo bench
+```rust
+// Take the mutex for the whole test; recover from a poisoned lock rather
+// than cascading the failure into every later env/atomics test — a panic
+// in one such test must not take the rest down with it.
+let _env = crate::paths::ENV_MUTEX
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
 ```
 
-Common benchmarks include:
-- Download chunk processing speed
-- API response parsing
-- SHA256 verification throughput
+Conventions that build on this:
 
-## CI/CD Checks
+- `VarGuard` (`src/cli/tests.rs`) restores one env var on drop; the
+  engine submodule tests share `EnvGuard`
+  (`src/engine/mod.rs::test_support`) which redirects
+  `RUST_HF_DOWNLOADER_DATA_DIR` + `HF_ENDPOINT` and restores both on
+  drop.
+- Tests holding `ENV_MUTEX` across an `await` mark it with
+  `#[allow(clippy::await_holding_lock)]` — the (std) mutex intentionally
+  serializes env-mutating tests while other tokio workers keep making
+  progress.
 
-This project runs these checks on every PR:
+## Local gates (= CI)
 
-1. Format check (`cargo fmt --check`)
-2. Clippy linting (`cargo clippy`)
-3. Compilation (`cargo check`)
-4. All tests (`cargo test`)
-5. Documentation build (`cargo doc`)
-
-## Test Coverage
-
-Generate test coverage reports:
-
-```bash
-# Using tarpaulin
-cargo tarpaulin --out html
-
-# Using grcov
-cargo tarpaulin --out lcov
-```
-
-## Testing Specific Features
-
-### Configuration Tests
+Run per commit — the tag-triggered release workflow will run
+`cargo test --locked` on all three native runners, so anything
+platform-sensitive must hold locally first:
 
 ```bash
-cargo test --lib -- config
-```
-
-### API Tests
-
-```bash
-cargo test --lib -- api
-```
-
-### Download Manager Tests
-
-```bash
-cargo test -- download
-```
-
-### Verification Tests
-
-```bash
-cargo test -- verification
-```
-
-## Running Tests Without Network
-
-Some tests require network access. To run only local tests:
-
-```bash
-cargo test --lib -- --skip api
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+INSTA_UPDATE=no cargo test        # + the stray-scan and unreferenced checks above
 ```
 
 ## Troubleshooting
 
-### Tests Failing
-
-1. Check if tests need environment variables set
-2. Ensure you have network connectivity for API tests
-3. Try cleaning and rebuilding:
-   ```bash
-   cargo clean
-   cargo test
-   ```
-
-### Slow Tests
-
-Tests involving downloads or verification may take time. Use `timeout`:
-```bash
-timeout 300 cargo test --test integration
-```
-
-### Clippy Warnings
-
-Address all clippy warnings before submitting:
-```bash
-cargo clippy --fix
-```
+- A test that fails only sometimes in a full run but passes alone is
+  usually an env/atomics collision — check the test takes `ENV_MUTEX`
+  (see above).
+- The integration tests spawn local HTTP mock servers and set
+  `HF_ENDPOINT`; nothing here needs the network.
+- If the first build takes minutes: that is the dependency tree, not a
+  hang. Subsequent runs are incremental.

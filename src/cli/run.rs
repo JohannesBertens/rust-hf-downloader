@@ -107,7 +107,9 @@ pub(super) fn load_run_config(
 /// precedence from already-loaded options (`--token` > `$HF_TOKEN` >
 /// config) — no engine, no rate-limit flags, no `apply_options`. The
 /// caller keeps the loaded options for its own defaults (search params,
-/// or nothing). §8.8: `AppOptions::default()` itself reads `$HF_TOKEN`,
+/// or nothing).
+/// docs/DEFERRED.md#options-default-env-token-read:
+/// `AppOptions::default()` itself reads `$HF_TOKEN`,
 /// so the no-config-file path already carries the env token; the env axis
 /// wins over the file axis either way (pinned by the token-matrix tests —
 /// the dual read is unobservable here).

@@ -2,7 +2,7 @@
 title: Agents Guide — Root
 ---
 
-# AGENT.md - AI Agent Guide for Rust HF Downloader
+# AGENTS.md — AI Agent Guide for Rust HF Downloader
 
 This document provides AI agents with a comprehensive understanding of the Rust HF Downloader codebase, its architecture, and how to work with it.
 
@@ -41,6 +41,7 @@ src/
 ├── download/         # Download transport with auth; returns FileOutcome (v0.9.5). Facade (mod.rs) holds start_download = prepare_download_paths / handle_existing_file / execute_download_with_retry phases (W5.1a), retry glue, and the global DOWNLOAD_CONFIG/RATE_LIMITER atomics; private chunked.rs (W3.8) holds download_chunked = probe_file_size + spawn_chunk_tasks/wait_for_chunks phases (W5.1b), the per-chunk worker (bundled ChunkContext, W5.6), and chunk-size math. Error paths pinned by tests/download_failures.rs; the cross-chunk byte counter is an Arc<AtomicU64> (single-counter audit), the speed-pacing Instant+marker pair stays mutexed (compound)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
+├── fmt.rs           # Human-readable formatting primitives (W1.4): one wrapper per surface — eta_cli vs eta_hud, truncate_path_cli vs the middle-marker TUI variants, size_full vs HUD-compact bytes. The full-vs-HUD presentation split is DELIBERATE (do-not-unify contract pinned in fmt.rs:1-32); frozen-oracle tests pin every legacy string
 ├── utils.rs          # Exactly two helper families (slimmed W-final): streaming digests (stream_file_digest/sha256_file) + atomic rename with retry (sync + tokio twin). All human formatting lives in fmt.rs
 └── ui/
     ├── mod.rs        # UI module exports
@@ -152,7 +153,7 @@ Check `README.md` for more information.
   on `main`.
 
 ### Filter & Sort System (v1.0.0)
-- **Filter State**: `src/ui/app/state.rs` - sort_field, sort_direction, filter_min_*
+- **Filter State**: `src/ui/app/filters.rs` — `FilterState` (W4.5) is the single home of the live filter/sort values (`sort_field`, `sort_direction`, `min_downloads`, `min_likes`) and their cycle/step mutation rules; `App` holds it via `App.filters` (`src/ui/app/state.rs` — only `focused_filter_field`, the focus state, lives on App). The persisted *defaults* are `default_sort_*`/`default_min_*` on `AppOptions` (`src/models/options.rs`, `src/config.rs`), seeded into FilterState at startup and written back by `App::save_filter_settings`
 - **Filter Logic**: `src/ui/app/events/` (keys.rs) - keyboard controls and presets; `src/ui/app/filters.rs` - filter state and mutation rules
 - **Filter UI**: `src/ui/render/toolbar.rs` - toolbar rendering with focus highlighting
 - **Filter API**: `src/api/client.rs` - fetch_models_filtered() with pure client-side filter_models/sort_models (W3.3)
@@ -191,9 +192,19 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 
 ### Mutex Lock Ordering (Critical for Deadlock Prevention)
 
-To prevent deadlocks, all async code must acquire locks in the following order. NEVER hold a higher-numbered lock while acquiring a lower-numbered lock.
+The hierarchy below governs **blocking `.lock().await` acquisitions** on the
+tokio `Arc<Mutex<..>>` fields of `EngineState` (plus the shared `RateLimiter`
+state). NEVER hold a higher-numbered lock while acquiring a lower-numbered
+lock. `try_lock()` access is deadlock-safe by construction — a miss skips
+that read/tick instead of blocking — so non-blocking consumers (the UI's
+render snapshot, the CLI runner's receiver drain in `cli/run.rs::poll_once`)
+take locks in any order, each guard scoped to its own statement, never
+nested. This guard is kept in sync with `EngineState` by
+`tests/docs_guards.rs::lock_hierarchy_documents_every_engine_mutex_field`,
+which derives the field set from `src/engine/mod.rs` — a new mutex/atomic
+field fails that test until it is documented here.
 
-```
+<!-- lock-hierarchy:begin -->
 Lock Hierarchy (acquire in this order):
 
 1. download_rx (Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>)
@@ -201,19 +212,24 @@ Lock Hierarchy (acquire in this order):
 3. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
 4. complete_downloads (Arc<Mutex<CompleteDownloads>>)
 5. verification_queue (Arc<Mutex<Vec<VerificationQueueItem>>>)
-6. verification_queue_size (Arc<AtomicUsize>) - lock-free atomic counter
+6. verification_queue_size (Arc<AtomicUsize>) — lock-free atomic counter, carries no lock level
 7. verification_progress (Arc<Mutex<Vec<VerificationProgress>>>)
 8. download_registry (Arc<Mutex<DownloadRegistry>>)
-9. RateLimiter state (Arc<Mutex<RateLimiterState>>) - consolidated single lock
-10. status_rx (Arc<Mutex<mpsc::UnboundedReceiver<String>>>)
+9. RateLimiter state (Arc<Mutex<RateLimiterState>>) — consolidated single lock
+10. Receiver tier — status_rx, verify_rx, outcome_rx (Arc<Mutex<mpsc::UnboundedReceiver<..>>>): order-free under try_lock, drained one lock per scope with the guard released immediately (UI render snapshot; CLI `poll_once` drains status_rx → outcome_rx → verify_rx via try_lock); never hold one receiver lock while blocking on another
+11. verification_in_flight (Arc<AtomicUsize>) — lock-free atomic counter, carries no lock level
+<!-- lock-hierarchy:end -->
+
+Also lock-free, no hierarchy level: `verification_results`
+(`VerificationResultCounters` — session-lifetime ok/failed counters, each an
+`Arc<AtomicUsize>`).
 
 Key Rules:
-- ALWAYS acquire locks in the order above
+- The ordering rule applies to BLOCKING `.lock().await` acquisitions: ALWAYS acquire them in the order above
+- `try_lock()` never blocks, so it cannot join a deadlock cycle — use it for non-blocking access (UI rendering, receiver drains); ordering within a try_lock pass is free
 - Release locks before acquiring locks from the same level if needed
-- Use try_lock() for non-blocking access in UI rendering
 - NEVER hold a lock across an await point unless absolutely necessary
 - When receiving from a channel wrapped in Mutex, lock only for the recv() call
-```
 
 **Example - CORRECT pattern (download manager):**
 ```rust

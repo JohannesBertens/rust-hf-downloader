@@ -1,4 +1,4 @@
-//! `hf-cache path` (§2.1): pure path math plus a `refs/` lookup — the
+//! `hf-cache path` (plans/hf-cache-sync.md §2.1): pure path math plus a `refs/` lookup — the
 //! scripting helper that answers "where is this model's snapshot?" without
 //! ever touching the download engine.
 //!
@@ -25,7 +25,7 @@ pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
     let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
     let repo_dir = cache_dir.join(crate::cache_layout::repo_dir_name(&args.model_id));
 
-    // refs/<rev> lookup: pure path math, no network (§2.1).
+    // refs/<rev> lookup: pure path math, no network (plans/hf-cache-sync.md §2.1).
     if let Ok(sha) = std::fs::read_to_string(repo_dir.join("refs").join(&revision)) {
         let sha = sha.trim();
         if !sha.is_empty() {

@@ -275,7 +275,7 @@ impl Reporter {
                 }
             }
             Event::SyncComplete { snapshot_path, .. } => {
-                // §2.4: in human mode the snapshot path IS the last line
+                // plans/hf-cache-sync.md §2.4: in human mode the snapshot path IS the last line
                 // (hf CLI parity). JSON consumers read the typed event.
                 self.line_stdout(snapshot_path);
             }

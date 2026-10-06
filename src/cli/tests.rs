@@ -367,7 +367,8 @@ fn token_precedence_flag_env_then_file() {
 // unfalsifiable in the same way (it compared the hand copies to each
 // other) and is deleted — both families here compare against literals.
 //
-// §8.8 subtlety this matrix pins: `AppOptions::default()` itself reads
+// The docs/DEFERRED.md#options-default-env-token-read subtlety this
+// matrix pins: `AppOptions::default()` itself reads
 // `HF_TOKEN`, so the "no config file" column carries the env token in
 // `options.hf_token` BEFORE `merge_token` runs. That dual read is
 // unobservable through the resolved token (the env axis wins over the
@@ -407,13 +408,15 @@ enum ConfigFile {
     WithToken,
     /// config.toml exists without an `hf_token` key (serde → None).
     WithoutToken,
-    /// No config.toml at all → `AppOptions::default()` (the §8.8 env read).
+    /// No config.toml at all → `AppOptions::default()` (the
+    /// docs/DEFERRED.md#options-default-env-token-read env read).
     NoFile,
 }
 
 /// Expected resolved token for one matrix cell. Pure function of the
 /// documented precedence: first non-empty of flag > env > file, where the
-/// file axis is "cfg" / None / non-empty-env respectively (§8.8 default
+/// file axis is "cfg" / None / non-empty-env respectively (the
+/// docs/DEFERRED.md#options-default-env-token-read default
 /// read), and empty strings count as absent at every level.
 fn nonempty_token(v: Option<&str>) -> Option<&str> {
     v.filter(|s| !s.is_empty())
@@ -1218,7 +1221,7 @@ fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| (*v).to_string()).collect()
 }
 
-/// Representative repo tree exercising every §2.3 preset category.
+/// Representative repo tree exercising every plans/hf-cache-sync.md §2.3 preset category.
 fn sync_tree() -> Vec<&'static str> {
     vec![
         "config.json",
@@ -1249,7 +1252,7 @@ fn run_select(
 
 #[test]
 fn sync_selection_positional_files_win_over_every_other_selector() {
-    // §2.2 precedence: positional FILE… beats --include/--exclude and
+    // plans/hf-cache-sync.md §2.2 precedence: positional FILE… beats --include/--exclude and
     // the preset, even when all are given at once.
     let (selected, mode) = run_select(
         &sync_tree(),
@@ -1301,7 +1304,7 @@ fn sync_selection_include_exclude_glob_mode() {
     assert_eq!(mode, SelectionMode::Patterns);
 
     // Exclude alone (no include, no preset) filters the whole repo —
-    // mode stays WholeRepo with the universal exclude on top (§2.2).
+    // mode stays WholeRepo with the universal exclude on top (plans/hf-cache-sync.md §2.2).
     let (selected, mode) =
         run_select(&tree, &[], &[], &["*.bin", "*.md", "original/**"], None).unwrap();
     assert_eq!(
@@ -1318,7 +1321,7 @@ fn sync_selection_include_exclude_glob_mode() {
 
 #[test]
 fn sync_selection_vllm_preset_applies_allow_and_ignore_tables() {
-    // §2.3 via patterns::VLLM_ALLOW/VLLM_IGNORE: safetensors (incl.
+    // plans/hf-cache-sync.md §2.3 via patterns::VLLM_ALLOW/VLLM_IGNORE: safetensors (incl.
     // subfolders, `*` crosses `/`), config/tokenizer files in; fallback
     // weight formats, docs, and original/ out.
     let (selected, mode) = run_select(&sync_tree(), &[], &[], &[], Some("vllm")).unwrap();
@@ -1333,7 +1336,7 @@ fn sync_selection_vllm_preset_applies_allow_and_ignore_tables() {
     );
     assert_eq!(mode, SelectionMode::Preset);
 
-    // §2.2 precedence: --include beats the preset; --exclude applies
+    // plans/hf-cache-sync.md §2.2 precedence: --include beats the preset; --exclude applies
     // ON TOP of the preset — the preset selection minus the excluded
     // file, still reported as Preset mode.
     let (selected, mode) =
@@ -1368,7 +1371,7 @@ fn sync_selection_empty_after_filtering_is_a_usage_error() {
         }
         other => panic!("expected EmptySelection, got {:?}", other),
     }
-    // --exclude applies on top of positional files (§2.2): dropping the
+    // --exclude applies on top of positional files (plans/hf-cache-sync.md §2.2): dropping the
     // only positional file empties the selection.
     let err = run_select(&tree, &["README.md"], &[], &["*.md"], None).unwrap_err();
     assert_eq!(err.code(), "empty_selection");
@@ -1580,7 +1583,7 @@ fn absolute_path_anchors_relative_paths_at_cwd() {
 
 #[test]
 fn sync_events_serialize_with_type_tags() {
-    // Smoke: serde tagging mirrors the existing events (§2.4).
+    // Smoke: serde tagging mirrors the existing events (plans/hf-cache-sync.md §2.4).
     let value = serde_json::to_value(&Event::SyncPlanned {
         model: "org/model".to_string(),
         sha: "0123456789abcdef0123456789abcdef01234567".to_string(),

@@ -48,7 +48,8 @@ pub enum OptionsFieldKind {
     Toggle,
 }
 
-/// Transient options-dialog UI state (§8.9, moved out of `AppOptions`):
+/// Transient options-dialog UI state
+/// (docs/DEFERRED.md#options-dialog-transient-state, moved out of `AppOptions`):
 /// the cursor row and the two live-edit flags. Never serialized —
 /// `AppOptions` is purely the persisted config schema now; `App` owns
 /// one of these. Lives next to [`OPTIONS_FIELDS`] because the cursor
@@ -76,7 +77,8 @@ pub struct OptionsFieldSpec {
     /// Renders the field's current value; the `Input` arguments are the
     /// live directory/token edit buffers (read by the Text fields while
     /// editing, ignored by the rest), and the dialog state carries the
-    /// editing flags (§8.9: no longer on `AppOptions`).
+    /// editing flags (docs/DEFERRED.md#options-dialog-transient-state: no
+    /// longer on `AppOptions`).
     pub value: fn(
         &crate::models::AppOptions,
         &OptionsDialogState,

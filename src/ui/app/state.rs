@@ -69,7 +69,8 @@ pub struct App {
     // Mouse interaction state (one bundle — the fields travel together
     // through the render pass and the mouse handlers; see MouseState)
     pub mouse: MouseState,
-    // Options-dialog transient UI state (§8.9: moved out of AppOptions —
+    // Options-dialog transient UI state
+    // (docs/DEFERRED.md#options-dialog-transient-state: moved out of AppOptions —
     // cursor row + live-edit flags; AppOptions is pure config schema)
     pub options_dialog: crate::ui::render::OptionsDialogState,
     // Last-known-good snapshots of the engine's tokio::Mutex state for

@@ -11,7 +11,7 @@ UI is split into:
 - app/ (mod.rs, W3.9 — no app.rs indirection): runtime loop; spawns background
   workers and manages frame redraw cadence; owns the crossterm event loop and
   the mouse click/scroll/hover handlers
-- app/ submodule: state container, event dispatch, search/download flows; ui/app/filters.rs single-homes the filter/sort values and their cycle/step mutation rules; ui/app/events/ is the keyboard layer (mod.rs dispatch + shared navigation, keys.rs normal-mode/popup key handlers); App groups mouse state (state.rs::MouseState: areas/hovered_panel/last_move) and options-dialog transient state (options_dialog: OptionsDialogState, §8.9 — AppOptions is pure config schema)
+- app/ submodule: state container, event dispatch, search/download flows; ui/app/filters.rs single-homes the filter/sort values and their cycle/step mutation rules; ui/app/events/ is the keyboard layer (mod.rs dispatch + shared navigation, keys.rs normal-mode/popup key handlers); App groups mouse state (state.rs::MouseState: areas/hovered_panel/last_move) and options-dialog transient state (options_dialog: OptionsDialogState, docs/DEFERRED.md#options-dialog-transient-state — AppOptions is pure config schema)
 - tree.rs: file-tree navigation model (not drawing) — see Tree operations
 
 Terminal stack: ratatui for rendering, crossterm for input, tui-input for text fields.
