@@ -69,6 +69,34 @@ pub struct MockRepo {
     /// is global across paths (single-file scenarios), like a reverse
     /// proxy starting to 500 mid-download.
     pub fail_status_after_first_range: Option<u16>,
+    /// Per-path range-request failure scripts (G4/G5 failure injection
+    /// with EXACT attempt counting): the n-th range-bearing request whose
+    /// URI contains `script.path` answers the scripted status
+    /// `statuses[n.min(len-1)]` while it is >= 400; a < 400 entry serves
+    /// normally. Keep an `Arc` clone of each script to read `seen` (the
+    /// attempt count) after the run; the `statuses` vec must be non-empty.
+    pub range_scripts: Vec<Arc<RangeScript>>,
+}
+
+/// One per-path range-request script entry (see
+/// [`MockRepo::range_scripts`]). `seen` counts EVERY range-bearing
+/// request to `path`, including ones the script answers with a 2xx/3xx
+/// entry — the exact attempt counter tests assert against.
+pub struct RangeScript {
+    pub path: String,
+    pub statuses: Vec<u16>,
+    pub seen: std::sync::atomic::AtomicU64,
+}
+
+impl RangeScript {
+    /// Script answering `status` to every range request to `path`.
+    pub fn always(path: &str, status: u16) -> Arc<Self> {
+        Arc::new(Self {
+            path: path.to_string(),
+            statuses: vec![status],
+            seen: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
 }
 
 impl MockRepo {
@@ -291,6 +319,7 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
     // counts range-bearing requests so exactly the first (the transport's
     // probe) succeeds.
     let fail_after_first = repo.fail_status_after_first_range;
+    let range_scripts: Vec<Arc<RangeScript>> = repo.range_scripts.clone();
     let range_requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let repo = Arc::new(repo);
     let sleep_flag = Arc::new(Mutex::new(sleep_once));
@@ -299,13 +328,37 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
         let repo = repo.clone();
         let sleep_flag = sleep_flag.clone();
         let range_requests = range_requests.clone();
+        let range_scripts = range_scripts.clone();
         async move {
             Ok::<_, hyper::Error>(service_fn(move |req| {
                 let repo = repo.clone();
                 let sleep_flag = sleep_flag.clone();
                 let range_requests = range_requests.clone();
+                let range_scripts = range_scripts.clone();
                 async move {
                     let is_resolve = req.uri().path().contains("/resolve/main/");
+                    // Per-path scripted failures (G4/G5): COUNT the request
+                    // at arrival, before anything below can drop this
+                    // future — hyper cancels stalled handlers when the
+                    // client disconnects (e.g. after a timeout), and the
+                    // attempt counter must not depend on the response ever
+                    // being written. The scripted STATUS is applied later,
+                    // after the stall/delay gates, so a `sleep_once` +
+                    // script combination can still build
+                    // timeout-then-error attempt sequences.
+                    let mut script_hit: Option<(usize, usize)> = None; // (script idx, n)
+                    if req.headers().contains_key("range") {
+                        for (idx, script) in range_scripts.iter().enumerate() {
+                            if req.uri().path().contains(&script.path) {
+                                let n = script
+                                    .seen
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                    as usize;
+                                script_hit = Some((idx, n));
+                                break;
+                            }
+                        }
+                    }
                     if is_resolve {
                         let mut guard = sleep_flag.lock().await;
                         if let Some(delay) = guard.take() {
@@ -330,6 +383,21 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
                                         .unwrap(),
                                 );
                             }
+                        }
+                    }
+                    // Apply the scripted status (see the counting note
+                    // above): >= 400 answers with that status; a < 400
+                    // entry (or an unmatched path) serves normally.
+                    if let Some((idx, n)) = script_hit {
+                        let script = &range_scripts[idx];
+                        let status = script.statuses[n.min(script.statuses.len() - 1)];
+                        if status >= 400 {
+                            return Ok::<Response<Body>, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::from_u16(status).unwrap())
+                                    .body(Body::empty())
+                                    .unwrap(),
+                            );
                         }
                     }
                     Ok::<Response<Body>, hyper::Error>(handle(req, repo).await)

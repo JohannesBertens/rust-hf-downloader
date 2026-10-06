@@ -13,6 +13,8 @@
 //! | network (closed port)        | `EXIT_FAILURE` (1)      | `exit_network_closed_port` |
 //! | auth_required (mock 401)     | `EXIT_AUTH` (2)         | `exit_auth_required_gated_repo` |
 //! | hash mismatch                | `EXIT_FAILURE` (1)      | `exit_hash_mismatch` |
+//! | auth + failure mixed (2 files, G4a) | `EXIT_AUTH` (2) | `exit_auth_beats_download_failure_gated_plus_500` |
+//! | one ok + one 500 (2 files, G4b) | `EXIT_FAILURE` (1)   | `exit_failure_mixed_one_ok_one_500` |
 //!
 //! No GAP rows: every reachable outcome class is produced with the shared
 //! mock (401 via `gated: true`, 404 via an unknown model id, mismatch via a
@@ -33,7 +35,7 @@ mod common;
 
 use common::{
     assert_exit_code, assert_file_content, fixture_bytes, sha256_hex, spawn_mock, FileEntry,
-    MockRepo, TestEnv,
+    MockRepo, RangeScript, TestEnv,
 };
 
 // Mirrors the EXIT_* constants in src/cli/mod.rs (no lib target, so the
@@ -94,6 +96,37 @@ fn single_file_repo(content: &[u8]) -> MockRepo {
         per_request_delay: std::time::Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
+    }
+}
+
+/// Two-file repo (a.gguf + b.gguf) sharing one content fixture — the
+/// G4 rows' base.
+fn two_file_repo(content: &[u8]) -> MockRepo {
+    MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![
+            FileEntry {
+                path: "a.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(content)),
+                advertised_size: None,
+                content: content.to_vec(),
+            },
+            FileEntry {
+                path: "b.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(content)),
+                advertised_size: None,
+                content: content.to_vec(),
+            },
+        ],
+        gated: false,
+        fail_status_after_first_range: None,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: std::time::Duration::ZERO,
+        search_results: Vec::new(),
+        branches: Vec::new(),
+        range_scripts: Vec::new(),
     }
 }
 
@@ -231,6 +264,78 @@ async fn exit_hash_mismatch() {
     );
     // The bytes are kept on disk (engine keeps the file for inspection)
     assert_file_content(&env.models_dir().join("a/b/model.gguf"), &content);
+}
+
+/// Row 8 (G4a): two-file gated repo where file 2 additionally fails
+/// with an injected 500 — auth beats failure in the exit-code ranking
+/// (`RunTally::exit_code` checks `auth_required` FIRST), so the run
+/// exits `EXIT_AUTH` (2) even though a download also failed.
+#[tokio::test]
+async fn exit_auth_beats_download_failure_gated_plus_500() {
+    let content = fixture_bytes(10_000);
+    let fail_b = RangeScript::always("b.gguf", 500);
+    let mut repo = two_file_repo(&content);
+    repo.gated = true; // a.gguf 401s; b.gguf is intercepted by the script
+    repo.range_scripts = vec![fail_b];
+    let endpoint = spawn_mock(repo).await;
+    let env = TestEnv::new(&endpoint);
+
+    let (code, stdout, stderr) = env
+        .run(&["download", "a/b", "--file", "a.gguf", "--file", "b.gguf"])
+        .await;
+    assert_exit_code(code, EXIT_AUTH, &stdout, &stderr);
+    // BOTH failure classes are reported (auth on a.gguf, 500 on b.gguf) —
+    // the ranking only decides the exit code, not the emissions.
+    assert!(
+        stderr.contains("error [auth_required]: authentication required for a/b"),
+        "stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("error [download_failed]: b.gguf:"),
+        "stderr: {stderr:?}"
+    );
+    assert!(stdout.starts_with("Done: 2 file(s)"), "stdout: {stdout:?}");
+    assert!(stdout.contains("1 failed"), "stdout: {stdout:?}");
+}
+
+/// Row 9 (G4b): two-file repo, file 1 downloads fine, file 2 fails with
+/// an injected 500 → `EXIT_FAILURE` (1), summary counts "1 downloaded",
+/// and the run tail carries the `download_failed` error naming file 2.
+#[tokio::test]
+async fn exit_failure_mixed_one_ok_one_500() {
+    let content = fixture_bytes(10_000);
+    let other = fixture_bytes(6_000);
+    let fail_b = RangeScript::always("b.gguf", 500);
+    let mut repo = two_file_repo(&content);
+    repo.files[1] = FileEntry {
+        path: "b.gguf".to_string(),
+        advertised_sha256: Some(sha256_hex(&other)),
+        advertised_size: None,
+        content: other.clone(),
+    };
+    repo.range_scripts = vec![fail_b];
+    let endpoint = spawn_mock(repo).await;
+    let env = TestEnv::new(&endpoint);
+
+    let (code, stdout, stderr) = env
+        .run(&["download", "a/b", "--file", "a.gguf", "--file", "b.gguf"])
+        .await;
+    assert_exit_code(code, EXIT_FAILURE, &stdout, &stderr);
+    assert!(
+        stdout.contains("1 downloaded"),
+        "summary must count the successful file: {stdout:?}"
+    );
+    assert!(stdout.contains("1 failed"), "stdout: {stdout:?}");
+    assert!(
+        stderr.contains("error [download_failed]: b.gguf:"),
+        "download_failed tail missing: {stderr:?}"
+    );
+    // File 1 is fully on disk and hash-verified despite file 2's failure.
+    assert_file_content(&env.models_dir().join("a/b/a.gguf"), &content);
+    assert!(
+        stderr.contains("✓ verified: a.gguf"),
+        "the surviving file still verifies: {stderr:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

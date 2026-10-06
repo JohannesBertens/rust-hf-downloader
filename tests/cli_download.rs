@@ -45,6 +45,7 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         per_request_delay: Duration::from_millis(10),
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -97,6 +98,7 @@ async fn human_mode_summary_on_stdout() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -141,6 +143,7 @@ async fn already_exists_skips_download_and_verifies() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -183,6 +186,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -225,6 +229,7 @@ async fn gated_repo_exits_two() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -265,6 +270,7 @@ async fn ambiguous_selector_exits_64_with_available_list() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -309,6 +315,7 @@ async fn quant_selector_downloads_only_that_quantization() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -353,6 +360,7 @@ async fn all_selector_downloads_every_file() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -388,6 +396,7 @@ async fn transient_timeout_is_retried() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -421,6 +430,7 @@ async fn no_verify_skips_verification_events() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -468,6 +478,7 @@ async fn raw_endpoint_fallback_after_resolve_404() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -507,6 +518,7 @@ async fn revision_flag_downloads_from_branch() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -566,6 +578,7 @@ async fn revision_default_main_empty_exits_64() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -591,6 +604,7 @@ async fn revision_unknown_branch_exits_64() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -622,6 +636,7 @@ async fn usage_errors_exit_64() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
     let env = TestEnv::new(&endpoint);
@@ -680,6 +695,7 @@ fn search_repo() -> MockRepo {
             model("mid/obscure-model", 50, 0),
         ],
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     }
 }
 
@@ -852,6 +868,7 @@ async fn nested_subdirectory_files_download_and_verify() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -959,6 +976,7 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1039,6 +1057,7 @@ async fn download_progress_plain_prints_lines_without_tty() {
         per_request_delay: Duration::from_millis(250),
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1109,6 +1128,7 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
         per_request_delay: Duration::from_millis(250),
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
