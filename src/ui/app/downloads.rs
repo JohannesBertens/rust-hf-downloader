@@ -217,13 +217,12 @@ impl App {
                 // the quantization info; the map lookups were dead code),
                 // but the fetch and its failure warning are observable,
                 // so both stay.
-                let token = self.options.hf_token.as_ref();
                 let _sha256_map = if num_files > 1 {
                     match fetch_multipart_sha256s(
+                        &self.api_client,
                         &model.id,
                         crate::api::DEFAULT_REVISION,
                         &filenames_to_download,
-                        token,
                     )
                     .await
                     {

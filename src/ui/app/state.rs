@@ -52,6 +52,14 @@ pub struct App {
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
+    /// The ONE `reqwest::Client` this TUI session's API requests share
+    /// (plan M4/B5), built from `options.hf_token` — the token lives in
+    /// the client's default `Authorization` header, so no call site
+    /// handles it. Rebuilt whenever the token changes
+    /// ([`App::rebuild_api_client`]); a malformed token surfaces as the
+    /// startup error and the client runs unauthenticated — explicitly,
+    /// never as the old silent header drop that later blamed a 401.
+    pub api_client: reqwest::Client,
     // Non-GGUF model support
     pub model_metadata: Arc<RwLock<Option<ModelMetadata>>>,
     pub file_tree: Arc<RwLock<Option<FileTreeNode>>>,
@@ -113,6 +121,19 @@ impl App {
 
         let file_tree_state = ListState::default();
 
+        // One shared API client per session (M4/B5); a malformed token is
+        // surfaced as the startup error while the client falls back to
+        // unauthenticated (public repos stay usable — gated ones fail,
+        // but with the reason already on screen).
+        let (api_client, startup_error) =
+            match crate::http_client::build_client_with_token(options.hf_token.as_deref(), None) {
+                Ok(client) => (client, None),
+                Err(e) => (
+                    reqwest::Client::new(),
+                    Some(format!("Invalid HF token: {e}")),
+                ),
+            };
+
         Self {
             running: false,
             input: Input::default(),
@@ -122,7 +143,7 @@ impl App {
             list_state,
             quant_list_state,
             loading: Arc::new(RwLock::new(false)),
-            error: Arc::new(RwLock::new(None)),
+            error: Arc::new(RwLock::new(startup_error)),
             status: Arc::new(RwLock::new(
                 "Welcome! Press '/' to search for models".to_string(),
             )),
@@ -140,6 +161,7 @@ impl App {
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
+            api_client,
             // Non-GGUF model support
             model_metadata: Arc::new(RwLock::new(None)),
             file_tree: Arc::new(RwLock::new(None)),
@@ -161,6 +183,20 @@ impl App {
     /// Synchronize options to global config atomics
     pub fn sync_options_to_config(&self) {
         crate::config::apply_options(&self.options);
+    }
+
+    /// Rebuild [`App::api_client`] after the token changed (options-dialog
+    /// save, auth-error dismissal — M4/B5). A malformed token surfaces as
+    /// the error popup; the client then runs unauthenticated — explicit,
+    /// never the old silent header drop that later blamed a 401.
+    pub fn rebuild_api_client(&mut self) {
+        match crate::http_client::build_client_with_token(self.options.hf_token.as_deref(), None) {
+            Ok(client) => self.api_client = client,
+            Err(e) => {
+                *self.error.write() = Some(format!("Invalid HF token: {e}"));
+                self.api_client = reqwest::Client::new();
+            }
+        }
     }
 
     /// Terminate application

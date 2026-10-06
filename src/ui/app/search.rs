@@ -18,7 +18,6 @@ impl App {
         *self.error.write() = None;
 
         let models = self.models.clone();
-        let token = self.options.hf_token.as_ref();
         let sort_field = self.filters.sort_field;
         let sort_direction = self.filters.sort_direction;
         let min_downloads = self.filters.min_downloads;
@@ -79,15 +78,16 @@ impl App {
             return;
         }
 
-        // Step 2: Fetch from API (if not cached)
+        // Step 2: Fetch from API (if not cached). The session's shared
+        // client (M4/B5) carries the token; no token plumbing here.
         let results = crate::api::fetch_models_filtered(
+            &self.api_client,
             &query,
             sort_field,
             sort_direction,
             min_downloads,
             min_likes,
             100,
-            token,
         )
         .await;
 
@@ -232,7 +232,9 @@ impl App {
         let error = self.error.clone();
         let display_mode = self.display_mode.clone();
         let status = self.status.clone();
-        let token = self.options.hf_token.clone();
+        // The session's shared API client (M4/B5): cheap Arc clone, the
+        // token rides in its default headers.
+        let api_client = self.api_client.clone();
 
         // Spawn background task (non-blocking)
         tokio::spawn(async move {
@@ -242,7 +244,7 @@ impl App {
             // never cached — the next selection retries it.
             let metadata =
                 match crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || {
-                    fetch_model_metadata(&model_id, crate::api::DEFAULT_REVISION, token.as_ref())
+                    fetch_model_metadata(&api_client, &model_id, crate::api::DEFAULT_REVISION)
                 })
                 .await
                 {
@@ -404,7 +406,8 @@ impl App {
 
         // Clone Arcs for background task
         let api_cache = self.api_cache.clone();
-        let token = self.options.hf_token.clone();
+        // Shared API client (M4/B5) — see the load_quantizations clone.
+        let api_client = self.api_client.clone();
 
         // Spawn background prefetch task (fire-and-forget)
         tokio::spawn(async move {
@@ -414,11 +417,7 @@ impl App {
                 // on a later prefetch).
                 let metadata =
                     match crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || {
-                        fetch_model_metadata(
-                            &model_id,
-                            crate::api::DEFAULT_REVISION,
-                            token.as_ref(),
-                        )
+                        fetch_model_metadata(&api_client, &model_id, crate::api::DEFAULT_REVISION)
                     })
                     .await
                     {

@@ -23,8 +23,8 @@ use crate::cli::events::{ErrorCode, Event, FileDto, Summary};
 use crate::cli::report::Reporter;
 use crate::cli::resolve::{selection_error_event, FileSpec};
 use crate::cli::run::{
-    effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
-    queue_run, RunTally,
+    effective_revision, emit_client_error, emit_metadata_error, emit_run_failures, load_run_config,
+    monitor, queue_run, RunTally,
 };
 use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
@@ -190,14 +190,17 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 
     // --- 1. Configuration (Runner fold: run::load_run_config, no output
     //        override — the destination is the hub cache, §4.1) ------------
-    let (_options, token) = load_run_config(
+    let (_options, token, api_client) = match load_run_config(
         args.run_output.token.clone(),
         None,
         args.rate_limits.rate_limit,
         args.rate_limits.no_rate_limit,
         args.rate_limits.rate_limit_mbps,
         args.run_output.no_verify,
-    );
+    ) {
+        Ok(bootstrap) => bootstrap,
+        Err(e) => return emit_client_error(&mut reporter, &e),
+    };
 
     // --- 2. Validate usage (§5.2 step 1: revision already parsed by
     //        clap's parse_revision) ----------------------------------------
@@ -215,8 +218,8 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 
     // --- 3. Tree + commit SHA in parallel (§5.2 step 2) --------------------
     let (metadata_res, sha_res) = tokio::join!(
-        crate::api::fetch_model_metadata(&args.model_id, &revision, token.as_ref()),
-        crate::api::resolve_revision_sha(&args.model_id, &revision, token.as_ref()),
+        crate::api::fetch_model_metadata(&api_client, &args.model_id, &revision),
+        crate::api::resolve_revision_sha(&api_client, &args.model_id, &revision),
     );
     let metadata = match metadata_res {
         Ok(metadata) => metadata,

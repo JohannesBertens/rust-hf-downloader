@@ -102,6 +102,7 @@ fn single_file_repo(content: &[u8]) -> MockRepo {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     }
 }
 
@@ -132,6 +133,7 @@ fn two_file_repo(content: &[u8]) -> MockRepo {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     }
 }
 

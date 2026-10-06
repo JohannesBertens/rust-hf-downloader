@@ -275,6 +275,12 @@ impl App {
                     };
                     self.options_dialog.editing_token = false;
 
+                    // The token rides in the session's shared client
+                    // (M4/B5) — rebuild it so the change takes effect
+                    // for the next search/fetch (a malformed token
+                    // surfaces as the error popup).
+                    self.rebuild_api_client();
+
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
                         *self.status.write() = format!("Failed to save config: {}", e);

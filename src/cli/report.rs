@@ -404,6 +404,26 @@ pub(super) fn verification_heartbeat_line(active: usize, done: usize) -> String 
     format!("verifying: {active} in flight, {done} verified")
 }
 
+/// Progress-line content for the self-update asset download (plan
+/// M4/C5): the SAME shapes as the download progress lines — `bar_cli`,
+/// rounded percent, `size_full` bytes — minus speed/eta (a one-shot
+/// asset fetch has no speed estimate). Replaces `update_cmd`'s
+/// hand-rolled `downloading… X / Y (Z%)` line so the two progress
+/// disciplines cannot drift apart again.
+pub(super) fn format_update_progress(downloaded: u64, total: u64) -> String {
+    if total == 0 {
+        return format!("downloading… {}", size_full(downloaded));
+    }
+    let pct = (downloaded as f64 / total as f64) * 100.0;
+    format!(
+        "downloading… {} {}% {}/{}",
+        bar_cli(downloaded, total),
+        pct.round() as u64,
+        size_full(downloaded),
+        size_full(total)
+    )
+}
+
 /// Suffix `" eta <t>"` for the given remaining bytes at the given speed
 /// (empty while the speed estimate is still warming up).
 fn eta_suffix(speed_mbps: f64, remaining: u64) -> String {
