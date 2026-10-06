@@ -113,11 +113,20 @@ Key modules
 - bootstrap.rs: bootstrap() (state → registry-mirror seed → verification worker → manager) + seed_registry_mirror()
 - CLI: run::queue_run (engine::bootstrap → EngineState::enqueue → drop the sender) in run_download + hf-cache sync (after purging staging registry entries); TUI: composes the same pieces (EngineState::new in App::new, seed_registry_mirror in the startup scan, both spawns in App::run) — never duplicate this logic
 
-13) paths.rs — cross-platform path resolution (v2.6.0) + path-security policy (paths::sanitize)
+13) paths.rs — app-path resolution (v2.6.0) + path-security policy (paths::sanitize)
 - Precedence: env overrides > portable mode (config.toml next to exe) > dirs
   defaults > temp fallback; never hardcode $HOME or format! paths elsewhere
 - sanitize: per-component sanitization (traversal, control/Windows-illegal chars,
   reserved device names) + containment-checked validate_and_sanitize_path
+- Hub-cache dir resolution + CACHEDIR.TAG moved to cache_layout (M6/C7);
+  one-cycle pub-use shims remain here
+
+13b) cache_layout.rs — all HuggingFace hub-cache knowledge (M6/C7 consolidated)
+- Hub-cache dir resolution (hf_hub_cache: --cache-dir > HF_HUB_CACHE >
+  HUGGINGFACE_HUB_CACHE > HF_HOME > platform default — huggingface_hub
+  parity) + write_cachedir_tag backup-tool marker (moved from paths.rs)
+- Layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative
+  symlinks, refs, per-repo sync lock, staging cleanup
 
 14) rate_limiter.rs — token-bucket limiter (v1.2.0)
 - Global VERIFICATION/DownloadConfig atomics; single consolidated state lock

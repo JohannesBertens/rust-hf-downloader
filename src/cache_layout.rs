@@ -23,6 +23,15 @@
 //!
 //! Driven by `cli::hf_cache::sync`; unit tests exercise the pipeline directly.
 //!
+//! Ownership (M6/C7, plans/architecture-simplification-review.md §5): this
+//! module owns ALL hub-cache knowledge — the on-disk layout *and* the
+//! hub-cache **directory resolution** ([`hf_hub_cache`]: `--cache-dir` /
+//! `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` / `HF_HOME` / platform
+//! default, mirroring `huggingface_hub`) plus the [`write_cachedir_tag`]
+//! backup-tool marker. Both moved here from `paths.rs` (which keeps only
+//! app-path resolution + sanitize); `paths` re-exports them for one
+//! cycle.
+//!
 //! Naming (W-final): this module is the cache *layout writer* — named
 //! `cache_layout` to disambiguate from `cli::hf_cache/`, the `hf-cache`
 //! command group that drives it.
@@ -625,6 +634,137 @@ impl Drop for SyncLockGuard {
         // leaves the file for the 24h staleness policy to reclaim.
         let _ = fs::remove_file(&self.path);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hub-cache directory resolution + CACHEDIR.TAG (M6/C7, moved from paths.rs)
+//
+// Resolution mirrors the `huggingface_hub` Python package, NOT the
+// app-specific override chain in `paths.rs`: a shared cache must land on
+// exactly the same directory `hf download` and transformers use, so users
+// can point `HF_HUB_CACHE` at one location and mix clients.
+//
+
+/// Environment variable holding the primary HuggingFace hub cache override
+/// (`HF_HUB_CACHE`). Highest-priority environment source.
+pub const ENV_HF_HUB_CACHE: &str = "HF_HUB_CACHE";
+
+/// Environment variable holding the legacy, deprecated HuggingFace hub
+/// cache override (`HUGGINGFACE_HUB_CACHE`). Honored for parity with old
+/// `huggingface_hub` deployments; wins only when [`ENV_HF_HUB_CACHE`] is
+/// unset, and emits a one-line warning.
+pub const ENV_HUGGINGFACE_HUB_CACHE: &str = "HUGGINGFACE_HUB_CACHE";
+
+/// Environment variable holding the HuggingFace home directory (`HF_HOME`).
+/// When set, the hub cache defaults to `$HF_HOME/hub`.
+pub const ENV_HF_HOME: &str = "HF_HOME";
+
+/// Directory `huggingface_hub` places under the platform cache root.
+const HF_CACHE_DIR: &str = "huggingface";
+
+/// Hub cache leaf directory: the cache root is always `<base>/huggingface/hub`.
+const HF_HUB_SUBDIR: &str = "hub";
+
+/// Pure resolution core behind [`hf_hub_cache`]: takes already-read env
+/// values so tests can inject combinations directly instead of mutating
+/// process state. Returns the resolved directory plus whether the
+/// deprecated [`ENV_HUGGINGFACE_HUB_CACHE`] variable decided the outcome
+/// (the caller turns that flag into a one-line warning).
+fn resolve_hf_hub_cache(
+    flag: Option<&str>,
+    hf_hub_cache: Option<PathBuf>,
+    legacy_hub_cache: Option<PathBuf>,
+    hf_home: Option<PathBuf>,
+) -> (PathBuf, bool) {
+    if let Some(flag) = flag.filter(|f| !f.is_empty()) {
+        return (PathBuf::from(flag), false);
+    }
+    if let Some(dir) = hf_hub_cache {
+        return (dir, false);
+    }
+    if let Some(dir) = legacy_hub_cache {
+        return (dir, true);
+    }
+    if let Some(home) = hf_home {
+        return (home.join(HF_HUB_SUBDIR), false);
+    }
+    (platform_hf_hub_cache_dir(), false)
+}
+
+/// Platform-default hub cache: `dirs::cache_dir()/huggingface/hub`
+/// (`~/.cache/huggingface/hub` on Linux), or the same namespaced path under
+/// [`std::env::temp_dir`] when no cache root can be determined. Matches the
+/// `huggingface_hub` constants module.
+fn platform_hf_hub_cache_dir() -> PathBuf {
+    dirs::cache_dir()
+        .map(|d| d.join(HF_CACHE_DIR).join(HF_HUB_SUBDIR))
+        .unwrap_or_else(|| std::env::temp_dir().join(HF_CACHE_DIR).join(HF_HUB_SUBDIR))
+}
+
+/// Resolves the HuggingFace hub cache directory used by the `hf-cache`
+/// commands (`sync` writes `models--<org>--<name>/…` into it).
+///
+/// Precedence, in `huggingface_hub` order (highest first):
+///
+/// 1. explicit `--cache-dir` flag argument,
+/// 2. [`ENV_HF_HUB_CACHE`] (`HF_HUB_CACHE`),
+/// 3. [`ENV_HUGGINGFACE_HUB_CACHE`] (`HUGGINGFACE_HUB_CACHE`, deprecated:
+///    honored only when `HF_HUB_CACHE` is unset, with a one-line warning),
+/// 4. [`ENV_HF_HOME`] (`HF_HOME`) joined with `hub`,
+/// 5. platform default `dirs::cache_dir()/huggingface/hub`
+///    (e.g. `~/.cache/huggingface/hub` on Linux).
+///
+/// Environment values that are set but empty count as unset (same rule as
+/// `paths::env_override`). No canonicalization: the caller's `--cache-dir` is
+/// taken verbatim, like the Python client takes it.
+pub fn hf_hub_cache(flag: Option<&str>) -> PathBuf {
+    let (dir, deprecated) = resolve_hf_hub_cache(
+        flag,
+        crate::paths::env_override(ENV_HF_HUB_CACHE),
+        crate::paths::env_override(ENV_HUGGINGFACE_HUB_CACHE),
+        crate::paths::env_override(ENV_HF_HOME),
+    );
+    if deprecated {
+        eprintln!(
+            "warning: ${ENV_HUGGINGFACE_HUB_CACHE} is deprecated by huggingface_hub; \
+             set ${ENV_HF_HUB_CACHE} instead (using cache at {})",
+            dir.display()
+        );
+    }
+    dir
+}
+
+/// Name of the `CACHEDIR.TAG` marker file placed at the root of the hub
+/// cache directory.
+const CACHEDIR_TAG_FILE: &str = "CACHEDIR.TAG";
+
+/// Exact contents of [`CACHEDIR_TAG_FILE`], per the cache directory tagging
+/// standard (<https://bford.info/cachedir/spec.html>). The first line — the
+/// 43-byte signature plus trailing newline — is fixed by the spec and must
+/// stay byte-identical; backup tools scan for it and ignore the tag
+/// otherwise. The comment block below it is ours.
+const CACHEDIR_TAG_CONTENT: &[u8] = br#"Signature: 8a477f597d28d172789f0688a068862f
+#
+# This file is a cache directory tag created by rust-hf-downloader.
+# This directory is a huggingface-hub-compatible model cache written by
+# `hf-cache sync` (models--<org>--<name>/{refs,blobs,snapshots}).
+# For information about cache directory tags, see:
+# http://www.brynosaurus.com/cachedir/
+"#;
+
+/// Writes the `CACHEDIR.TAG` marker into `cache_root` so backup tools skip
+/// the hub cache (spec: <https://bford.info/cachedir/spec.html>). Missing
+/// parent directories are created. Idempotent: an already-present tag file
+/// is never touched, whatever wrote it.
+pub fn write_cachedir_tag(cache_root: &Path) -> std::io::Result<()> {
+    let tag = cache_root.join(CACHEDIR_TAG_FILE);
+    if tag.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = tag.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&tag, CACHEDIR_TAG_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
@@ -1410,5 +1550,166 @@ mod tests {
         assert!(validate_relative_path("/abs/path").is_err());
         assert!(validate_relative_path("C:\\win").is_err());
         assert!(validate_relative_path("a\\b").is_err());
+    }
+
+    // ---- hub-cache directory resolution + CACHEDIR.TAG (M6/C7, moved
+    // from paths.rs with the functions they pin) ----
+
+    /// RAII guard that restores one environment variable on drop, so tests
+    /// can flip hub-cache overrides without leaking state into siblings
+    /// (same pattern as the `EnvGuard` in `engine.rs` tests).
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    #[test]
+    fn hf_hub_cache_flag_beats_every_env_var() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _hub = EnvGuard::set(ENV_HF_HUB_CACHE, "/env-hub-cache");
+        let _legacy = EnvGuard::set(ENV_HUGGINGFACE_HUB_CACHE, "/env-legacy-cache");
+        let _home = EnvGuard::set(ENV_HF_HOME, "/env-hf-home");
+        assert_eq!(
+            hf_hub_cache(Some("/flag-cache")),
+            PathBuf::from("/flag-cache")
+        );
+    }
+
+    #[test]
+    fn hf_hub_cache_env_beats_deprecated_and_home() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _hub = EnvGuard::set(ENV_HF_HUB_CACHE, "/hub-cache");
+        let _legacy = EnvGuard::set(ENV_HUGGINGFACE_HUB_CACHE, "/legacy-cache");
+        let _home = EnvGuard::set(ENV_HF_HOME, "/hf-home");
+        assert_eq!(hf_hub_cache(None), PathBuf::from("/hub-cache"));
+    }
+
+    #[test]
+    fn hf_hub_cache_deprecated_var_wins_and_flags_warning() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _hub = EnvGuard::unset(ENV_HF_HUB_CACHE);
+        let _legacy = EnvGuard::set(ENV_HUGGINGFACE_HUB_CACHE, "/legacy-cache");
+        let _home = EnvGuard::set(ENV_HF_HOME, "/hf-home");
+        // The public fn resolves to the deprecated path (it also eprintlns
+        // the one-line warning; stderr content is asserted via the core).
+        assert_eq!(hf_hub_cache(None), PathBuf::from("/legacy-cache"));
+        // Pure core: the deprecated var is what decided it.
+        let (dir, deprecated) =
+            resolve_hf_hub_cache(None, None, Some(PathBuf::from("/legacy-cache")), None);
+        assert_eq!(dir, PathBuf::from("/legacy-cache"));
+        assert!(deprecated);
+    }
+
+    #[test]
+    fn hf_hub_cache_hf_home_gets_hub_appended() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _hub = EnvGuard::unset(ENV_HF_HUB_CACHE);
+        let _legacy = EnvGuard::unset(ENV_HUGGINGFACE_HUB_CACHE);
+        let _home = EnvGuard::set(ENV_HF_HOME, "/hf-home");
+        assert_eq!(
+            hf_hub_cache(None),
+            PathBuf::from("/hf-home").join(HF_HUB_SUBDIR)
+        );
+    }
+
+    #[test]
+    fn hf_hub_cache_defaults_to_platform_cache_dir() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _hub = EnvGuard::unset(ENV_HF_HUB_CACHE);
+        let _legacy = EnvGuard::unset(ENV_HUGGINGFACE_HUB_CACHE);
+        let _home = EnvGuard::unset(ENV_HF_HOME);
+        assert_eq!(hf_hub_cache(None), platform_hf_hub_cache_dir());
+        // Concrete layout check, independent of the implementation consts:
+        // `<platform cache>/huggingface/hub`, never the bare cache root.
+        if let Some(cache) = dirs::cache_dir() {
+            assert_eq!(hf_hub_cache(None), cache.join("huggingface").join("hub"));
+        }
+    }
+
+    #[test]
+    fn hf_hub_cache_ignores_empty_values() {
+        let _guard = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _hub = EnvGuard::set(ENV_HF_HUB_CACHE, "");
+        let _legacy = EnvGuard::set(ENV_HUGGINGFACE_HUB_CACHE, "");
+        let _home = EnvGuard::set(ENV_HF_HOME, "/hf-home");
+        // Empty flag and empty env vars count as unset.
+        assert_eq!(
+            hf_hub_cache(Some("")),
+            PathBuf::from("/hf-home").join(HF_HUB_SUBDIR)
+        );
+    }
+
+    #[test]
+    fn cachedir_tag_signature_line_is_byte_exact() {
+        let dir = tmp("cachedir-exact");
+        write_cachedir_tag(&dir).expect("write tag");
+        let bytes = fs::read(dir.join(CACHEDIR_TAG_FILE)).expect("read tag");
+        // First 43 bytes: the spec's fixed signature line, then a newline.
+        assert_eq!(&bytes[..43], b"Signature: 8a477f597d28d172789f0688a068862f");
+        assert_eq!(bytes[43], b'\n');
+        // Remainder is our comment block, marking hub compatibility.
+        let tail = String::from_utf8_lossy(&bytes[44..]);
+        assert!(tail.contains("huggingface-hub"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cachedir_tag_is_idempotent() {
+        let dir = tmp("cachedir-idempotent");
+        write_cachedir_tag(&dir).expect("initial write");
+        // Replace the tag with foreign content: a re-run must leave any
+        // existing tag file untouched rather than rewrite it.
+        let tag = dir.join(CACHEDIR_TAG_FILE);
+        fs::write(&tag, "Signature: existing\n").expect("replace tag");
+        write_cachedir_tag(&dir).expect("second write");
+        assert_eq!(
+            fs::read_to_string(&tag).expect("read tag"),
+            "Signature: existing\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cachedir_tag_creates_missing_root() {
+        let base = tmp("cachedir-mkroot");
+        let root = base.join("nested").join("hub");
+        write_cachedir_tag(&root).expect("write with missing root");
+        assert!(root.join(CACHEDIR_TAG_FILE).is_file());
+        let _ = fs::remove_dir_all(&base);
     }
 }

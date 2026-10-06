@@ -22,7 +22,7 @@ pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
         return EXIT_USAGE;
     }
     let revision = effective_revision(&args.revision);
-    let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
+    let cache_dir = crate::cache_layout::hf_hub_cache(args.cache_dir.as_deref());
     let repo_dir = cache_dir.join(crate::cache_layout::repo_dir_name(&args.model_id));
 
     // refs/<rev> lookup: pure path math, no network (plans/hf-cache-sync.md §2.1).

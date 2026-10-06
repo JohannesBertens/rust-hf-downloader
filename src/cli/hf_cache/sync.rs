@@ -272,7 +272,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
     }
 
     // --- 5. Plan against the current cache (R6) + SyncPlanned (plans/hf-cache-sync.md §2.4) --------
-    let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
+    let cache_dir = crate::cache_layout::hf_hub_cache(args.cache_dir.as_deref());
     let plan = match crate::cache_layout::plan(
         &cache_dir,
         &args.model_id,
@@ -393,7 +393,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             return EXIT_FAILURE;
         }
     }
-    if let Err(e) = crate::paths::write_cachedir_tag(&cache_dir) {
+    if let Err(e) = crate::cache_layout::write_cachedir_tag(&cache_dir) {
         reporter.emit(&Event::error(
             ErrorCode::Io,
             format!(

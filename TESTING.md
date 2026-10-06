@@ -66,7 +66,7 @@ test splits.
 | Module | What it pins | Run |
 |---|---|---|
 | `src/config.rs` | config load/save/apply paths | `cargo test config` |
-| `src/paths.rs` | path-resolution precedence + sanitize security | `cargo test paths` |
+| `src/paths.rs` | app path-resolution precedence + sanitize security (hub-cache tests moved to cache_layout, M6/C7) | `cargo test paths` |
 | `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, concurrency/failure contracts | `cargo test registry` |
 | `src/engine/enqueue.rs` | 8 EnqueuePolicy characterization tests (the single enqueue transaction) | `cargo test enqueue` |
 | `src/engine/workers.rs` | manager drain/join contract | `cargo test workers` |
@@ -83,7 +83,7 @@ test splits.
 | `src/verification.rs` | verify outcomes, result counters | `cargo test verification` |
 | `src/update.rs` | version compare, manifest/asset selection | `cargo test update` |
 | `src/utils.rs` | digest streaming + atomic rename with retry | `cargo test utils` |
-| `src/cache_layout.rs` | hub-cache layout math, blob/refs naming, sync lock | `cargo test cache_layout` |
+| `src/cache_layout.rs` | hub-cache layout math, blob/refs naming, sync lock; hub-cache dir resolution (`hf_hub_cache` env precedence) + CACHEDIR.TAG (M6/C7) | `cargo test cache_layout` |
 | `src/ui/app/*` | filter cycle/step rules, keyboard dispatch/advance contract, download flows, mouse hit-areas | `cargo test app` |
 | `src/ui/render/*_tests.rs` | snapshot / hud / style-size suites (`src/ui/render/snapshots/`) | `cargo test render` |
 | `src/ui/tree.rs` | flatten/toggle navigation model | `cargo test tree` |
