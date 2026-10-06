@@ -71,3 +71,15 @@ tag build caught three Windows-only issues (28 failures, run
   engine/, ui/app) then failed with `PoisonError`. All test-side
   `ENV_MUTEX` locks now recover from poisoning, matching the pattern
   the registry and options tests already used.
+- The engine/ui test `EnvGuard`s isolated the registry by redirecting
+  `HOME` — but `dirs::home_dir()` reads `USERPROFILE`, not `HOME`, on
+  Windows, so every engine test leaked its registry writes to the
+  runner's real home and read each other's leftovers (empty-registry
+  and exact-count asserts failed nondeterministically). The guards now
+  redirect `RUST_HF_DOWNLOADER_DATA_DIR`, which moves the registry path
+  on every platform.
+- The `register_pending` golden expected its new entry's `local_path`
+  built with `Path::join(rel)` (keeps `/` inside the rel on Windows),
+  but production builds it one component per join (native separators
+  throughout). The expected value is now built the same way
+  (`local_parts`); POSIX bytes unchanged.

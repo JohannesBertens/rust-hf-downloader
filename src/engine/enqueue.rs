@@ -439,11 +439,11 @@ mod tests {
     use crate::engine::test_support::{closed_port, EnvGuard};
 
     // Env-mutating tests share the crate-wide mutex from `paths`: these
-    // tests redirect `HOME` (which moves the registry path), the registry
-    // golden tests in `registry_tests` redirect `ENV_DATA_DIR` (which moves
-    // it too) — one mutex serializes every test that touches the
-    // process-global registry location. (`cargo test` runs unit tests in
-    // parallel threads within one process.)
+    // tests redirect `RUST_HF_DOWNLOADER_DATA_DIR` (which moves the registry
+    // path on every platform), the registry golden tests in `registry_tests`
+    // redirect the same var — one mutex serializes every test that touches
+    // the process-global registry location. (`cargo test` runs unit tests
+    // in parallel threads within one process.)
     use crate::models::DownloadRegistry;
     use crate::paths::ENV_MUTEX;
     use std::path::PathBuf;

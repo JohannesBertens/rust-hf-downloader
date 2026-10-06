@@ -190,8 +190,10 @@ pub fn parse_auth_status(status: &str) -> Option<&str> {
 }
 
 /// Env plumbing shared by the engine submodule tests (`enqueue`, `workers`,
-/// `bootstrap`): the EnvGuard redirects `HOME` (registry path) and
-/// `HF_ENDPOINT` (resolve_url) and restores both on drop.
+/// `bootstrap`): the EnvGuard redirects `RUST_HF_DOWNLOADER_DATA_DIR`
+/// (registry path — `HOME` alone does not isolate on Windows, where
+/// `dirs::home_dir()` reads `USERPROFILE` instead) and `HF_ENDPOINT`
+/// (resolve_url) and restores both on drop.
 #[cfg(test)]
 pub(crate) mod test_support {
     /// Find a guaranteed-closed localhost port (bind then drop the listener).
@@ -204,17 +206,17 @@ pub(crate) mod test_support {
     }
 
     pub(crate) struct EnvGuard {
-        home: Option<String>,
+        data_dir: Option<std::ffi::OsString>,
         endpoint: Option<String>,
     }
 
     impl EnvGuard {
-        pub(crate) fn install(home: &std::path::Path, endpoint: &str) -> Self {
+        pub(crate) fn install(data_dir: &std::path::Path, endpoint: &str) -> Self {
             let guard = Self {
-                home: std::env::var("HOME").ok(),
+                data_dir: std::env::var_os(crate::paths::ENV_DATA_DIR),
                 endpoint: std::env::var("HF_ENDPOINT").ok(),
             };
-            std::env::set_var("HOME", home);
+            std::env::set_var(crate::paths::ENV_DATA_DIR, data_dir);
             std::env::set_var("HF_ENDPOINT", endpoint);
             guard
         }
@@ -222,9 +224,9 @@ pub(crate) mod test_support {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.home {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
+            match &self.data_dir {
+                Some(d) => std::env::set_var(crate::paths::ENV_DATA_DIR, d),
+                None => std::env::remove_var(crate::paths::ENV_DATA_DIR),
             }
             match &self.endpoint {
                 Some(e) => std::env::set_var("HF_ENDPOINT", e),

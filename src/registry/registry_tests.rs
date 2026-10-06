@@ -114,6 +114,19 @@ fn local(tmp: &Path, rel: &str) -> String {
     tmp.join(rel).to_string_lossy().to_string()
 }
 
+/// Path built the way `paths::sanitize::validate_and_sanitize_path`
+/// builds registry paths — one component per join. On Windows this
+/// yields native separators throughout, unlike `local`, which appends
+/// the rel string verbatim (keeping any `/` inside it). On POSIX the
+/// two are byte-identical.
+fn local_parts(tmp: &Path, parts: &[&str]) -> String {
+    let mut path = tmp.to_path_buf();
+    for part in parts {
+        path = path.join(part);
+    }
+    path.to_string_lossy().to_string()
+}
+
 /// One `[[downloads]]` table block (with trailing newline), in the exact
 /// field order `save_registry` emits.
 #[allow(clippy::too_many_arguments)]
@@ -627,7 +640,7 @@ fn golden_register_pending_appends_only_missing_urls_and_pins_bytes() {
             block(
                 "brand-new.gguf",
                 &url_new,
-                &local(&tmp, "org/model/brand-new.gguf"),
+                &local_parts(&tmp, &["org", "model", "brand-new.gguf"]),
                 64000,
                 0,
                 "Incomplete",
