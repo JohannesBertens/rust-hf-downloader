@@ -189,7 +189,7 @@ mod tests {
         );
         assert_eq!(queue[0].filename, f2);
         assert_eq!(queue[0].expected_sha256, "sha-2");
-        assert_eq!(queue[0].is_manual, true);
+        assert!(queue[0].is_manual);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
