@@ -29,7 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   join), the token-matrix temp dirs no longer embed Debug quotes
   (invalid Windows filename chars), the engine/ui test `EnvGuard`s
   redirect `RUST_HF_DOWNLOADER_DATA_DIR` instead of `HOME` (`HOME` does
-  not move the registry path on Windows), and `ENV_MUTEX` test locks
+  not move the registry path on Windows), the `register_pending`
+  golden builds its expected path the way production does (one
+  component per join), the e2e `normalize()` canonicalizes `\` to `/`
+  (Windows binaries print native separators in destination paths),
+  and `ENV_MUTEX` test locks
   recover from poisoning so one failure cannot cascade into ~19
   unrelated ones.
 
