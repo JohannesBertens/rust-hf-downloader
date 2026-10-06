@@ -1,6 +1,6 @@
 # Readability & Maintainability Refactor Plan
 
-**Status:** reviewed — revised per three parallel plan audits (behavior-preservation: *sound after amendments*; coverage: *gaps found*; executability: *needs restructuring*; all accepted amendments folded in below; conditional code facts re-verified against HEAD)
+**Status:** EXECUTED + final-reviewed (see §10) — 75 commits on refactor/readability-maintainability-review; original status: reviewed, revised per three parallel plan audits (behavior-preservation: *sound after amendments*; coverage: *gaps found*; executability: *needs restructuring*; all accepted amendments folded in below; conditional code facts re-verified against HEAD)
 **Date:** 2026-10-05 · **Base:** branch `refactor/readability-maintainability-review` @ `5286e0b` (v2.13.1)
 **Sources:** four parallel fresh-context code reviews (architecture, pipeline internals, UI module, CLI + cross-cutting style), parent-verified against HEAD; then three parallel plan reviews (Opus soundness, glm-5.3 completeness, gemini executability).
 
@@ -224,6 +224,11 @@ Group 1 (P0 + harness) complete at 298/0. Known residual: ~1% pre-existing e2e f
 | (3 commits) | policy/registry/engine + W5.6 | SendDiscipline collapse (48 combos -> sealed ctors); on_invalid discovered a THIRD variant SkipValidation (resume/hf-cache validate nothing); RegistryMode::None -> AlreadyRecorded+StagingSweep; register_pending -> registry.rs; Completion enum; engine/{mod,enqueue,workers,bootstrap}; W5.6: single u64 counter -> AtomicU64, compound pacing stays mutexed; 8 policy tests passed with ZERO edits |
 | 3fa0f42/262d1fd/fc177a2 | W5.1/W3.8/W3.9+inception | failure-injection FIRST (500-mid-chunk + size-mismatch covered; 416-resume GAP: transport has NO resume path — .incomplete always deleted); start_download 309->46+3 phases; download/ + events/ splits; ui/app/app.rs -> ui/app/mod.rs (pure git mv) |
 | 58163f6/e19591d/e929d30 | W5.2/W5.3/8.9/naming | RenderParams -> 8 ctx groups, hit-rects RETURNED (render pass pure), registration order pinned by test; MouseState grouped, ListStates deliberately left; AppOptions transients -> OptionsDialogState + TOML golden; hf_cache.rs -> cache_layout.rs (20 refs); mark_mismatch mirror patch moved to verification caller (layering restored); utils slimmed to digests+rename, 22 call sites -> fmt |
+
+**FINAL VALIDATION + final review wave (wave-reviewer=SHIP WITH NOTES -> doc drift fixed 2de91fd; gemini late-range regression=CLEAN 0 findings; qwen test-audit=MIXED -> hardening slice landed):**
+- Test hardening: token matrix rebound to PRODUCTION resolve_run_token/load_run_config (unfalsifiable cross-site test deleted); verify-outcome tally case; 16x2 modify_option literal table (pinned: verify-buffer default above dialog max, retry-delay at min clamp, u32::MAX->i32 truncation); mouse behavior x5; Standard-mode size+style snapshots (8 new .snaps — the render-split throwaway is now permanent); mixed-outcome exit rows (auth-beats-failure exit 2; 1-ok+1-failed exit 1); wire-level retry attempt pin (max_retries+1; hyper-drops-stalled-futures discovery — count at arrival); ui/tree.rs x4; oracle literal anchors. Final: 431/0.
+- G6 (insta CI gating) deliberately NOT implemented — owner directed no CI; local gate convention documented in TESTING.md instead.
+- Final battery: full suite 431/0 x2; clippy 0; fmt clean; 10x e2e loop 0 failures; snapshot bodies vs day-one baseline: 0 changed (26 survivors: 12 cli in place + 14 render moved byte-identical; 2 orphans deleted W0.4); help snapshots byte-identical throughout.
 
 **W5.5 (RuntimeConfig) DEFERRED by owner decision:** highest-risk plan item (globals -> carried config touches every spawn site + both frontends' options flow), independently skippable by plan, design review did not require it, live-option-effect smoke not exercisable headless. The three statics keep working with pinned test save/restore (engine tests). Revisit as a standalone follow-up.
 
