@@ -92,7 +92,7 @@ so each subject is discoverable and independently runnable).
 | `src/utils.rs` | digest streaming + atomic rename with retry | `cargo test utils` |
 | `src/cache_layout.rs` | hub-cache layout math, blob/refs naming, sync lock; hub-cache dir resolution (`hf_hub_cache` env precedence) + CACHEDIR.TAG (M6/C7) | `cargo test cache_layout` |
 | `src/ui/app/*` | filter cycle/step rules, keyboard dispatch/advance contract, download flows, mouse hit-areas | `cargo test app` |
-| `src/ui/render/*_tests.rs` | snapshot / hud / style-size suites (`src/ui/render/snapshots/`) | `cargo test render` |
+| `src/ui/render/*_tests.rs` | snapshot / hud / style-size suites (`src/ui/render/snapshots/`); shared fixtures + the bidirectional snapshot-name manifest guard in `src/ui/render/test_utils.rs` (M5/U5) | `cargo test render` |
 | `src/ui/tree.rs` | flatten/toggle navigation model | `cargo test tree` |
 
 ## Snapshot tests (insta) — the local gate
@@ -116,7 +116,13 @@ find src tests -name '*.snap.new' -print   # must print nothing
 
 # 3. Unreferenced-snapshot check — every committed .snap must belong to
 #    a live test (a deleted test's snapshot is dead weight and, worse, a
-#    false sense of coverage). With cargo-insta installed (handles
+#    false sense of coverage). For the TUI render goldens this is now
+#    IN-CARGO (M5/U5): ui/render/test_utils.rs keeps the exact snapshot-
+#    name manifest, snap_ui/snap_style refuse unregistered names, and
+#    snapshot_name_manifest_matches_committed_goldens compares the
+#    manifest against src/ui/render/snapshots/ in both directions —
+#    plain `cargo test` fails on a dropped test's orphaned golden. For
+#    the remaining snapshot dirs, with cargo-insta installed (handles
 #    dynamically-built names correctly):
 cargo insta test --unreferenced reject
 # Without it, grep by leaf name (everything up to the last `__` is the

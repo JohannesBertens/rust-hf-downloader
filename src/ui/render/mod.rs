@@ -72,6 +72,8 @@ mod snapshot_tests;
 #[cfg(test)]
 mod style_size_tests;
 #[cfg(test)]
+mod test_utils;
+#[cfg(test)]
 mod tests;
 
 /// Focus & hover state shared by every panel border (W5.2 group): the
@@ -402,6 +404,10 @@ pub(super) fn popup_shell(frame: &mut Frame, area: Rect, title: &str, style: Sty
 /// (Regex filter — dots in the version are escaped.)
 #[cfg(test)]
 fn snap_ui(name: &str, terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) {
+    // Manifest gate (M5/U5): the exact name set these suites produce is
+    // registered in test_utils (which also checks it against the
+    // committed goldens) — an unregistered name fails here, loudly.
+    test_utils::require_snapshot_name(&format!("rust_hf_downloader__ui__render__{name}"));
     let pattern = format!("v{}", env!("CARGO_PKG_VERSION")).replace('.', r"\.");
     let mut settings = insta::Settings::new();
     settings.add_filter(&pattern, "v<VERSION>");

@@ -63,6 +63,7 @@ src/
         ├── popups.rs      # resume / search / download-path / auth-error overlays
         ├── options_popup.rs # 16-field options dialog renderer — pure consumer since M5/U1 (dialog state + field table live in ui/app/options.rs, imported from there)
         ├── toolbar.rs     # filter & sort toolbar, hit areas, version badge
+        ├── test_utils.rs  # cfg(test) shared fixtures (UiFixture + draw harness) + the snapshot-name manifest guard (M5/U5)
         └── *_tests.rs     # snapshot_tests / hud_tests / style_size_tests / tests — snaps in render/snapshots/
 ```
 
