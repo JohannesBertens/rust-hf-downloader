@@ -893,4 +893,99 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// E4 validation-first pin (M5 item 2 of
+    /// plans/architecture-simplification-review.md §5 — bounded re-open of
+    /// the sealed EnqueuePolicy): the two
+    /// no-write registry variants are observably IDENTICAL — same disk
+    /// registry BYTES (both leave a seeded file untouched), same engine
+    /// mirror, same queue accounting, same HUD items, same channel
+    /// messages, same EnqueueOutcome — crossed with both disciplines the
+    /// no-write flavors occur in (tui_resume pairs AlreadyRecorded with
+    /// Resume, hf_cache_sync pairs StagingSweep with Batch). This is the
+    /// proof that merging `AlreadyRecorded` + `StagingSweep` into one
+    /// `NoWrites` variant is compile-time-only; it runs green against the
+    /// pre-merge types BEFORE the merge lands.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn enqueue_no_write_registry_variants_are_observably_identical() {
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("engine-enq-equiv-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let files = vec![queued_file("f.bin", 10), queued_file("g.bin", 20)];
+        // One pre-recorded entry, seeded through the typed op: "no writes"
+        // then means the on-disk registry stays BYTE-identical — a much
+        // stronger claim than an absent file (which no write could alter
+        // either).
+        let preexisting = DownloadMetadata {
+            model_id: "a/b".to_string(),
+            filename: "seed.bin".to_string(),
+            url: crate::api::resolve_url("a/b", "seed.bin", crate::api::DEFAULT_REVISION),
+            local_path: "/elsewhere/seed.bin".to_string(),
+            total_size: 999,
+            downloaded_size: 0,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: None,
+        };
+
+        for discipline in [SendDiscipline::Resume, SendDiscipline::Batch] {
+            // Identical fresh disk pre-state for both variants of this
+            // discipline's pairing.
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            crate::registry::upsert_pending(std::slice::from_ref(&preexisting));
+            let baseline = std::fs::read(crate::paths::registry_path()).unwrap();
+
+            let mut observables = Vec::new();
+            for registry in [RegistryMode::AlreadyRecorded, RegistryMode::StagingSweep] {
+                let (state, tx) = EngineState::new();
+                let policy = EnqueuePolicy {
+                    registry,
+                    discipline,
+                    on_invalid: InvalidPolicy::SkipValidation,
+                };
+                let outcome = state.enqueue(&tx, &files, &policy).await;
+
+                // Neither variant may write: the disk registry is
+                // byte-identical to the seeded baseline.
+                let disk = std::fs::read(crate::paths::registry_path()).unwrap();
+                assert_eq!(
+                    disk, baseline,
+                    "a no-write variant touched the disk registry ({discipline:?})"
+                );
+
+                // The full observable state as one comparable string
+                // (the payload types are Debug, not PartialEq).
+                let queue = state.queue.download_queue_totals.lock().await.clone();
+                let items = state.queue.download_queue_items.lock().await.clone();
+                let mirror = state.download_registry.lock().await.clone();
+                let drained = drain_downloads(&state).await;
+                observables.push(format!(
+                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                    outcome, queue, items, mirror, drained, disk
+                ));
+
+                // Shape sanity per discipline, so the equality below can
+                // never pass vacuously on two empty observables: both
+                // files sent, queue fully charged, HUD summaries pushed,
+                // mirror untouched (seeded on disk only).
+                assert_eq!(outcome.sent, 2);
+                assert_eq!((queue.size, queue.bytes), (2, 30));
+                assert_eq!(items.len(), 2);
+                assert_eq!(drained.len(), 2);
+                assert!(mirror.downloads.is_empty(), "the mirror is never patched");
+            }
+
+            assert_eq!(
+                observables[0], observables[1],
+                "AlreadyRecorded and StagingSweep diverged under {discipline:?} \
+                 — merging them into NoWrites would NOT be behavior-neutral"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
