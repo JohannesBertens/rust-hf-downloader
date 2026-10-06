@@ -85,12 +85,14 @@ impl App {
                     is_manual: true, // Mark as manual
                 };
 
-                crate::verification::queue_verification(
-                    self.engine.verification_queue.clone(),
-                    self.engine.verification_queue_size.clone(),
-                    item,
-                )
-                .await;
+                // Manual verify goes through the hub method — the same
+                // queue+counter steps the automatic (post-download) path
+                // takes (M3: queue_verification is a VerificationHub
+                // method; the engine no longer exposes the raw pair).
+                self.engine
+                    .verification_hub()
+                    .queue_verification(item)
+                    .await;
 
                 *self.status.write() = format!("Queued {} for verification", quant.filename);
             }

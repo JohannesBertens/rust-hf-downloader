@@ -4,6 +4,7 @@
 use super::{EngineState, QueuedDownload};
 use crate::download::{start_download, DownloadParams};
 use crate::models::FileOutcome;
+use crate::verification::VerificationHub;
 use tokio::task::JoinHandle;
 
 /// Handle to the running download manager.
@@ -12,6 +13,27 @@ pub struct ManagerHandle {
     /// channel is closed and fully drained. The TUI simply drops this handle
     /// (the task keeps running); the CLI awaits it for completion.
     pub join: JoinHandle<Vec<FileOutcome>>,
+}
+
+impl EngineState {
+    /// Construct the verification worker's [`VerificationHub`] from this
+    /// state's channels and Arcs (M3 step 3: the hub is the seam that
+    /// lets `verification.rs` drop its `crate::engine` import — the
+    /// ENGINE side owns the assembly). Named expiry: deleted when the
+    /// M3 step-4 regroup makes the hub a field of `EngineState` itself
+    /// (`state.verification`).
+    pub fn verification_hub(&self) -> VerificationHub {
+        VerificationHub {
+            queue: self.verification_queue.clone(),
+            size: self.verification_queue_size.clone(),
+            in_flight: self.verification_in_flight.clone(),
+            progress: self.verification_progress.clone(),
+            results: self.verification_results.clone(),
+            status_tx: self.status_tx.clone(),
+            verify_tx: self.verify_tx.clone(),
+            registry_mirror: self.download_registry.clone(),
+        }
+    }
 }
 
 /// Spawn the download manager task.
@@ -67,8 +89,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 status_tx: state.status_tx.clone(),
                 complete_downloads: state.complete_downloads.clone(),
                 expected_sha256,
-                verification_queue: state.verification_queue.clone(),
-                verification_queue_size: state.verification_queue_size.clone(),
+                verification: state.verification_hub(),
                 hf_token,
             })
             .await;
@@ -88,7 +109,8 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
 
 /// Spawn the background verification worker (runs until the process exits).
 pub fn spawn_verification_worker(state: EngineState) -> JoinHandle<()> {
-    tokio::spawn(crate::verification::verification_worker(state))
+    let hub = state.verification_hub();
+    tokio::spawn(crate::verification::verification_worker(hub))
 }
 
 #[cfg(test)]

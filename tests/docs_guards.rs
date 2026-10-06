@@ -29,6 +29,12 @@
 //!    atomic save); `load_registry`/`save_registry` are module-private,
 //!    so this guard catches the *hand-rolled* fourth bypass site (a raw
 //!    fs write that privatization alone cannot stop).
+//! 5. [`module_dependency_dag`] — `src/verification.rs` and
+//!    `src/download/**` contain no `crate::engine` reference at all — M3
+//!    of `plans/architecture-simplification-review.md`: the engine
+//!    triangle (engine ↔ download ↔ verification) becomes a DAG, with
+//!    the engine as the sole composite owner; the textual check keeps
+//!    the next cycle from re-forming silently.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -329,6 +335,42 @@ fn registry_disk_writes_confined_to_registry_module() {
         "registry writes live outside src/registry.rs — every mutation must go \
          through registry::with_registry (single writer, atomic save); a direct \
          fs write to the registry path is a bypass site:\n{}",
+        violations.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guard (e): module dependency DAG (M3)
+// ---------------------------------------------------------------------------
+
+/// `src/verification.rs` and every file under `src/download/` must contain
+/// no `crate::engine` reference — not even in comments (a doc line naming
+/// the engine path in a module that must not import it is the same drift,
+/// one rename away from a real import). This is the durable, test-enforced
+/// side of the M3 DAG: `download` and `verification` depend only on models
+/// and registry (plus the `VerificationHub` seam `verification` itself
+/// owns); the engine imports them, never the reverse.
+#[test]
+fn module_dependency_dag() {
+    let mut violations: Vec<String> = Vec::new();
+    for (path, contents) in src_files() {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        let in_scope =
+            normalized.ends_with("src/verification.rs") || normalized.contains("/src/download/");
+        if !in_scope {
+            continue;
+        }
+        for (idx, line) in contents.lines().enumerate() {
+            if line.contains("crate::engine") {
+                violations.push(format!("  {}:{}: {}", path.display(), idx + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "src/verification.rs and src/download/** must not reference the engine \
+         module (M3 DAG: download/verification depend on models + registry + the \
+         VerificationHub seam only):\n{}",
         violations.join("\n")
     );
 }

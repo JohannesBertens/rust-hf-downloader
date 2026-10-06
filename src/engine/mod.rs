@@ -57,7 +57,7 @@ use crate::models::{
 };
 use crate::verification::VerificationResultCounters;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -203,9 +203,10 @@ impl EngineState {
     /// `queue_verification` call happens inside `start_download`, which the
     /// manager awaits, so once the manager join handle has resolved, all
     /// queue pushes have happened and this condition is stable.
+    /// Delegates to the hub (M3 step 3): one implementation of the
+    /// race-free two-counter check.
     pub fn verification_idle(&self) -> bool {
-        self.verification_queue_size.load(Ordering::Relaxed) == 0
-            && self.verification_in_flight.load(Ordering::Relaxed) == 0
+        self.verification_hub().idle()
     }
 }
 
@@ -271,6 +272,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     // M3 step 1: the SHAPE test — `EngineState::new()` returns a fully
     // connected, fresh-valued state. This is the migration checklist for
