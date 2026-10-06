@@ -9,9 +9,10 @@
 //! module exists as the single home of the drain loop): [`monitor`] holds
 //! no engine lock across an await (it `select!`s on the manager join, a
 //! ticker, and ctrl-c); [`poll_once`] takes every lock with `try_lock` in
-//! its own scope, never nested, touching in order `status_rx` (level 10),
-//! `outcome_rx`, `verification_progress` (7), `verify_rx`,
-//! `download_progress` (3) — a missed `try_lock` skips that tick's
+//! its own scope, never nested, touching in order the EventBus receivers
+//! `events.status_rx` and `events.outcome_rx` (receiver tier, level 10),
+//! the verification hub's `verification.progress` (7), `events.verify_rx`,
+//! then `download_progress` (3) — a missed `try_lock` skips that tick's
 //! heartbeat rather than printing a lock artifact. A guard must never
 //! outlive its statement, and no lock is ever held while acquiring
 //! another.
@@ -404,14 +405,14 @@ pub(super) async fn poll_once(
     reporter: &mut Reporter,
 ) {
     // Free-text status lines (human mode only; JSON uses typed events)
-    if let Ok(mut rx) = state.status_rx.try_lock() {
+    if let Ok(mut rx) = state.events.status_rx.try_lock() {
         while let Ok(message) = rx.try_recv() {
             reporter.status_line(&message);
         }
     }
 
     // Streaming per-file outcomes
-    if let Ok(mut rx) = state.outcome_rx.try_lock() {
+    if let Ok(mut rx) = state.events.outcome_rx.try_lock() {
         while let Ok(outcome) = rx.try_recv() {
             apply_outcome_event(&outcome, index_of, count, reporter, tally);
         }
@@ -421,7 +422,7 @@ pub(super) async fn poll_once(
     // None = the try_lock snapshot missed — skip the heartbeat that tick
     // rather than print a lock artifact as an in-flight count.
     let mut verifying_active: Option<usize> = None;
-    if let Ok(progress) = state.verification_progress.try_lock() {
+    if let Ok(progress) = state.verification.progress.try_lock() {
         verifying_active = Some(progress.len());
         for entry in progress.iter() {
             if seen_verifying.insert(entry.filename.clone()) {
@@ -433,7 +434,7 @@ pub(super) async fn poll_once(
     }
 
     // Typed verification results
-    if let Ok(mut rx) = state.verify_rx.try_lock() {
+    if let Ok(mut rx) = state.events.verify_rx.try_lock() {
         while let Ok(outcome) = rx.try_recv() {
             apply_verify_outcome(&outcome, reporter, tally);
         }

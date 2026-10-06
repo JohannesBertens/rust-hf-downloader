@@ -6,10 +6,14 @@
 //!
 //! 1. [`lock_hierarchy_documents_every_engine_mutex_field`] — the AGENTS.md
 //!    lock hierarchy documents **every** `Arc<Mutex<..>>`/atomic field of
-//!    `EngineState`, derived from the source (not a hand-maintained list),
-//!    matched only inside the delimited hierarchy section (finding E3: the
-//!    table omitted `verify_rx`/`outcome_rx`/`verification_in_flight` and
-//!    rotted silently as fields were added).
+//!    the engine's state bundles (`EngineState` + `QueueAccounting` +
+//!    `EventBus` in `src/engine/mod.rs`, `VerificationHub` in
+//!    `src/verification.rs`), derived from the source (not a
+//!    hand-maintained list), matched only inside the delimited hierarchy
+//!    section (finding E3: the table omitted `verify_rx`/`outcome_rx`/
+//!    `verification_in_flight` and rotted silently as fields were added;
+//!    M3 rewired the derivation from the flat field list to the bundle
+//!    struct bodies).
 //! 2. [`no_bare_plan_section_anchors_in_src`] — no bare `§N` plan anchor in
 //!    `src/**`: a `§<digit>` on a line must co-occur with `plans/` or
 //!    `docs/DEFERRED.md`, and the DEFERRED citation is validated in both
@@ -89,18 +93,17 @@ fn src_files() -> Vec<(PathBuf, String)> {
 // Guard (a): AGENTS.md lock hierarchy completeness
 // ---------------------------------------------------------------------------
 
-/// Derive the lock-carrying `EngineState` field names from the source:
-/// every field whose type is `Arc<Mutex<..>>` (directly or through a
-/// same-file type alias such as `DownloadReceiver`) plus every
-/// `Arc<Atomic*>` field. Deriving — rather than hand-listing — means a new
-/// field fails this test until the hierarchy documents it.
-///
-/// M3 rewires this to derive from the bundle definitions
-/// (`EventBus`/`VerificationHub`/…); until then the sanity floors below
-/// keep the derivation honest.
+/// Derive the lock-carrying engine field names from the BUNDLE struct
+/// definitions (M3 rewiring): `EngineState`, `QueueAccounting`, and
+/// `EventBus` in `src/engine/mod.rs`, plus `VerificationHub` in
+/// `src/verification.rs`. A field counts when its type is `Arc<Mutex<..>>`
+/// (directly or through a same-file type alias such as `DownloadReceiver`)
+/// or `Arc<Atomic*>`. Deriving — rather than hand-listing — means a new
+/// field in ANY bundle fails this test until the hierarchy documents it.
 #[test]
 fn lock_hierarchy_documents_every_engine_mutex_field() {
     let engine_src = read_normalized(&root().join("src/engine/mod.rs"));
+    let verification_src = read_normalized(&root().join("src/verification.rs"));
 
     // One level of alias resolution: `pub type X = Arc<Mutex<..>>`.
     let alias_re = Regex::new(r"(?m)^pub type (\w+) = Arc<Mutex<").unwrap();
@@ -109,42 +112,62 @@ fn lock_hierarchy_documents_every_engine_mutex_field() {
         .map(|c| c.get(1).unwrap().as_str())
         .collect();
 
-    // The `EngineState` struct body (from the declaration to the first
-    // column-0 closing brace).
-    let struct_start = engine_src
-        .find("pub struct EngineState")
-        .expect("EngineState definition present in src/engine/mod.rs");
-    let rest = &engine_src[struct_start..];
-    let body_end = rest.find("\n}\n").expect("EngineState body terminates");
-    let body = &rest[..body_end];
+    // The `pub <field>: <type>` lines of one named struct body (from the
+    // declaration to the first column-0 closing brace). Attribute and doc
+    // lines inside the body do not match the field regex and are skipped.
+    fn struct_fields(src: &str, struct_name: &str) -> Vec<(String, String)> {
+        let decl = format!("pub struct {struct_name}");
+        let start = src
+            .find(&decl)
+            .unwrap_or_else(|| panic!("{struct_name} definition present"));
+        let rest = &src[start..];
+        let body_end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("{struct_name} body terminates"));
+        let body = &rest[..body_end];
+        let field_re = Regex::new(r"^\s*pub\s+(\w+)\s*:\s*([^,]+?),?\s*$").unwrap();
+        body.lines()
+            .filter_map(|line| {
+                field_re.captures(line).map(|c| {
+                    (
+                        c.get(1).unwrap().as_str().to_string(),
+                        c.get(2).unwrap().as_str().trim().to_string(),
+                    )
+                })
+            })
+            .collect()
+    }
 
-    let field_re = Regex::new(r"^\s*pub\s+(\w+)\s*:\s*([^,]+?),?\s*$").unwrap();
     let mut mutex_fields: Vec<String> = Vec::new();
     let mut atomic_fields: Vec<String> = Vec::new();
-    for line in body.lines() {
-        let Some(caps) = field_re.captures(line) else {
-            continue;
-        };
-        let name = caps.get(1).unwrap().as_str();
-        let ty = caps.get(2).unwrap().as_str().trim();
-        if ty.starts_with("Arc<Mutex<") || mutex_aliases.contains(&ty) {
-            mutex_fields.push(name.to_string());
-        } else if ty.starts_with("Arc<Atomic") {
-            atomic_fields.push(name.to_string());
+    for (src, bundle) in [
+        (&engine_src, "EngineState"),
+        (&engine_src, "QueueAccounting"),
+        (&engine_src, "EventBus"),
+        (&verification_src, "VerificationHub"),
+    ] {
+        for (name, ty) in struct_fields(src, bundle) {
+            if ty.starts_with("Arc<Mutex<") || mutex_aliases.contains(&ty.as_str()) {
+                mutex_fields.push(name);
+            } else if ty.starts_with("Arc<Atomic") {
+                atomic_fields.push(name);
+            }
         }
     }
 
-    // Sanity floors: if the struct moves or the regex drifts, fail loudly
-    // instead of passing vacuously. (Counts as of M0: 11 mutex + 2 atomic.
-    // If fields were intentionally REMOVED, lower the floor in the same PR.)
+    // Sanity floors: if a bundle moves or the regex drifts, fail loudly
+    // instead of passing vacuously. (Counts as of the M3 regroup: 12 mutex
+    // (4 EngineState + 2 QueueAccounting + 3 EventBus + 3 VerificationHub)
+    // + 2 atomic. If fields were intentionally REMOVED, lower the floor in
+    // the same PR.)
     assert!(
-        mutex_fields.len() >= 11,
-        "derived only {mutex_fields:?} mutex fields — the EngineState derivation is stale \
+        mutex_fields.len() >= 12,
+        "derived only {mutex_fields:?} mutex fields — the bundle derivation is stale \
          (or fields were intentionally removed: lower the floor in the same PR)"
     );
     assert!(
         atomic_fields.len() >= 2,
-        "derived only {atomic_fields:?} atomic fields — the EngineState derivation is stale \
+        "derived only {atomic_fields:?} atomic fields — the bundle derivation is stale \
          (or fields were intentionally removed: lower the floor in the same PR)"
     );
 
@@ -166,14 +189,15 @@ fn lock_hierarchy_documents_every_engine_mutex_field() {
     );
     let section = &agents[section_start..section_end];
 
-    // Word-boundary match *within the section only* — a whole-file match
-    // would false-pass on prose fragments (`state`, `items`).
+    // Backtick-quoted match *within the section only* — the bundle member
+    // names include short ones (`queue`, `size`, `progress`), so a bare
+    // word-boundary match would false-pass on prose fragments; requiring
+    // the backticked form keeps both long and short names honest.
     for name in mutex_fields.iter().chain(atomic_fields.iter()) {
-        let re = Regex::new(&format!(r"\b{name}\b"))
-            .unwrap_or_else(|e| panic!("field name {name} is not regex-safe: {e}"));
+        let needle = format!("`{name}`");
         assert!(
-            re.is_match(section),
-            "AGENTS.md lock-hierarchy section does not document EngineState field `{name}` \
+            section.contains(&needle),
+            "AGENTS.md lock-hierarchy section does not document engine field `{name}` \
              (delimited section between `{begin}` and `{end}`)"
         );
     }

@@ -28,8 +28,8 @@ src/
 │   ├── hf_cache/     # hf-cache group (private submodules + mod facade re-exporting selection/sync helpers): sync pipeline (selection, sync lock, publish) + path helper
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
 │   └── *_tests.rs + testutil.rs # per-subject cli test modules (M6/T1: args/cli_surface/events/hf_cache/help_snapshot/report/resolve_tests + shared fixtures in testutil); insta snapshots in src/cli/snapshots/
-├── engine/           # Shared download engine (facade + private submodules, models/ precedent): mod.rs (EngineState + QueuedDownload; the auth-status contract moved to models/engine.rs in M3 — a one-cycle re-export shim remains until the milestone's final commit), enqueue.rs (EngineState::enqueue + sealed EnqueuePolicy knob types + characterization tests), workers.rs (spawn_manager / spawn_verification_worker + ManagerHandle drain contract), bootstrap.rs (bootstrap + seed_registry_mirror)
-├── models/           # Shared data types behind a facade (private submodules + pub use, W3.1): api.rs (HF DTOs), ui.rs (TUI enums + FileTreeNode), engine.rs (progress/queue/verification types incl. FileOutcome/VerifyOutcome + QueueState impl + the auth-status string contract, moved from engine/ in M3), options.rs (AppOptions — the config schema), cache.rs (ApiCache + aliases)
+├── engine/           # Shared download engine (facade + private submodules, models/ precedent): mod.rs (EngineState, regrouped into bundles in M3 — queue: QueueAccounting { download_queue_totals, download_queue_items } / events: EventBus { status, verify, outcome tx+rx } / verification: the VerificationHub from verification.rs / + download_rx, download_progress, complete_downloads, download_registry — plus QueuedDownload and the field→bundle ownership table; the auth-status contract moved to models/engine.rs in M3), enqueue.rs (EngineState::enqueue + sealed EnqueuePolicy knob types + characterization tests), workers.rs (spawn_manager / spawn_verification_worker + ManagerHandle drain contract), bootstrap.rs (bootstrap + seed_registry_mirror)
+├── models/           # Shared data types behind a facade (private submodules + pub use, W3.1): api.rs (HF DTOs), ui.rs (TUI enums + FileTreeNode), engine.rs (progress/queue/verification types incl. FileOutcome/VerifyOutcome + QueueTotals impl (renamed from QueueState in M3/U6) + the auth-status string contract, moved from engine/ in M3), options.rs (AppOptions — the config schema), cache.rs (ApiCache + aliases)
 ├── paths.rs          # App-path resolution only (config/registry/downloads; env override > portable mode > dirs defaults > temp) + sanitize. Never hardcode HOME or format! paths — route through this module. Hub-cache dir resolution + CACHEDIR.TAG moved to cache_layout (M6/C7); one-cycle pub-use shims remain
 ├── cache_layout.rs   # HuggingFace hub-cache owner (M6/C7): hub-cache dir resolution (hf_hub_cache: HF_HUB_CACHE/HF_HOME, huggingface_hub parity) + CACHEDIR.TAG + layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock (named cache_layout to disambiguate from cli/hf_cache/, the hf-cache command group)
 ├── patterns.rs       # Python-fnmatch parity glob matcher (`--include`/`--exclude`, `--for vllm` preset table)
@@ -112,9 +112,9 @@ composes the same pieces: `EngineState::new()` at construction,
 removed in v2.0.0 because its duplicated copy drifted). Every queue handoff
 — all four TUI download flows and both CLI frontends — goes through
 `EngineState::enqueue(files, policy)`: the single home of the enqueue
-transaction (registry bookkeeping per policy → `download_queue.add` →
-`download_queue_items` mirror → `download_tx` sends → failed-send
-rollback). The per-frontend divergences are explicit `EnqueuePolicy`
+transaction (registry bookkeeping per policy →
+`queue.download_queue_totals.add` → `queue.download_queue_items` mirror →
+`download_tx` sends → failed-send rollback). The per-frontend divergences are explicit `EnqueuePolicy`
 knobs — the fields are sealed; the five named constructors
 (`tui_quant`/`tui_repository`/`tui_resume`/`cli_download`/`hf_cache_sync`)
 are the only public API: `RegistryMode` (TUI mirror-registry upsert vs CLI
@@ -217,28 +217,42 @@ lock. `try_lock()` access is deadlock-safe by construction — a miss skips
 that read/tick instead of blocking — so non-blocking consumers (the UI's
 render snapshot, the CLI runner's receiver drain in `cli/run.rs::poll_once`)
 take locks in any order, each guard scoped to its own statement, never
-nested. This guard is kept in sync with `EngineState` by
-`tests/docs_guards.rs::lock_hierarchy_documents_every_engine_mutex_field`,
-which derives the field set from `src/engine/mod.rs` — a new mutex/atomic
-field fails that test until it is documented here.
+nested.
+
+Since M3 the engine's shared state is grouped into bundles
+(`EngineState.queue` = `QueueAccounting`, `EngineState.events` = `EventBus`,
+`EngineState.verification` = the `VerificationHub` owned by
+`src/verification.rs`, plus four top-level fields). The bundle grouping is
+stated once here and holds **per inner lock**: every member keeps its OWN
+`Arc<Mutex<..>>` — no lock was merged, added, or re-scoped by the grouping —
+and the numbered levels below apply to the inner locks exactly as they did
+to the flat fields. This section is kept in sync with the struct definitions
+by `tests/docs_guards.rs::lock_hierarchy_documents_every_engine_mutex_field`,
+which derives the field set from the bundle struct bodies in
+`src/engine/mod.rs` + `src/verification.rs` — a new mutex/atomic field fails
+that test until it is documented here.
 
 <!-- lock-hierarchy:begin -->
-Lock Hierarchy (acquire in this order — the ordering constrains **blocking** `.lock().await` acquisitions; scoped `try_lock` drains such as the receiver tier below are exempt because a guard is released before anything else is acquired):
+Lock Hierarchy (acquire in this order — the ordering constrains **blocking**
+`.lock().await` acquisitions; scoped `try_lock` drains such as the receiver
+tier below are exempt because a guard is released before anything else is
+acquired). Bundle homes are noted per level; the grouping itself carries no
+ordering — only the inner locks do.
 
-1. download_rx (Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>)
-2. download_queue (Arc<Mutex<QueueState>>) and download_queue_items (Arc<Mutex<Vec<QueueItemSummary>>>) — the consolidated queue accounting (size + bytes in one QueueState) and the Vec<QueueItemSummary> HUD mirror; acquire separately, never nested with each other
-3. download_progress (Arc<Mutex<Option<DownloadProgress>>>)
-4. complete_downloads (Arc<Mutex<CompleteDownloads>>)
-5. verification_queue (Arc<Mutex<Vec<VerificationQueueItem>>>)
-6. verification_queue_size (Arc<AtomicUsize>) — lock-free atomic counter, carries no lock level
-7. verification_progress (Arc<Mutex<Vec<VerificationProgress>>>)
-8. download_registry (Arc<Mutex<DownloadRegistry>>)
-9. RateLimiter state (Arc<Mutex<RateLimiterState>>) — consolidated single lock
-10. Receiver tier — status_rx, verify_rx, outcome_rx (Arc<Mutex<mpsc::UnboundedReceiver<..>>>): order-free under try_lock, drained one lock per scope with the guard released immediately (UI render snapshot; CLI `poll_once` drains status_rx → outcome_rx → verify_rx via try_lock); never hold one receiver lock while blocking on another
-11. verification_in_flight (Arc<AtomicUsize>) — lock-free atomic counter, carries no lock level
+1. `download_rx` (`Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>` — EngineState top level; the WORK channel's receiver)
+2. `download_queue_totals` (`Arc<Mutex<QueueTotals>>`) and `download_queue_items` (`Arc<Mutex<Vec<QueueItemSummary>>>`) — both in EngineState.queue (QueueAccounting): the totals counters and the HUD item mirror; acquire separately, never nested with each other (the rule is stated once, as the `QueueAccounting::remove_started` method)
+3. `download_progress` (`Arc<Mutex<Option<DownloadProgress>>>` — EngineState top level)
+4. `complete_downloads` (`Arc<Mutex<CompleteDownloads>>` — EngineState top level)
+5. `queue` (`Arc<Mutex<Vec<VerificationQueueItem>>>` — EngineState.verification, the VerificationHub)
+6. `size` (`Arc<AtomicUsize>` — VerificationHub) — lock-free atomic counter, carries no lock level
+7. `progress` (`Arc<Mutex<Vec<VerificationProgress>>>` — VerificationHub)
+8. `download_registry` (`Arc<Mutex<DownloadRegistry>>` — EngineState top level; the VerificationHub's `registry_mirror` is the SAME Arc shared into the hub, so this one level governs both names)
+9. RateLimiter state (`Arc<Mutex<RateLimiterState>>`) — consolidated single lock, outside EngineState
+10. Receiver tier — `status_rx`, `verify_rx`, `outcome_rx` (`Arc<Mutex<mpsc::UnboundedReceiver<..>>>`, all in EngineState.events, the EventBus; the matching `status_tx`/`verify_tx`/`outcome_tx` senders are plain channel endpoints and carry no lock): order-free under try_lock, drained one lock per scope with the guard released immediately (UI render snapshot; CLI `poll_once` drains status_rx → outcome_rx → the hub's `progress` → verify_rx via try_lock); never hold one receiver lock while blocking on another
+11. `in_flight` (`Arc<AtomicUsize>` — VerificationHub) — lock-free atomic counter, carries no lock level
 <!-- lock-hierarchy:end -->
 
-Also lock-free, no hierarchy level: `verification_results`
+Also lock-free, no hierarchy level: the VerificationHub's `results`
 (`VerificationResultCounters` — session-lifetime ok/failed counters, each an
 `Arc<AtomicUsize>`).
 
@@ -270,11 +284,12 @@ loop {
         }
     }; // Lock level 1 released
 
-    // Now safe to acquire level 2 — each lock taken in its own scope,
-    // never nested with each other (same level)
+    // Now safe to acquire level 2 — both QueueAccounting locks, each taken
+    // in its own scope, never nested with each other (in production this
+    // pair is the QueueAccounting::remove_started method)
     {
-        let mut queue = download_queue.lock().await;  // Lock level 2
-        queue.remove(1, total_size);
+        let mut totals = download_queue_totals.lock().await;  // Lock level 2
+        totals.remove(1, total_size);
     } // Lock released
     {
         let mut items = download_queue_items.lock().await;  // Lock level 2
@@ -288,7 +303,7 @@ loop {
 // ❌ WRONG: Holding level 1 while acquiring level 2
 let mut rx = download_rx.lock().await;  // Lock level 1
 while let Some(msg) = rx.recv().await {
-    let mut queue = download_queue.lock().await;  // Lock level 2
+    let mut totals = download_queue_totals.lock().await;  // Lock level 2
     // DEADLOCK: If another task holds level 2 and needs level 1
 }
 ```

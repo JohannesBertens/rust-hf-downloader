@@ -241,8 +241,8 @@ impl Default for MouseState {
 pub struct RenderCache {
     pub complete_downloads: CompleteDownloads,
     pub download_progress: Option<DownloadProgress>,
-    /// Combined cache for the queue summary (`size`, `bytes`).
-    pub download_queue: crate::models::QueueState,
+    /// Combined cache for the queue totals summary (`size`, `bytes`).
+    pub download_queue_totals: crate::models::QueueTotals,
     pub download_queue_items: Vec<crate::models::QueueItemSummary>,
     /// Derived under the verification-queue lock (summed `total_size`),
     /// not a clone of the queue itself.
@@ -292,13 +292,13 @@ mod tests {
     #[test]
     fn render_cache_defaults_match_fresh_engine_state() {
         // Per-field defaults must equal the pre-RenderCache initial values
-        // (HashMap::new(), None, QueueState::new(0, 0), Vec::new(), 0,
+        // (HashMap::new(), None, QueueTotals::new(0, 0), Vec::new(), 0,
         // Vec::new()) so a fresh App renders exactly as before.
         let c = RenderCache::default();
         assert!(c.complete_downloads.is_empty());
         assert!(c.download_progress.is_none());
-        assert_eq!(c.download_queue.size, 0);
-        assert_eq!(c.download_queue.bytes, 0);
+        assert_eq!(c.download_queue_totals.size, 0);
+        assert_eq!(c.download_queue_totals.bytes, 0);
         assert!(c.download_queue_items.is_empty());
         assert_eq!(c.verification_queue_bytes, 0);
         assert!(c.verification_progress.is_empty());

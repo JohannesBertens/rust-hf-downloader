@@ -13,12 +13,14 @@ use crate::models::{DownloadMetadata, DownloadStatus, QueueItemSummary};
 use tokio::sync::mpsc;
 
 impl EngineState {
-    /// The enqueue transaction (W2.1): registry bookkeeping per policy →
-    /// `download_queue.add` → `download_queue_items` push + `download_tx`
-    /// sends → failed-send rollback. One home for the six sequences that
-    /// used to be inline (four TUI flows + two CLI flows); every divergence
-    /// between them is an explicit [`EnqueuePolicy`] knob, and status/error
-    /// strings stay at the call sites (see [`EnqueueOutcome`]).
+    /// The enqueue transaction (W2.1): registry bookkeeping per policy,
+    /// then `queue.download_queue_totals.add`, the
+    /// `queue.download_queue_items` mirror push, and the `download_tx`
+    /// sends, with failed-send rollback. One home for the six
+    /// sequences that used to be inline (four TUI flows + two CLI flows);
+    /// every divergence between them is an explicit [`EnqueuePolicy`]
+    /// knob, and status/error strings stay at the call sites (see
+    /// [`EnqueueOutcome`]).
     ///
     /// Lock order (AGENTS.md hierarchy): every lock is acquired in its own
     /// scope, never nested — mirror/queue/items acquisitions only ever
@@ -152,7 +154,8 @@ impl EngineState {
         // --- 2. Queue accounting, before the sends for every discipline
         //         but resume --------------------------------------------------
         if policy.discipline != SendDiscipline::Resume {
-            self.download_queue
+            self.queue
+                .download_queue_totals
                 .lock()
                 .await
                 .add(files.len(), total_bytes);
@@ -167,7 +170,7 @@ impl EngineState {
                 for file in files {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
-                        let mut items = self.download_queue_items.lock().await;
+                        let mut items = self.queue.download_queue_items.lock().await;
                         items.push(queue_item_summary(file));
                     }
                 }
@@ -178,14 +181,14 @@ impl EngineState {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
                     }
-                    let mut items = self.download_queue_items.lock().await;
+                    let mut items = self.queue.download_queue_items.lock().await;
                     items.push(queue_item_summary(file));
                 }
             }
             SendDiscipline::Batch => {
                 // CLI flavors: every summary first (one lock), then sends.
                 {
-                    let mut items = self.download_queue_items.lock().await;
+                    let mut items = self.queue.download_queue_items.lock().await;
                     for file in files {
                         items.push(queue_item_summary(file));
                     }
@@ -201,7 +204,8 @@ impl EngineState {
         // --- 4. Resume discipline accounts the queue once, after the
         //         sends -------------------------------------------------------
         if policy.discipline == SendDiscipline::Resume {
-            self.download_queue
+            self.queue
+                .download_queue_totals
                 .lock()
                 .await
                 .add(files.len(), total_bytes);
@@ -216,7 +220,8 @@ impl EngineState {
         //         pushed for successful sends.
         if policy.discipline == SendDiscipline::Interactive && sent < files.len() {
             let failed_bytes: u64 = files.iter().skip(sent).map(|f| f.total_size).sum();
-            self.download_queue
+            self.queue
+                .download_queue_totals
                 .lock()
                 .await
                 .remove(files.len() - sent, failed_bytes);
@@ -484,11 +489,11 @@ mod tests {
     /// Queue accounting + HUD summaries + channel contents for a
     /// successful enqueue — identical for every confirm flavor.
     async fn assert_queued(state: &EngineState, files: &[QueuedDownload]) {
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!(queue.size, files.len());
         assert_eq!(queue.bytes, files.iter().map(|f| f.total_size).sum::<u64>());
         drop(queue);
-        let items = state.download_queue_items.lock().await;
+        let items = state.queue.download_queue_items.lock().await;
         let want: Vec<(&str, u64)> = files
             .iter()
             .map(|f| (f.filename.as_str(), f.total_size))
@@ -704,10 +709,10 @@ mod tests {
 
         // Abort-first: no queue work, no HUD summaries, no sends, and the
         // disk registry was never written (validate-before-write).
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!((queue.size, queue.bytes), (0, 0));
         drop(queue);
-        assert!(state.download_queue_items.lock().await.is_empty());
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
         assert!(drain_downloads(&state).await.is_empty());
         assert!(crate::registry::read_registry().downloads.is_empty());
 
@@ -806,10 +811,10 @@ mod tests {
         // rollback — while the registry bookkeeping STAYS (it ran first and
         // was never rolled back).
         assert_eq!(outcome.sent, 0);
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!((queue.size, queue.bytes), (0, 0));
         drop(queue);
-        assert!(state.download_queue_items.lock().await.is_empty());
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
         assert_eq!(state.download_registry.lock().await.downloads.len(), 2);
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -836,11 +841,11 @@ mod tests {
         // accounted AFTER the loop and never rolled back, and no registry
         // write happened at all (entries already exist on disk).
         assert_eq!(outcome.sent, 0);
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!(queue.size, 2);
         assert_eq!(queue.bytes, 30);
         drop(queue);
-        assert_eq!(state.download_queue_items.lock().await.len(), 2);
+        assert_eq!(state.queue.download_queue_items.lock().await.len(), 2);
         assert!(state.download_registry.lock().await.downloads.is_empty());
         assert!(crate::registry::read_registry().downloads.is_empty());
 
@@ -871,11 +876,11 @@ mod tests {
 
             assert_eq!(outcome.sent, 0, "channel closed");
             assert!(outcome.aborted.is_none(), "valid files");
-            let queue = state.download_queue.lock().await;
+            let queue = state.queue.download_queue_totals.lock().await;
             assert_eq!(queue.size, 2, "CLI flavors never roll back");
             assert_eq!(queue.bytes, 30);
             drop(queue);
-            assert_eq!(state.download_queue_items.lock().await.len(), 2);
+            assert_eq!(state.queue.download_queue_items.lock().await.len(), 2);
             assert!(
                 state.download_registry.lock().await.downloads.is_empty(),
                 "hf-cache registers nothing; cli_download writes disk, not the mirror"

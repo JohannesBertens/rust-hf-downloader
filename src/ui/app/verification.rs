@@ -88,11 +88,8 @@ impl App {
                 // Manual verify goes through the hub method — the same
                 // queue+counter steps the automatic (post-download) path
                 // takes (M3: queue_verification is a VerificationHub
-                // method; the engine no longer exposes the raw pair).
-                self.engine
-                    .verification_hub()
-                    .queue_verification(item)
-                    .await;
+                // method on EngineState.verification).
+                self.engine.verification.queue_verification(item).await;
 
                 *self.status.write() = format!("Queued {} for verification", quant.filename);
             }
@@ -183,7 +180,7 @@ mod tests {
 
         app.verify_downloaded_file().await;
 
-        let queue = app.engine.verification_queue.lock().await;
+        let queue = app.engine.verification.queue.lock().await;
         assert_eq!(
             queue.len(),
             1,

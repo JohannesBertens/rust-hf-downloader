@@ -104,9 +104,11 @@ pub enum VerifyOutcome {
     },
 }
 
-/// Combined download queue state to reduce lock complexity
+/// Download-queue totals (files + bytes) — a counter pair, not a
+/// queue (renamed from `QueueState` in M3/U6: the old name made a
+/// counter pair sound like the queue itself).
 #[derive(Debug, Default, Clone)]
-pub struct QueueState {
+pub struct QueueTotals {
     /// Number of downloads currently in queue
     pub size: usize,
     /// Total bytes of downloads in queue
@@ -122,7 +124,7 @@ pub struct QueueItemSummary {
     pub total_size: u64,
 }
 
-impl QueueState {
+impl QueueTotals {
     pub fn new(size: usize, bytes: u64) -> Self {
         Self { size, bytes }
     }
@@ -206,7 +208,7 @@ mod tests {
 
     #[test]
     fn queue_state_new_initializes_counts() {
-        let state = QueueState::new(3, 1000);
+        let state = QueueTotals::new(3, 1000);
         assert_eq!(state.size, 3);
         assert_eq!(state.bytes, 1000);
         assert!(!state.is_empty());
@@ -214,7 +216,7 @@ mod tests {
 
     #[test]
     fn queue_state_add_accumulates() {
-        let mut state = QueueState::new(3, 1000);
+        let mut state = QueueTotals::new(3, 1000);
         state.add(2, 500);
         assert_eq!(state.size, 5);
         assert_eq!(state.bytes, 1500);
@@ -222,7 +224,7 @@ mod tests {
 
     #[test]
     fn queue_state_remove_subtracts() {
-        let mut state = QueueState::new(3, 1000);
+        let mut state = QueueTotals::new(3, 1000);
         state.remove(1, 400);
         assert_eq!(state.size, 2);
         assert_eq!(state.bytes, 600);
@@ -232,7 +234,7 @@ mod tests {
     fn queue_state_remove_saturates_at_zero() {
         // Documents actual behavior: removing more than was added saturates
         // both size and bytes at zero (no underflow panic).
-        let mut state = QueueState::new(1, 100);
+        let mut state = QueueTotals::new(1, 100);
         state.remove(5, 999);
         assert_eq!(state.size, 0);
         assert_eq!(state.bytes, 0);
@@ -241,7 +243,7 @@ mod tests {
 
     #[test]
     fn queue_state_default_is_empty() {
-        let state = QueueState::default();
+        let state = QueueTotals::default();
         assert_eq!(state.size, 0);
         assert_eq!(state.bytes, 0);
         assert!(state.is_empty());
@@ -251,7 +253,7 @@ mod tests {
     fn queue_state_is_empty_tracks_size_only() {
         // Documents actual behavior: emptiness is defined by `size` only,
         // even when `bytes` is non-zero.
-        let state = QueueState::new(0, 100);
+        let state = QueueTotals::new(0, 100);
         assert!(state.is_empty());
     }
 

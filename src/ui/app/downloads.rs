@@ -648,11 +648,11 @@ mod tests {
 
     /// Queue accounting + HUD summaries for a successful confirm.
     async fn assert_queue_accounting(app: &App, count: usize, bytes: u64, names: &[&str]) {
-        let queue = app.engine.download_queue.lock().await;
+        let queue = app.engine.queue.download_queue_totals.lock().await;
         assert_eq!(queue.size, count, "queue size");
         assert_eq!(queue.bytes, bytes, "queue bytes");
         drop(queue);
-        let items = app.engine.download_queue_items.lock().await;
+        let items = app.engine.queue.download_queue_items.lock().await;
         let got: Vec<&str> = items.iter().map(|i| i.filename.as_str()).collect();
         assert_eq!(got, names, "HUD queue summaries in send order");
     }

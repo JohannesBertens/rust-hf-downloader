@@ -104,40 +104,41 @@ impl App {
         );
 
         state::snapshot_in_place(
-            &self.engine.download_queue,
-            &mut self.render_cache.download_queue,
+            &self.engine.queue.download_queue_totals,
+            &mut self.render_cache.download_queue_totals,
         );
 
         state::snapshot_in_place(
-            &self.engine.download_queue_items,
+            &self.engine.queue.download_queue_items,
             &mut self.render_cache.download_queue_items,
         );
 
         state::snapshot_in_place(
-            &self.engine.verification_progress,
+            &self.engine.verification.progress,
             &mut self.render_cache.verification_progress,
         );
 
-        let verification_queue_size = self.engine.verification_queue_size.load(Ordering::Relaxed);
+        let verification_queue_size = self.engine.verification.size.load(Ordering::Relaxed);
 
         // Derived variant of the snapshot pattern: the cache stores the
         // summed bytes, not a clone of the queue — the sum is computed
         // under the guard so the queue Vec is never cloned per frame.
-        if let Ok(guard) = self.engine.verification_queue.try_lock() {
+        if let Ok(guard) = self.engine.verification.queue.try_lock() {
             self.render_cache.verification_queue_bytes = guard.iter().map(|i| i.total_size).sum();
         }
 
-        let verified_ok = self.engine.verification_results.ok.load(Ordering::Relaxed);
+        let verified_ok = self.engine.verification.results.ok.load(Ordering::Relaxed);
         let verified_fail = self
             .engine
-            .verification_results
+            .verification
+            .results
             .failed
             .load(Ordering::Relaxed);
 
         let hud_params = crate::ui::render::ActivityHudData {
             download_progress: &self.render_cache.download_progress,
-            queue_size: self.render_cache.download_queue.size,
-            queue_bytes: self.render_cache.download_queue.bytes,
+            queue_size: self.render_cache.download_queue_totals.size,
+            queue_bytes: self.render_cache.download_queue_totals.bytes,
             queue_items: &self.render_cache.download_queue_items,
             verification_progress: &self.render_cache.verification_progress,
             verification_queue_size,
@@ -441,7 +442,7 @@ impl App {
     /// Drains all pending events, processing keys immediately but coalescing mouse moves
     async fn handle_crossterm_events(&mut self, event_stream: &mut EventStream) -> Result<()> {
         // Check for status messages from download tasks (non-blocking)
-        if let Ok(mut rx) = self.engine.status_rx.try_lock() {
+        if let Ok(mut rx) = self.engine.events.status_rx.try_lock() {
             while let Ok(msg) = rx.try_recv() {
                 if let Some(model_id) = crate::models::parse_auth_status(&msg) {
                     let model_url = format!("https://huggingface.co/{}", model_id);

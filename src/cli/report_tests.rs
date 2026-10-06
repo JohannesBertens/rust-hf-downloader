@@ -109,10 +109,12 @@ fn plain_verification_heartbeat_emits_once_per_interval() {
 async fn plain_heartbeat_skips_when_progress_snapshot_missed() {
     let (state, _tx) = crate::engine::EngineState::new();
     state
-        .verification_queue_size
+        .verification
+        .size
         .store(1, std::sync::atomic::Ordering::Relaxed);
     state
-        .verification_progress
+        .verification
+        .progress
         .lock()
         .await
         .push(crate::models::VerificationProgress {
@@ -133,7 +135,7 @@ async fn plain_heartbeat_skips_when_progress_snapshot_missed() {
     // Hold the lock across the poll: the try_lock snapshot misses, so the
     // heartbeat must be skipped rather than print "0 in flight" (a lock
     // artifact, not a fact).
-    let guard = state.verification_progress.lock().await;
+    let guard = state.verification.progress.lock().await;
     poll_once(
         &state,
         1,

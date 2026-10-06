@@ -13,7 +13,7 @@
 //! - `engine` — progress, queue and verification types exchanged with the
 //!   engine: `ChunkProgress`, `DownloadProgress`, `DownloadStatus`,
 //!   `DownloadMetadata`, `DownloadRegistry`, `FileOutcome`, `VerifyOutcome`,
-//!   `QueueState`, `QueueItemSummary`, `VerificationProgress`,
+//!   `QueueTotals`, `QueueItemSummary`, `VerificationProgress`,
 //!   `VerificationQueueItem`
 //! - `cache` — cache aliases (`QuantizationCache`, `CompleteDownloads`,
 //!   `MetadataCache`, `FileTreeCache`, `SearchCache`), `SearchKey`, `ApiCache`
