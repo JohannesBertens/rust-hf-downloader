@@ -416,11 +416,13 @@ fn extract_zip(
 // Swap
 // ---------------------------------------------------------------------------
 
-/// Atomically replaces the current executable with `new_binary`
-/// (self_replace: Unix rename; Windows rename-aside). The caller's
-/// `current_exe` is resolved by the crate itself. Best-effort cleanup of
-/// the temp tree stays with the caller.
-pub fn swap(_current_exe: &Path, new_binary: &Path) -> Result<(), UpdateError> {
+/// Atomically replaces the running executable with `new_binary`
+/// (self_replace: Unix rename; Windows rename-aside). The running
+/// executable is resolved by `self_replace` itself — callers pass only
+/// the staged binary (the former `current_exe` parameter was never
+/// read; dropped in plan M4/C5). Best-effort cleanup of the temp tree
+/// stays with the caller.
+pub fn swap(new_binary: &Path) -> Result<(), UpdateError> {
     self_replace::self_replace(new_binary).map_err(|e| UpdateError::Swap(e.to_string()))
 }
 

@@ -74,6 +74,13 @@ impl RunTally {
 /// → token writeback → `apply_options` → `--no-verify` store. The tail
 /// order is load-bearing: the no-verify store must run AFTER
 /// `apply_options`, which re-enables verification from the config value.
+///
+/// The tail also builds the run's ONE shared `reqwest::Client` (plan
+/// M4/B5) with the merged token installed as its default auth header;
+/// every API call of the run threads it through. A token that cannot be
+/// represented in a header value fails HERE — [`emit_client_error`]
+/// surfaces it as an auth failure instead of the silent unauthenticated
+/// downgrade that used to appear as a confusing 401 later.
 pub(super) fn load_run_config(
     token_flag: Option<String>,
     output: Option<&str>,
@@ -81,7 +88,7 @@ pub(super) fn load_run_config(
     no_rate_limit: bool,
     rate_limit_mbps: Option<f64>,
     no_verify: bool,
-) -> (AppOptions, Option<String>) {
+) -> Result<(AppOptions, Option<String>, reqwest::Client), crate::http_client::ClientBuildError> {
     let mut options = crate::config::load_config();
     if let Some(dir) = output {
         options.default_directory = dir.to_string();
@@ -99,7 +106,36 @@ pub(super) fn load_run_config(
             .enable_verification
             .store(false, Ordering::Relaxed);
     }
-    (options, token)
+    let client = crate::http_client::build_client_with_token(token.as_deref(), None)?;
+    Ok((options, token, client))
+}
+
+/// Surface a shared-client build failure (the [`load_run_config`] tail,
+/// M4/B5): a malformed token is an explicit `auth_required` +
+/// [`super::EXIT_AUTH`] — the documented home of "bad token" — and a
+/// plain client-build failure is `network` + [`EXIT_FAILURE`]. Either
+/// way the run stops BEFORE any request goes out unauthenticated.
+pub(super) fn emit_client_error(
+    reporter: &mut Reporter,
+    error: &crate::http_client::ClientBuildError,
+) -> i32 {
+    use crate::http_client::ClientBuildError;
+    let code = match error {
+        ClientBuildError::InvalidToken => ErrorCode::AuthRequired,
+        ClientBuildError::Build(_) => ErrorCode::Network,
+    };
+    reporter.emit(&Event::error(
+        code,
+        format!(
+            "{} — fix or remove the token (--token, $HF_TOKEN, or the config file)",
+            error
+        ),
+    ));
+    if matches!(error, ClientBuildError::InvalidToken) {
+        super::EXIT_AUTH
+    } else {
+        EXIT_FAILURE
+    }
 }
 
 /// The partial bootstrap the query-only subcommands share (`hf-cache

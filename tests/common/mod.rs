@@ -76,6 +76,11 @@ pub struct MockRepo {
     /// normally. Keep an `Arc` clone of each script to read `seen` (the
     /// attempt count) after the run; the `statuses` vec must be non-empty.
     pub range_scripts: Vec<Arc<RangeScript>>,
+    /// Failure injection (plan M4/B3): answer HTTP 500 to the tree listing
+    /// of exactly this subdirectory (`""` would fail the root listing;
+    /// unknown revisions still 404 first). Pins that a failed subdirectory
+    /// fetch surfaces as a run error instead of a silently truncated tree.
+    pub fail_subdir: Option<String>,
 }
 
 /// One per-path range-request script entry (see
@@ -201,6 +206,15 @@ pub async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
         if !known || empty_main {
             return Response::builder()
                 .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap();
+        }
+        // M4/B3 failure injection: this subtree's listing answers 500 —
+        // the fetch must surface the error, never swallow it into a
+        // truncated tree.
+        if repo.fail_subdir.as_deref() == Some(subdir) {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
                 .body(Body::empty())
                 .unwrap();
         }

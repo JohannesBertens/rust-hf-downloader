@@ -64,6 +64,7 @@ async fn server_500_mid_download_fails_and_marks_registry() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -140,6 +141,7 @@ async fn advertised_size_mismatch_fails_on_tail_chunk_416() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -205,6 +207,7 @@ async fn timeout_then_terminal_500_attempts_exactly_max_retries_plus_one() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: vec![script.clone()],
+        fail_subdir: None,
     })
     .await;
 
@@ -271,6 +274,7 @@ async fn timeout_then_success_retries_and_exits_ok() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 

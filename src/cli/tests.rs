@@ -552,14 +552,15 @@ async fn token_matrix_load_run_config_returns_written_back_pair() {
     for (flag, env, config) in token_matrix_cells() {
         let (tmp, _g1, _g2) = install_matrix_cell(env, config, "loadrun");
 
-        let (options, token) = super::run::load_run_config(
+        let (options, token, _client) = super::run::load_run_config(
             flag.map(|s| s.to_string()),
             None, // no --output (neither token- nor engine-relevant here)
             false,
             false,
             None,
             false,
-        );
+        )
+        .expect("matrix tokens are all header-representable");
         let want = expected_token(flag, env, config);
         assert_eq!(
             token, want,
@@ -577,7 +578,9 @@ async fn token_matrix_load_run_config_returns_written_back_pair() {
     // not touch the token pair (the historically documented elision, now
     // actually executed and pinned).
     let (tmp, _g1, _g2) = install_matrix_cell(None, ConfigFile::WithToken, "noverify");
-    let (options, token) = super::run::load_run_config(None, None, false, false, None, true);
+    let (options, token, _client) =
+        super::run::load_run_config(None, None, false, false, None, true)
+            .expect("matrix tokens are all header-representable");
     assert_eq!(token.as_deref(), Some("cfg"));
     assert_eq!(options.hf_token.as_deref(), Some("cfg"));
     let _ = std::fs::remove_dir_all(&tmp);

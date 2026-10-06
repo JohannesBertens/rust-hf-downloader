@@ -5,7 +5,7 @@ use std::io::Write;
 use super::args::{ModelDto, SearchArgs};
 use super::events::{ErrorCode, Event};
 use super::report::{ProgressMode, Reporter};
-use super::run::resolve_run_token;
+use super::run::{emit_client_error, resolve_run_token};
 use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
@@ -76,19 +76,26 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
     let mut reporter = Reporter::new(args.json, false, ProgressMode::Auto);
     let options = crate::config::load_config();
     // Runner partial bootstrap: token by the run precedence (flag >
-    // $HF_TOKEN > config); the options stay for the search defaults.
+    // $HF_TOKEN > config); the options stay for the search defaults. The
+    // run's one shared client carries the token (M4/B5) — a malformed
+    // token stops the search with an explicit auth error instead of a
+    // silent unauthenticated query.
     let token = resolve_run_token(args.token.clone(), &options);
+    let api_client = match crate::http_client::build_client_with_token(token.as_deref(), None) {
+        Ok(client) => client,
+        Err(e) => return emit_client_error(&mut reporter, &e),
+    };
 
     let (sort, direction, min_downloads, min_likes) = effective_search_params(&args, &options);
 
     match crate::api::fetch_models_filtered(
+        &api_client,
         &args.query,
         sort,
         direction,
         min_downloads,
         min_likes,
         args.limit,
-        token.as_ref(),
     )
     .await
     {
