@@ -65,7 +65,7 @@ test splits.
 
 | Module | What it pins | Run |
 |---|---|---|
-| `src/config.rs` | config load/save/apply paths | `cargo test config` |
+| `src/config.rs` | config load/save paths; ENGINE_OPTIONS declarative table (M6/C4) — per-field apply + snapshot round-trip pin | `cargo test config` |
 | `src/paths.rs` | app path-resolution precedence + sanitize security (hub-cache tests moved to cache_layout, M6/C7) | `cargo test paths` |
 | `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, concurrency/failure contracts | `cargo test registry` |
 | `src/engine/enqueue.rs` | 8 EnqueuePolicy characterization tests (the single enqueue transaction) | `cargo test enqueue` |

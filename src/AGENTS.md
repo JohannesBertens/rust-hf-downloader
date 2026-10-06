@@ -61,7 +61,7 @@ Key modules
 4) config.rs
 - load_config() -> AppOptions (reads crate::paths::read_config_path(); defaults on missing/unparseable file; env HF_TOKEN override lives in AppOptions::default)
 - save_config(&AppOptions) (writes crate::paths::config_path())
-- apply_options(&AppOptions) — maps persisted options onto the global DOWNLOAD_CONFIG/VERIFICATION_CONFIG atomics
+- apply_options(&AppOptions) — maps persisted options onto the global DOWNLOAD_CONFIG/VERIFICATION_CONFIG atomics via the declarative ENGINE_OPTIONS table (M6/C4: one row per option, shared by apply + the test-only globals snapshot; pinned field-by-field in config.rs tests)
   • Tests cover path and default load
 
 5) registry.rs
