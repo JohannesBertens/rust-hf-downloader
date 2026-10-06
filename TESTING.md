@@ -91,6 +91,42 @@ cargo doc --no-deps
 cargo doc --no-deps --check
 ```
 
+### Snapshot tests (insta) — the local gate
+
+The TUI render/style snapshots (`src/ui/render/snapshots/`) and the CLI
+human-output goldens (insta snapshots under `tests/`) are pinned with
+`insta`. CI only runs plain `cargo test`, which FAILS on drifted or
+missing snapshots but never tells you which `.snap.new` files were left
+behind or which `.snap` files are now dead — those are LOCAL gate steps
+(USER-DIRECTED deviation G6: documented here instead of automated in
+CI):
+
+```bash
+# 1. Run with writes DISABLED — a red test means a snapshot drifted (or
+#    a new one is needed); nothing is modified on disk.
+INSTA_UPDATE=no cargo test
+
+# 2. After accepting snapshots (cargo insta accept, or renaming each
+#    .snap.new to .snap by hand), scan for strays — a leftover .snap.new
+#    means a snapshot was generated but never accepted:
+find src tests -name '*.snap.new' -print   # must print nothing
+
+# 3. Unreferenced-snapshot check — every committed .snap must belong to
+#    a live test (a deleted test's snapshot is dead weight and, worse, a
+#    false sense of coverage). With cargo-insta installed (handles
+#    dynamically-built names correctly):
+cargo insta test --unreferenced reject
+# Without it, grep by leaf name (everything up to the last `__` is the
+# module prefix). KNOWN LIMITATION: snapshots named through format!()
+# labels (the size_matrix_*_* and hud_threshold_* families) will not
+# literally appear in the sources — treat only UNfamiliar names as dead:
+ls src/ui/render/snapshots | sed 's/\.snap$//; s/.*__//' \
+  | while read -r name; do grep -rq -- "$name" src tests || echo "UNREFERENCED: $name"; done
+```
+
+Never edit a `.snap` by hand to make a test pass — regenerate it and
+review the diff.
+
 ## Benchmarking
 
 To run performance benchmarks:
