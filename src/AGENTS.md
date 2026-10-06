@@ -31,7 +31,7 @@ Key modules
 - Download tracking: DownloadMetadata/Registry, DownloadStatus, ChunkProgress, DownloadProgress
 - App/UI enums: PopupMode, FocusedPane, ModelDisplayMode
 - Filter/sort: SortField, SortDirection, FilterPreset; ApiCache and SearchKey
-- Default AppOptions: persisted config schema only (download/verification and filter settings; the options dialog's transient UI state — cursor row, live-edit flags — moved to ui/render/options_popup.rs::OptionsDialogState, resolved in docs/DEFERRED.md#options-dialog-transient-state, pinned by the TOML golden test in options.rs)
+- Default AppOptions: persisted config schema only (download/verification and filter settings; the options dialog's transient UI state — cursor row, live-edit flags, text-edit buffers — lives in ui/app/options.rs::OptionsDialogState since M5/U1, resolved in docs/DEFERRED.md#options-dialog-transient-state, pinned by the TOML golden test in options.rs)
 
 2) http_client.rs
 - build_client_with_token(token, timeout) -> reqwest::Client (adds Bearer header only if token is Some(non-empty))

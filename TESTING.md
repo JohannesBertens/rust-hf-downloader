@@ -26,7 +26,7 @@ cargo test
 cargo test --test cli_download
 
 # Filter by name, across all targets (substring match)
-cargo test enqueue           # e.g. the 8 EnqueuePolicy characterization tests
+cargo test enqueue           # e.g. the 9 EnqueuePolicy characterization tests (8 W2.1 rows + the E4 no-write pin)
 cargo test --test cli_exit_codes -- auth   # filter inside one target
 
 # Snapshot gate: run with snapshot writes DISABLED (see below)
@@ -67,7 +67,7 @@ so each subject is discoverable and independently runnable).
 | `src/config.rs` | config load/save paths; ENGINE_OPTIONS declarative table (M6/C4) — per-field apply + snapshot round-trip pin | `cargo test config` |
 | `src/paths.rs` | app path-resolution precedence + sanitize security (hub-cache tests moved to cache_layout, M6/C7) | `cargo test paths` |
 | `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, single-writer serialization + all-writers-win concurrency contracts, atomic-save temp-file hygiene | `cargo test registry` |
-| `src/engine/enqueue.rs` | 8 EnqueuePolicy characterization tests (the single enqueue transaction) | `cargo test enqueue` |
+| `src/engine/enqueue.rs` | 9 EnqueuePolicy characterization tests (the single enqueue transaction: the eight W2.1 rows + the E4 no-write registry pin `enqueue_no_write_constructors_leave_disk_registry_byte_identical`) | `cargo test enqueue` |
 | `src/engine/workers.rs` | manager drain/join contract | `cargo test workers` |
 | `src/engine/bootstrap.rs` | bootstrap sequence | `cargo test bootstrap` |
 | `src/engine/mod.rs` | `verification_idle` semantics | `cargo test verification_idle` |

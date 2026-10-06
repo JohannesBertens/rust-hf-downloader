@@ -15,7 +15,7 @@ header at the top of the file.
 |---|---|---|
 | [hf-cache-sync.md](hf-cache-sync.md) | implemented on `feat/hf-cache-sync` (L1 implementation plan) | `hf-cache sync`/`path`: populate the real HuggingFace hub cache (`blobs`/`snapshots`/`refs`) via the existing engine with a staging→publish pipeline, `--for vllm` preset, hub interop matrix, container patterns |
 | [hf-cache-vllm-dropin.md](hf-cache-vllm-dropin.md) | proposal (research & strategy) | How vLLM downloads models through huggingface_hub; L0/L1/L2 comparison; L2 `serve` proxy risk register; container deployment patterns. L1 detail lives in hf-cache-sync.md |
-| [architecture-simplification-review.md](architecture-simplification-review.md) | proposed 2026-10 (branch `refactor/architecture-simplification-review`) | Post-W-wave architecture plan from a four-lane parallel review: registry single-writer + atomic save, engine DAG (auth-status → models, `VerificationHub`), `EngineState` bundle regrouping, docs truth floor (TESTING.md/lock hierarchy/`docs/DEFERRED.md` register), UI layering fixes, `EnqueuePolicy` collapse, hub-cache ownership + test organization. Milestones M0–M6, one PR each |
+| [architecture-simplification-review.md](architecture-simplification-review.md) | **implemented 2026-10-07** on `impl/architecture-m0-m6` (M0–M6, four verified waves — see its §12 record) | Post-W-wave architecture plan from a four-lane parallel review: registry single-writer + atomic save, engine DAG (auth-status → models, `VerificationHub`), `EngineState` bundle regrouping, docs truth floor (TESTING.md/lock hierarchy/`docs/DEFERRED.md` register), UI layering fixes, `EnqueuePolicy` collapse, hub-cache ownership + test organization. Milestones M0–M6, one PR each |
 
 ## Shipped (kept as history)
 
