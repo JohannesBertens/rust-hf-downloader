@@ -242,11 +242,13 @@ Also lock-free, no hierarchy level: `verification_results`
 (`VerificationResultCounters` — session-lifetime ok/failed counters, each an
 `Arc<AtomicUsize>`).
 
-Also registry-internal, no hierarchy level: `REGISTRY_WRITE` (the
-single-writer `std::sync::Mutex` inside `src/registry.rs`, M1). It is not
-an `EngineState` field and does not change the acquisition discipline
-above: registry ops are sync and leaf-only, so the guard is never held
-while acquiring an engine lock (mirror patches happen after
+Also registry-internal, a TERMINAL LEAF below every engine lock:
+`REGISTRY_WRITE` (the single-writer `std::sync::Mutex` inside
+`src/registry.rs`, M1). It is not an `EngineState` field and carries no
+level number, but it is NOT exempt from ordering — it has the strictest
+position: it MAY be acquired while holding engine locks (callers do), and
+while holding it NOTHING else may be acquired and no `.await` may happen
+(closures are sync and leaf-only; mirror patches happen after
 `with_registry` returns, and reads take no lock at all).
 
 Key Rules:

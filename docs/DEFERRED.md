@@ -33,12 +33,15 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
   `fs::File::create` write — a crash mid-save truncated
   `hf-downloads.toml`, and the load side silently resets to an empty
   registry on parse failure.
-- **Remedy (landed):** same-directory temp file + `sync_all()` +
+- **Remedy (landed):** same-directory temp file (pid-suffixed, so a
+  concurrent process never clobbers our temp) + `sync_all()` +
   rename-with-retry via `utils::atomic_rename_with_retry` (the sync twin;
   the retry absorbs Windows `rename` over a file a reader holds without
   share-delete). The temp file never litters (pinned by
   `registry_tests::save_is_atomic_no_temp_litter`); op bytes stayed
-  pinned by the `registry_tests` goldens.
+  pinned by the `registry_tests` goldens. Durability note: no parent-dir
+  fsync after the rename — a power loss can drop the latest rename
+  (losing the newest save) but cannot tear the file.
 - **Provenance:** readability plan §8 item 5; architecture plan §3.1 R5.
 
 ## registry-cross-process-lock

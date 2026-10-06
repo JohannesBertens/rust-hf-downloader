@@ -65,9 +65,8 @@ Key modules
   • Tests cover path and default load
 
 5) registry.rs
-- Persistence of DownloadRegistry at ~/models/hf-downloads.toml
-- load_registry/save_registry, selectors for incomplete/complete
-- Typed mutation ops (W2.4) — every registry write routes through them; register_pending (CLI pending seeder, moved from engine.rs so pending writes have one owner) sits next to the upsert_pending op it drives; mark_complete is one fn taking a Completion::{AlreadyExists (status flip only) | Downloaded (status + downloaded_size + url rewrite)} flavor (the two former mark_complete/mark_complete_with_url ops merged); byte-level behavior pinned by the goldens in registry/registry_tests.rs
+- Persistence of DownloadRegistry at ~/models/hf-downloads.toml; single-writer (M1): every write routes through `with_registry` (std process-global `REGISTRY_WRITE`; leaf-only sync closures; returns the post-write snapshot callers mirror from); `load_registry`/`save_registry` are module-private (public reads via lock-free `read_registry`); the save is atomic (same-dir pid-suffixed temp + `sync_all` + rename-with-retry)
+- Typed mutation ops (W2.4 + M1): register_pending (CLI pending seeder, moved from engine.rs so pending writes have one owner), upsert_pending, upsert_metadata, mark_complete (one fn taking a Completion::{AlreadyExists (status flip only) | Downloaded (status + downloaded_size + url rewrite)} flavor), mark_failed, mark_mismatch, delete_incomplete_by_urls, purge_staging — byte-level behavior pinned by the goldens in registry/registry_tests.rs; the in-process two-writer race is fixed (all-writers-win, R4)
 
 6) download/ (W3.8: mod.rs facade + private chunked.rs — every crate::download::X path unchanged)
 - start_download(DownloadParams) async orchestrates a safe, parallel, ranged GET download, in three W5.1a phases:

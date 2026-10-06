@@ -128,11 +128,20 @@ pub fn with_registry(f: impl FnOnce(&mut DownloadRegistry)) -> DownloadRegistry 
          deadlock the non-reentrant REGISTRY_WRITE mutex"
     );
     let _writer = REGISTRY_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    // Panic-safe flag: a Drop guard clears the thread-local even if the
+    // closure panics, so later same-thread calls never trip the leaf-only
+    // debug assertion spuriously.
+    struct HeldFlag;
+    impl Drop for HeldFlag {
+        fn drop(&mut self) {
+            IN_REGISTRY_WRITE.with(|held| held.set(false));
+        }
+    }
     IN_REGISTRY_WRITE.with(|held| held.set(true));
+    let _flag = HeldFlag;
     let mut registry = load_registry();
     f(&mut registry);
     save_registry(&registry);
-    IN_REGISTRY_WRITE.with(|held| held.set(false));
     registry
 }
 
@@ -457,6 +466,10 @@ pub fn delete_incomplete_by_urls(urls: &[String]) -> DownloadRegistry {
 /// a path-component match), pinned by the TOML golden in
 /// `cli/hf_cache/sync.rs::tests`. Best-effort, like the inline code:
 /// errors are silently swallowed.
+/// Substring marking a staging-hub entry (single home for the pre-check
+/// and the under-lock retain — the two must never drift apart).
+const STAGING_MARKER: &str = ".rhd-staging";
+
 pub fn purge_staging() -> Option<DownloadRegistry> {
     // Pre-check outside the writer (reads take no lock — see the module
     // docs): skip the serialized write entirely when there is nothing to
@@ -465,14 +478,14 @@ pub fn purge_staging() -> Option<DownloadRegistry> {
     if !read_registry()
         .downloads
         .iter()
-        .any(|d| d.local_path.contains(".rhd-staging"))
+        .any(|d| d.local_path.contains(STAGING_MARKER))
     {
         return None;
     }
     Some(with_registry(|registry| {
         registry
             .downloads
-            .retain(|d| !d.local_path.contains(".rhd-staging"));
+            .retain(|d| !d.local_path.contains(STAGING_MARKER));
     }))
 }
 

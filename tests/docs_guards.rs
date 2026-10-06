@@ -309,7 +309,8 @@ fn no_bare_plan_section_anchors_in_src() {
 /// inside the module that owns the write discipline.
 #[test]
 fn registry_disk_writes_confined_to_registry_module() {
-    let write_re = Regex::new(r"fs::write|File::create|write_all").unwrap();
+    let write_re =
+        Regex::new(r"fs::write|fs::copy|File::create|write_all|OpenOptions|File::options").unwrap();
     let registry_path_re = Regex::new(r"registry_path|hf-downloads\.toml").unwrap();
     let mut violations: Vec<String> = Vec::new();
     for (path, contents) in src_files() {

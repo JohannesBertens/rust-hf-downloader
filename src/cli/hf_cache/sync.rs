@@ -706,6 +706,8 @@ mod purge_tests {
         })
         .expect("serialize expected registry");
         assert_eq!(read_registry_file(), expected);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
