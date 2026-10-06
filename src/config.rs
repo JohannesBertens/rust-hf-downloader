@@ -128,7 +128,8 @@ pub fn apply_options(options: &AppOptions) {
 /// out — cargo runs unit tests as parallel threads of one process, and
 /// the globals are shared. Callers must also serialize against tests
 /// that mutate these atomics mid-flight (the crate-wide `ENV_MUTEX`
-/// convention; see the T1/W-final test-hardening notes in `cli::tests`).
+/// convention; see the T1/W-final test-hardening notes in
+/// `cli::args_tests`).
 #[cfg(test)]
 pub(crate) struct EngineGlobalsSnapshot {
     concurrent_threads: usize,

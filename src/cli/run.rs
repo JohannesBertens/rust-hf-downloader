@@ -601,7 +601,7 @@ fn apply_verify_outcome(outcome: &VerifyOutcome, reporter: &mut Reporter, tally:
 mod tests {
     use super::*;
 
-    /// Shareable in-memory stderr sink (mirrors the one in `cli::tests`).
+    /// Shareable in-memory stderr sink (mirrors the one in `cli::testutil`).
     #[derive(Clone, Default)]
     struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

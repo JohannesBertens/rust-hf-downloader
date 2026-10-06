@@ -102,7 +102,7 @@ Key modules
 
 11) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
 - `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::bootstrap
-- Split by section: mod (Cli/Command/run), args, resolve, events, report, run (cross-command runner: RunTally/monitor/poll_once + load_run_config/queue_run/run-tail emissions), download_cmd, search_cmd, hf_cache/ (mod = dispatch + the shared `absolute_path` + the facade re-exports `cli/tests.rs` imports; selection = pure plans/hf-cache-sync.md §2.2 selector; sync = §5.2 sync pipeline; path = snapshot-path math), update_cmd, tests
+- Split by section: mod (Cli/Command/run), args, resolve, events, report, run (cross-command runner: RunTally/monitor/poll_once + load_run_config/queue_run/run-tail emissions), download_cmd, search_cmd, hf_cache/ (mod = dispatch + the shared `absolute_path` + the facade re-exports `cli/tests.rs` imports; selection = pure plans/hf-cache-sync.md §2.2 selector; sync = §5.2 sync pipeline; path = snapshot-path math), update_cmd, per-subject *_tests.rs test modules + testutil fixtures (M6/T1)
 - Human reporter or JSON Lines (`--json`); documented exit-code table
 - `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
 

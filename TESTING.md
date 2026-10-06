@@ -78,7 +78,7 @@ test splits.
 | `src/models/*` | AppOptions TOML golden (config schema), engine/cache type invariants | `cargo test models` |
 | `src/cli/run.rs` | Runner helpers, token precedence matrix | `cargo test run` |
 | `src/cli/mod.rs` | dispatch + exit-code constants | `cargo test cli` |
-| `src/cli/tests.rs` | CLI insta goldens (`src/cli/snapshots/`) | `cargo test cli::` |
+| `src/cli/*_tests.rs` + `src/cli/testutil.rs` | per-subject CLI suites (M6/T1 split of the old tests.rs grab-bag): args helpers + token matrix (`args_tests`), event-schema insta goldens (`events_tests`), hf-cache selection/policy/clap (`hf_cache_tests`), help snapshots (`help_snapshot_tests`), report formatters + heartbeat (`report_tests`), resolve/selector (`resolve_tests`), root surface (`cli_surface_tests`); shared fixtures in `testutil` (`src/cli/snapshots/`) | `cargo test cli::` |
 | `src/rate_limiter.rs` | token-bucket refill math | `cargo test rate` |
 | `src/verification.rs` | verify outcomes, result counters | `cargo test verification` |
 | `src/update.rs` | version compare, manifest/asset selection | `cargo test update` |
@@ -143,7 +143,7 @@ let _env = crate::paths::ENV_MUTEX
 
 Conventions that build on this:
 
-- `VarGuard` (`src/cli/tests.rs`) restores one env var on drop; the
+- `VarGuard` (`src/cli/testutil.rs`) restores one env var on drop; the
   engine submodule tests share `EnvGuard`
   (`src/engine/mod.rs::test_support`) which redirects
   `RUST_HF_DOWNLOADER_DATA_DIR` + `HF_ENDPOINT` and restores both on
