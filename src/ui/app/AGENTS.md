@@ -21,7 +21,7 @@ Files and roles
   • File tree state for Standard mode; display_mode is shared to switch GGUF vs Standard
 
 - events/ (W3.9 split: mod.rs facade + private keys.rs)
-  • App::on_key_event (mod.rs) → dispatch by PopupMode and InputMode; routes to keys.rs handlers
+  • App::on_key_event (mod.rs) → dispatch by PopupMode; routes to keys.rs handlers
   • keys.rs owns the per-context key maps: Normal mode ('/'-search, 'o'-options, 'd'-download, 'v'-verify, 'q'-quit, 's'/'S' sort, 'f'/'+/-'/'r' filters, presets 1/2/3/4, Tab/Left/Right focus, j/k/arrows navigation, Enter details) and the five popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError; would_change_settings lives here too (preset-key helper)
   • mod.rs keeps the shared, non-keyboard-specific surface: navigation (models next/previous; quantization-group, quantization-file and file-tree cursors sharing one free fn advance(state, len, forward) (W4.6) — wrap-around both ends, unselected lists pick index 0 in both directions, len 0 no-op; the len×selection×direction tables in mod tests pin the contract), focus_pane/toggle_focus/toggle_quant_subfocus, file-tree expansion, modify_focused_filter/apply_filter_preset/save_filter_settings, and modify_option
   • 'd'/'v' key guards use FocusedPane::accepts_download()/accepts_verify() (defined next to the enum in models/ui.rs; pane sets pinned by unit test there)

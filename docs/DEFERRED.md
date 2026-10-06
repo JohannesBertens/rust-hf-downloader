@@ -45,11 +45,11 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 - **Status:** deferred (optional follow-on to M1)
 - **Finding:** registry writes race across **processes** — a concurrent CLI
   run and TUI session (or two CLI runs) can lose updates. M1's single
-  writer is process-global, not cross-process, and the atomic save
+  writer will be process-global, not cross-process, and the atomic save
   prevents torn files, not lost writes. (The *in-process* variant —
   manager vs verification worker, previously pinned as desired by the
-  two-writer tests — is fixed by M1 with the R4 sign-off: all writers
-  win.)
+  two-writer tests — will be fixed by M1 under the R4 sign-off: all
+  writers win.)
 - **Remedy:** advisory lock file around the write window, if concurrent
   front-ends ever matter enough.
 - **Provenance:** architecture plan §8; readability plan §8 (the pinned
@@ -107,33 +107,31 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 ## short-hash-slice-panic
 
 - **Symbol:** `expected_sha256`
-- **Status:** fix in flight (M2, finding B2)
-- **Finding:** verification status text slices `&expected_sha256[..16]` —
+- **Status:** resolved (M2, finding B2 — landed 2026-10-06)
+- **Finding:** verification status text sliced `&expected_sha256[..16]` —
   panics on a short/corrupt registry hash.
-- **Remedy:** `expected_sha256.get(..16)` with fallback truncation.
+- **Remedy (landed):** `expected_sha256.get(..16)` with fallback truncation.
 - **Provenance:** readability plan §8 item 3; architecture plan §3.4 B2.
 
 ## recursive-tree-error-swallow
 
 - **Symbol:** `fetch_recursive_tree`
-- **Status:** fix in flight (M4, finding B3 — Gate-0 sign-off approved
-  2026-10-06)
+- **Status:** resolved (M4, finding B3 — Gate-0 sign-off approved 2026-10-06, landed)
 - **Finding:** `src/api/client.rs` `fetch_recursive_tree` silently
   swallows per-directory fetch errors → truncated file trees with no
   signal.
-- **Remedy:** propagate subdir errors; e2e asserts a surfaced `network`
+- **Remedy (landed):** propagate subdir errors; e2e asserts a surfaced `network`
   event + exit code instead of silent truncation.
 - **Provenance:** readability plan §8 item 1; architecture plan §3.4 B3.
 
 ## chunk-task-zombies
 
 - **Symbol:** `spawn_chunk_tasks`
-- **Status:** fix in flight (M4, finding B4 — Gate-0 sign-off approved
-  2026-10-06)
+- **Status:** resolved (M4, finding B4 — Gate-0 sign-off approved 2026-10-06, landed)
 - **Finding:** failed chunk tasks are detached and never aborted; the
   retry recreates the file beneath zombie workers still writing to the
   old `.incomplete`.
-- **Remedy:** `JoinSet` + `abort_all()` on first error, with a
+- **Remedy (landed):** `JoinSet` + `abort_all()` on first error, with a
   deterministic abort pin (parked sibling performs no writes after the
   retry recreates the file).
 - **Provenance:** readability plan §8 item 2; architecture plan §3.4 B4.
@@ -164,14 +162,14 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 ## http-client-per-request-and-silent-header-drop
 
 - **Symbol:** `get_with_optional_token` / `build_client_with_token`
-- **Status:** fix in flight (M4, finding B5 — Gate-0 sign-off approved
-  2026-10-06)
+- **Status:** resolved (M4, finding B5 — Gate-0 sign-off approved 2026-10-06, landed)
 - **Finding:** `src/http_client.rs` builds a fresh `reqwest::Client` per
   request (TLS handshake per call, no pooling), and an invalid header
   value is silently dropped — the request goes out **unauthenticated**
   instead of failing.
-- **Remedy:** one shared client threaded from the Runner bootstrap; an
-  invalid header becomes an explicit error, not a silent downgrade.
+- **Remedy (landed):** one shared client threaded from the Runner bootstrap; an
+  invalid header becomes an explicit error (`ClientBuildError::InvalidToken`),
+  not a silent downgrade.
 - **Provenance:** readability plan §8 items 7+11; architecture plan §3.4
   B5.
 
@@ -203,12 +201,12 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 ## update-cmd-progress-divergence
 
 - **Symbol:** `run_update`
-- **Status:** fix in flight (M4, item C5)
+- **Status:** resolved (M4, item C5 — landed 2026-10-06)
 - **Finding:** `src/cli/update_cmd.rs` hand-rolls its human progress line,
   diverging from the `Reporter` shapes; adopting the Reporter changes
   stderr bytes, which is why it waited for the H4 human-output goldens
   (now landed).
-- **Remedy:** unify on Reporter shapes; the H4 goldens make the diff
+- **Remedy (landed):** unified on Reporter shapes; the H4 goldens make the diff
   reviewable.
 - **Provenance:** readability plan §8 item 10; architecture plan C5.
 

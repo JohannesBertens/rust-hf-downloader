@@ -17,7 +17,7 @@ named here exists — keep this file truthful.
 ```bash
 # Format / lint
 cargo fmt --check            # or: cargo fmt
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 
 # Everything (inline unit tests + all integration targets)
 cargo test
@@ -153,7 +153,7 @@ Conventions that build on this:
   serializes env-mutating tests while other tokio workers keep making
   progress.
 
-## Local gates (= CI)
+## Local gates (no PR CI — stricter than the release workflow)
 
 Run per commit — the tag-triggered release workflow will run
 `cargo test --locked` on all three native runners, so anything
@@ -161,7 +161,7 @@ platform-sensitive must hold locally first:
 
 ```bash
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings   # --all-targets: covers test code too
 cargo test
 INSTA_UPDATE=no cargo test        # + the stray-scan and unreferenced checks above
 ```

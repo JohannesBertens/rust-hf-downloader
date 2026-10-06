@@ -42,7 +42,7 @@ src/
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
 ├── fmt.rs           # Human-readable formatting primitives (W1.4): one wrapper per surface — eta_cli vs eta_hud, truncate_path_cli vs the middle-marker TUI variants, size_full vs HUD-compact bytes. The full-vs-HUD presentation split is DELIBERATE (do-not-unify contract pinned in fmt.rs:1-32); frozen-oracle tests pin every legacy string
-├── utils.rs          # Exactly two helper families (slimmed W-final): streaming digests (stream_file_digest/sha256_file) + atomic rename with retry (sync + tokio twin). All human formatting lives in fmt.rs
+├── utils.rs          # Exactly two helper families (slimmed W-final): streaming digests (stream_file_digest) + atomic rename with retry (sync + tokio twin). All human formatting lives in fmt.rs
 └── ui/
     ├── mod.rs        # UI module exports
     ├── app/          # App module (W3.9: mod.rs — no app.rs indirection): run loop + draw + crossterm event loop + mouse click/scroll/hover handlers + submodule re-exports (App)
@@ -185,7 +185,7 @@ The TUI supports full mouse interaction with panels and filter toolbar:
 - Border styles: `render/mod.rs::border_style` (single guard: yellow focused, cyan hovered, default otherwise); `render/mod.rs::panel_list` is the shared list-panel shape (title + border + selection highlight)
 
 **Non-blocking design**:
-- Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks (`ui::app::state::snapshot` helper + `RenderCache` on App: refresh cache when free, render cached snapshot when held)
+- Uses `try_lock()` for tokio Mutexes during render to prevent deadlocks (`ui::app::state::snapshot_in_place` helper + `RenderCache` on App: refresh cache when free, render cached snapshot when held)
 - Uses `parking_lot::RwLock` which doesn't have poisoning (no `.unwrap()` needed)
 - Cached render fields (App.render_cache) provide fallback when locks unavailable
 - Mouse handler is synchronous to avoid blocking issues
@@ -205,7 +205,7 @@ which derives the field set from `src/engine/mod.rs` — a new mutex/atomic
 field fails that test until it is documented here.
 
 <!-- lock-hierarchy:begin -->
-Lock Hierarchy (acquire in this order):
+Lock Hierarchy (acquire in this order — the ordering constrains **blocking** `.lock().await` acquisitions; scoped `try_lock` drains such as the receiver tier below are exempt because a guard is released before anything else is acquired):
 
 1. download_rx (Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>)
 2. download_queue (Arc<Mutex<QueueState>>) and download_queue_items (Arc<Mutex<Vec<QueueItemSummary>>>) — the consolidated queue accounting (size + bytes in one QueueState) and the Vec<QueueItemSummary> HUD mirror; acquire separately, never nested with each other

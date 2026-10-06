@@ -31,6 +31,22 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Read a text file with CRLF normalized to LF. The release workflow runs
+/// `cargo test --locked` on Windows, where a checkout without a
+/// `.gitattributes` eol policy can materialize `\r\n` line endings — every
+/// literal `"\n…\n"` search below must survive that.
+fn read_normalized(path: &Path) -> String {
+    fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read_to_string {}: {e}", path.display()))
+        .replace("\r\n", "\n")
+}
+
+/// Escape a literal for embedding in a regex (symbols like
+/// `AppOptions::default` or generic-ish tokens must not be interpreted).
+fn regex_escape(literal: &str) -> String {
+    literal.chars().flat_map(|c| c.escape_debug()).collect()
+}
+
 /// Every `*.rs` and `*.md` file under `src/`, as (path, contents).
 fn src_files() -> Vec<(PathBuf, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -51,11 +67,7 @@ fn src_files() -> Vec<(PathBuf, String)> {
     walk(&root().join("src"), &mut paths);
     paths
         .into_iter()
-        .map(|path| {
-            let contents = fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("read_to_string {}: {e}", path.display()));
-            (path, contents)
-        })
+        .map(|path| (path.clone(), read_normalized(&path)))
         .collect()
 }
 
@@ -74,8 +86,7 @@ fn src_files() -> Vec<(PathBuf, String)> {
 /// keep the derivation honest.
 #[test]
 fn lock_hierarchy_documents_every_engine_mutex_field() {
-    let engine_src =
-        fs::read_to_string(root().join("src/engine/mod.rs")).expect("src/engine/mod.rs readable");
+    let engine_src = read_normalized(&root().join("src/engine/mod.rs"));
 
     // One level of alias resolution: `pub type X = Arc<Mutex<..>>`.
     let alias_re = Regex::new(r"(?m)^pub type (\w+) = Arc<Mutex<").unwrap();
@@ -110,18 +121,21 @@ fn lock_hierarchy_documents_every_engine_mutex_field() {
     }
 
     // Sanity floors: if the struct moves or the regex drifts, fail loudly
-    // instead of passing vacuously. (Counts as of M0: 11 mutex + 2 atomic.)
+    // instead of passing vacuously. (Counts as of M0: 11 mutex + 2 atomic.
+    // If fields were intentionally REMOVED, lower the floor in the same PR.)
     assert!(
         mutex_fields.len() >= 11,
-        "derived only {mutex_fields:?} mutex fields — the EngineState derivation is stale"
+        "derived only {mutex_fields:?} mutex fields — the EngineState derivation is stale \
+         (or fields were intentionally removed: lower the floor in the same PR)"
     );
     assert!(
         atomic_fields.len() >= 2,
-        "derived only {atomic_fields:?} atomic fields — the EngineState derivation is stale"
+        "derived only {atomic_fields:?} atomic fields — the EngineState derivation is stale \
+         (or fields were intentionally removed: lower the floor in the same PR)"
     );
 
     // The delimited lock-hierarchy section of the root AGENTS.md.
-    let agents = fs::read_to_string(root().join("AGENTS.md")).expect("AGENTS.md readable");
+    let agents = read_normalized(&root().join("AGENTS.md"));
     let (begin, end) = (
         "<!-- lock-hierarchy:begin -->",
         "<!-- lock-hierarchy:end -->",
@@ -159,8 +173,7 @@ fn lock_hierarchy_documents_every_engine_mutex_field() {
 fn no_bare_plan_section_anchors_in_src() {
     let files = src_files();
     let deferred_path = root().join("docs/DEFERRED.md");
-    let deferred = fs::read_to_string(&deferred_path)
-        .unwrap_or_else(|e| panic!("docs/DEFERRED.md must exist (M0): {e}"));
+    let deferred = read_normalized(&deferred_path);
 
     // (b1) A `§<digit>` on a src line must co-occur with `plans/` (a named
     // plan file) or `docs/DEFERRED.md` (the register). Bare `§N.M` anchors
@@ -212,14 +225,28 @@ fn no_bare_plan_section_anchors_in_src() {
 
     // (b3) Every register entry's anchor symbol is still greppable in src —
     // an entry whose symbol is gone is resolved-or-orphaned and must be
-    // updated in the same PR that removed the symbol.
+    // updated in the same PR that removed the symbol. The corpus is
+    // COMMENT-STRIPPED and matched on word boundaries: a symbol that only
+    // survives inside comments (e.g. the citing `docs/DEFERRED.md#…`
+    // comment itself) does not keep an entry alive, and short tokens no
+    // longer match longer names (`RateLimiter` vs `RateLimiterState`).
+    let block_comment_re = Regex::new(r"(?s)/\*.*?\*/").unwrap();
     let corpus: String = files
         .iter()
-        .map(|(_, contents)| contents.as_str())
+        .map(|(_, contents)| {
+            let no_blocks = block_comment_re.replace_all(contents.as_str(), "");
+            no_blocks
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let symbol_re = Regex::new(r"(?m)^- \*\*Symbols?:\*\*\s+(.+)$").unwrap();
     let sym_token_re = Regex::new(r"`([^`]+)`").unwrap();
+    let status_re =
+        Regex::new(r"(?m)^- \*\*Status:\*\* (open|deferred|fix in flight \(M\d|resolved)").unwrap();
     let mut checked = 0usize;
     for chunk in deferred.split("\n## ").skip(1) {
         let key = chunk.lines().next().unwrap_or_default().trim();
@@ -234,12 +261,21 @@ fn no_bare_plan_section_anchors_in_src() {
             .map(|c| c.get(1).unwrap().as_str())
         {
             checked += 1;
+            let re = Regex::new(&format!(r"\b{}\b", regex_escape(token)))
+                .unwrap_or_else(|e| panic!("symbol {token} is not regex-safe: {e}"));
             assert!(
-                corpus.contains(token),
-                "register entry `{key}` anchors on symbol `{token}`, which is no longer \
-                 greppable in src/ — resolve or re-anchor the entry"
+                re.is_match(&corpus),
+                "register entry `{key}` anchors on symbol `{token}`, which no longer \
+                 appears as live code in src/ (comments do not count) — resolve or \
+                 re-anchor the entry"
             );
         }
+        // Status vocabulary: one of the four documented states, else the
+        // register drifts into free text the guards cannot reason about.
+        assert!(
+            status_re.is_match(chunk),
+            "register entry `{key}` has no `- **Status:** <open|deferred|fix in flight (M#)|resolved>` line"
+        );
     }
     assert!(
         checked >= entries.len(),
@@ -255,7 +291,7 @@ fn no_bare_plan_section_anchors_in_src() {
 
 #[test]
 fn testing_md_targets_exist() {
-    let testing = fs::read_to_string(root().join("TESTING.md")).expect("TESTING.md readable");
+    let testing = read_normalized(&root().join("TESTING.md"));
 
     // Every `cargo test --test <name>` must resolve to tests/<name>.rs.
     let test_re = Regex::new(r"--test[ =]([A-Za-z0-9_-]+)").unwrap();
@@ -282,6 +318,18 @@ fn testing_md_targets_exist() {
         assert!(
             root().join("src/lib.rs").exists(),
             "TESTING.md mentions a library-target test flag but src/lib.rs does not exist"
+        );
+    }
+
+    // Targets this crate does not have: no benches/, no doc tests on a
+    // bin-only crate with no library, no examples/ — a `--bench`/`--doc`/
+    // `--example` invocation in TESTING.md describes a target that cannot
+    // run (finding D1's class, on the flag side).
+    for flag in ["--bench", "--doc", "--example"] {
+        assert!(
+            !testing.contains(flag),
+            "TESTING.md mentions `{flag}` but this crate has no such target \
+             (no benches/, no lib doc-tests, no examples/)"
         );
     }
 }

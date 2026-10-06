@@ -15,7 +15,6 @@
 
 use crate::api::api_base;
 use crate::models::{ModelFile, ModelInfo, ModelMetadata, RepoFile};
-use std::collections::HashMap;
 
 /// Fetch models with sorting and filtering parameters.
 ///
@@ -244,37 +243,6 @@ fn fetch_recursive_tree<'a>(
 
         Ok(all_files)
     })
-}
-
-/// Fetch SHA256 hashes for multiple files in a single API call
-/// Returns a HashMap mapping filename to its SHA256 hash (if available)
-#[allow(dead_code)] // 2026-10 (B6): preserved in api::client facade
-pub async fn fetch_multipart_sha256s(
-    client: &reqwest::Client,
-    model_id: &str,
-    revision: &str,
-    filenames: &[String],
-) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
-    // Single API call to get all files
-    let url = format!("{}/api/models/{}/tree/{}", api_base(), model_id, revision);
-
-    let response = crate::http_client::get_with_optional_token(client, &url).await?;
-    let files: Vec<ModelFile> = response.json().await?;
-
-    // Create lookup map for fast matching
-    let mut sha256_map = HashMap::new();
-
-    for filename in filenames {
-        let sha256 = files
-            .iter()
-            .find(|f| &f.path == filename && f.file_type == "file")
-            .and_then(|f| f.lfs.as_ref())
-            .map(|lfs| lfs.oid.clone());
-
-        sha256_map.insert(filename.clone(), sha256);
-    }
-
-    Ok(sha256_map)
 }
 
 #[cfg(test)]

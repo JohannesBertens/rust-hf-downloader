@@ -185,7 +185,7 @@ impl App {
     }
 
     /// Rebuild [`App::api_client`] after the token changed (options-dialog
-    /// save, auth-error dismissal — M4/B5). A malformed token surfaces as
+    /// token-commit path — M4/B5). A malformed token surfaces as
     /// the error popup; the client then runs unauthenticated — explicit,
     /// never the old silent header drop that later blamed a 401.
     pub fn rebuild_api_client(&mut self) {

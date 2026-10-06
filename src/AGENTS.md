@@ -29,7 +29,7 @@ Key modules
 - Core types: ModelInfo, ModelMetadata(+RepoFile/LfsInfo), FileTreeNode
 - Quantization: QuantizationInfo, QuantizationGroup
 - Download tracking: DownloadMetadata/Registry, DownloadStatus, ChunkProgress, DownloadProgress
-- App/UI enums: PopupMode, InputMode, FocusedPane, ModelDisplayMode
+- App/UI enums: PopupMode, FocusedPane, ModelDisplayMode
 - Filter/sort: SortField, SortDirection, FilterPreset; ApiCache and SearchKey
 - Default AppOptions: persisted config schema only (download/verification and filter settings; the options dialog's transient UI state — cursor row, live-edit flags — moved to ui/render/options_popup.rs::OptionsDialogState, resolved in docs/DEFERRED.md#options-dialog-transient-state, pinned by the TOML golden test in options.rs)
 
@@ -54,7 +54,6 @@ Key modules
   (v2.4's `fetch_model_files` compat wrapper was deleted: no callers remained;
    call fetch_model_metadata + classify_quantizations directly)
 - resolve_revision_sha(model_id, revision, token) -> Result<String> (revision commit SHA; unknown revision → 404)
-- fetch_multipart_sha256s(model_id, filenames[], token) -> map filename -> Option<sha256>
 - Helpers: extract_quantization_type, get_multipart_base_name, looks_like_quant_type
   • Test-only (`#[cfg(test)]`): has_gguf_files, is_quantization_directory,
     extract_quantization_type_from_dirname, parse_multipart_filename
@@ -94,7 +93,7 @@ Key modules
 - app/*: state, events, model and download flows
 
 9) utils.rs — exactly two genuinely-generic families (final pass; formatters moved to fmt.rs)
-- digest streaming: stream_file_digest(path, hasher, buffer_size, on_chunk) (progress-reporting read+hash loop), sha256_file, DIGEST_CHUNK
+- digest streaming: stream_file_digest(path, hasher, buffer_size, on_chunk) (progress-reporting read+hash loop), DIGEST_CHUNK
 - atomic rename: atomic_rename_with_retry / atomic_rename_with_retry_async (retry policy is per-site: download 4 retries/100ms linear backoff; cache_layout: retries=0 single attempt)
 
 10) fmt.rs — human-readable formatting primitives (W1.4), one wrapper per surface

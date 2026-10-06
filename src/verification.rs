@@ -156,14 +156,14 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
                     .verification_results
                     .failed
                     .fetch_add(1, Ordering::Relaxed);
-                let expected_trunc = item
-                    .expected_sha256
-                    .get(..16)
-                    .unwrap_or(&item.expected_sha256);
+                let expected_chars: Vec<char> = item.expected_sha256.chars().collect();
+                let expected_trunc: String = expected_chars.iter().take(16).collect();
+                let expected_ell = if expected_chars.len() > 16 { "..." } else { "" };
                 let _ = state.status_tx.send(format!(
-                    "✗ Hash mismatch for {}: expected {}..., got {}...",
+                    "✗ Hash mismatch for {}: expected {}{}, got {}...",
                     item.filename,
                     expected_trunc,
+                    expected_ell,
                     &calculated_hash[..16]
                 ));
                 let _ = state.verify_tx.send(VerifyOutcome::Mismatch {
@@ -565,10 +565,9 @@ mod tests {
             msgs
         };
         assert!(
-            status_msg
-                .iter()
-                .any(|m| m.contains("expected short..., got")),
-            "status should contain char-safe fallback: {:?}",
+            status_msg.iter().any(|m| m.contains("expected short, got")),
+            "status should contain char-safe fallback without a misleading \
+             ellipsis on a non-truncated short hash: {:?}",
             status_msg
         );
 
