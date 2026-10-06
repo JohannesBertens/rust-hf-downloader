@@ -84,10 +84,11 @@ pub struct QueuedDownload {
 pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>;
 
 // ---------------------------------------------------------------------------
-// M3 field→bundle ownership table (plans/architecture-simplification-review.md
-// §5 M3 step 0 — written BEFORE any code moved; every one of the 17 flat
-// `EngineState` fields gets exactly one home, so the regroup in step 4 is
-// a table lookup, not a judgment call):
+// M3 field→bundle ownership table (written BEFORE any code moved; see
+// plans/architecture-simplification-review.md §5 M3 step 0): every one of
+// the 17 flat `EngineState` fields gets exactly one home, so the regroup
+// (plans/architecture-simplification-review.md §5 M3 step 4) is a table
+// lookup, not a judgment call:
 //
 //   flat field (17 of them)        → home after the M3 regroup
 //   ──────────────────────────────────────────────────────────────────────
@@ -284,6 +285,82 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // M3 step 1: the SHAPE test — `EngineState::new()` returns a fully
+    // connected, fresh-valued state. This is the migration checklist for
+    // the bundle regroup (plans/architecture-simplification-review.md §5
+    // M3 step 4): it CHANGES within M3 by design (field paths gain their
+    // bundle prefix), which is why the behavioral pins named in the plan behavioral pins named in the
+    // plan (the 8 enqueue characterization tests, the manager
+    // drain/accounting tests, the verification worker timing tests, the
+    // timing tests, the RenderCache defaults test, and the full e2e in
+    // tests/cli_download.rs) are the real no-regression gate.
+    #[tokio::test]
+    async fn engine_state_new_shape_is_fresh() {
+        let (state, download_tx) = EngineState::new();
+
+        // Work channel: the returned sender is connected to the receiver.
+        download_tx
+            .send(QueuedDownload {
+                model_id: "a/b".to_string(),
+                revision: "main".to_string(),
+                filename: "f.bin".to_string(),
+                base_path: PathBuf::from("/tmp"),
+                expected_sha256: None,
+                hf_token: None,
+                total_size: 1,
+            })
+            .unwrap();
+        let msg = { state.download_rx.lock().await.recv().await };
+        assert!(msg.is_some(), "download_tx → download_rx are connected");
+
+        // Queue accounting: zeroed counters, empty HUD mirror.
+        {
+            let queue = state.download_queue.lock().await;
+            assert_eq!((queue.size, queue.bytes), (0, 0));
+        }
+        assert!(state.download_queue_items.lock().await.is_empty());
+
+        // Scalar mirrors.
+        assert!(state.download_progress.lock().await.is_none());
+        assert!(state.complete_downloads.lock().await.is_empty());
+        assert!(state.download_registry.lock().await.downloads.is_empty());
+
+        // Event channels: every tx → rx pair is connected (send on the
+        // sender half, receive on the mutexed receiver half).
+        state.status_tx.send("ping".to_string()).unwrap();
+        assert_eq!(
+            state.status_rx.lock().await.try_recv().ok(),
+            Some("ping".to_string())
+        );
+        let outcome_probe = FileOutcome::Complete {
+            filename: "f.bin".to_string(),
+            bytes: 1,
+        };
+        state.outcome_tx.send(outcome_probe.clone()).unwrap();
+        assert_eq!(
+            state.outcome_rx.lock().await.try_recv().ok(),
+            Some(outcome_probe)
+        );
+        let verify_probe = VerifyOutcome::Ok {
+            filename: "f.bin".to_string(),
+        };
+        state.verify_tx.send(verify_probe.clone()).unwrap();
+        assert_eq!(
+            state.verify_rx.lock().await.try_recv().ok(),
+            Some(verify_probe)
+        );
+
+        // Verification worker state: empty queue/progress, zeroed
+        // counters, and the idle signal true on a fresh engine.
+        assert!(state.verification_queue.lock().await.is_empty());
+        assert_eq!(state.verification_queue_size.load(Ordering::Relaxed), 0);
+        assert_eq!(state.verification_in_flight.load(Ordering::Relaxed), 0);
+        assert!(state.verification_progress.lock().await.is_empty());
+        assert_eq!(state.verification_results.ok.load(Ordering::Relaxed), 0);
+        assert_eq!(state.verification_results.failed.load(Ordering::Relaxed), 0);
+        assert!(state.verification_idle());
+    }
 
     #[tokio::test]
     async fn verification_idle_tracks_queue_and_in_flight() {
