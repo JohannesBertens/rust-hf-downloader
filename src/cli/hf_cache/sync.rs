@@ -600,7 +600,7 @@ fn purge_staging_registry_entries() {
 }
 
 #[cfg(test)]
-mod tests {
+mod purge_tests {
     //! M1 pin for the staging purge (typed-op conversion, validation-first):
     //! the exact `contains(".rhd-staging")` predicate and the exact TOML
     //! bytes the purge leaves behind, plus the conditional-save contract
