@@ -83,6 +83,51 @@ pub struct QueuedDownload {
 /// Type alias for download receiver to reduce complexity
 pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>;
 
+// ---------------------------------------------------------------------------
+// M3 field→bundle ownership table (plans/architecture-simplification-review.md
+// §5 M3 step 0 — written BEFORE any code moved; every one of the 17 flat
+// `EngineState` fields gets exactly one home, so the regroup in step 4 is
+// a table lookup, not a judgment call):
+//
+//   flat field (17 of them)        → home after the M3 regroup
+//   ──────────────────────────────────────────────────────────────────────
+//   download_rx                    → EngineState (top level) — the WORK
+//                                    channel's receiver. The sender half is
+//                                    deliberately NOT engine state (the CLI's
+//                                    drop-based completion), so this is not
+//                                    an event-bus channel either.
+//   download_queue                 → QueueAccounting.download_queue_totals
+//                                    (type renamed QueueState→QueueTotals;
+//                                    U6 folded into M3 step 4)
+//   download_queue_items           → QueueAccounting.download_queue_items
+//                                    (the name survives verbatim: it is the
+//                                    live-code anchor of
+//                                    docs/DEFERRED.md#queue-item-filename-only-match)
+//   download_progress              → EngineState (top level)
+//   complete_downloads             → EngineState (top level)
+//   status_tx / status_rx          → EventBus (the status channel pair)
+//   verify_tx / verify_rx          → EventBus (the verify channel pair)
+//   outcome_tx / outcome_rx        → EventBus (the outcome channel pair)
+//   verification_queue             → VerificationHub.queue
+//   verification_queue_size        → VerificationHub.size
+//   verification_in_flight         → VerificationHub.in_flight
+//   verification_progress          → VerificationHub.progress
+//   verification_results           → VerificationHub.results
+//   download_registry              → EngineState.download_registry (top
+//                                    level); VerificationHub.registry_mirror
+//                                    is the SAME Arc shared into the hub —
+//                                    ONE mutex with two names (the engine's
+//                                    registry mirror vs. the verification
+//                                    worker's view of it), not two homes.
+//
+// No field has two plausible homes: EventBus owns exactly the three event
+// channel pairs (tx+rx); VerificationHub owns exactly the queues/counters/
+// progress/mirror the verification worker consumes; QueueAccounting owns
+// exactly the two queue-accounting locks; the work-channel receiver and
+// the three scalar mirrors stay top level. Bundles keep SEPARATE
+// Arc<Mutex> fields inside — no lock is merged or added by the grouping.
+// ---------------------------------------------------------------------------
+
 /// The bundle of shared handles the engine tasks and frontends communicate
 /// through. Every field is an Arc or a channel endpoint, so cloning is cheap.
 #[derive(Clone, Debug)]
