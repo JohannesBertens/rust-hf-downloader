@@ -8,8 +8,8 @@
 //! crossterm event loop.
 
 use crate::models::*;
+use crate::ui::app::options::{OptionsFieldId, OPTIONS_FIELDS};
 use crate::ui::app::state::App;
-use crate::ui::render::{OptionsFieldId, OPTIONS_FIELDS};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 
@@ -265,7 +265,7 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     // Save the edited token (empty string becomes None)
-                    let new_token = self.options_token_input.value().to_string();
+                    let new_token = self.options_dialog.token_input.value().to_string();
                     self.options.hf_token = if new_token.is_empty() {
                         None
                     } else {
@@ -289,7 +289,9 @@ impl App {
                     self.options_dialog.editing_token = false;
                 }
                 _ => {
-                    self.options_token_input.handle_event(&Event::Key(key));
+                    self.options_dialog
+                        .token_input
+                        .handle_event(&Event::Key(key));
                 }
             }
         } else if self.options_dialog.editing_directory {
@@ -297,7 +299,7 @@ impl App {
                 KeyCode::Enter => {
                     // Save the edited directory
                     self.options.default_directory =
-                        self.options_directory_input.value().to_string();
+                        self.options_dialog.directory_input.value().to_string();
                     self.options_dialog.editing_directory = false;
 
                     // Save to disk
@@ -310,7 +312,9 @@ impl App {
                     self.options_dialog.editing_directory = false;
                 }
                 _ => {
-                    self.options_directory_input.handle_event(&Event::Key(key));
+                    self.options_dialog
+                        .directory_input
+                        .handle_event(&Event::Key(key));
                 }
             }
         } else {
@@ -345,14 +349,15 @@ impl App {
                         match spec.id {
                             OptionsFieldId::DefaultDirectory => {
                                 self.options_dialog.editing_directory = true;
-                                self.options_directory_input = tui_input::Input::default()
+                                self.options_dialog.directory_input = tui_input::Input::default()
                                     .with_value(self.options.default_directory.clone());
                             }
                             OptionsFieldId::HfToken => {
                                 self.options_dialog.editing_token = true;
-                                self.options_token_input = tui_input::Input::default().with_value(
-                                    self.options.hf_token.as_deref().unwrap_or("").to_string(),
-                                );
+                                self.options_dialog.token_input = tui_input::Input::default()
+                                    .with_value(
+                                        self.options.hf_token.as_deref().unwrap_or("").to_string(),
+                                    );
                             }
                             _ => {}
                         }

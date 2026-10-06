@@ -13,10 +13,10 @@
 //! a per-test temp dir). Every env-touching test here holds
 //! `ENV_MUTEX`, serializing against the other env/atomics mutators.
 
+use super::options::OptionsFieldId;
 use super::state::App;
 use crate::models::SortField;
 use crate::paths::{ENV_CONFIG_DIR, ENV_MUTEX};
-use crate::ui::render::OptionsFieldId;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Isolated config dir + unset HF_TOKEN for one options test; returns
@@ -91,7 +91,7 @@ async fn modify_option_all_sixteen_fields_plus_minus_literal_table() {
             app.modify_option(delta);
 
             let o = &app.options;
-            match crate::ui::render::OPTIONS_FIELDS[field].id {
+            match super::options::OPTIONS_FIELDS[field].id {
                 // Text fields: +/- is a no-op (Enter edits instead).
                 OptionsFieldId::DefaultDirectory => {
                     assert_eq!(
@@ -340,7 +340,7 @@ async fn options_enter_saves_and_esc_discards() {
     app.on_key_event(enter).await;
     assert!(app.options_dialog.editing_directory);
     let original_dir = app.options.default_directory.clone();
-    app.options_directory_input = tui_input::Input::new("/tmp/typed-dir".to_string());
+    app.options_dialog.directory_input = tui_input::Input::new("/tmp/typed-dir".to_string());
     app.on_key_event(esc).await;
     assert!(!app.options_dialog.editing_directory, "Esc left edit mode");
     assert_eq!(
@@ -354,7 +354,7 @@ async fn options_enter_saves_and_esc_discards() {
 
     // --- Enter saves (directory field) ---
     app.on_key_event(enter).await;
-    app.options_directory_input = tui_input::Input::new("/tmp/typed-dir".to_string());
+    app.options_dialog.directory_input = tui_input::Input::new("/tmp/typed-dir".to_string());
     app.on_key_event(enter).await;
     assert!(
         !app.options_dialog.editing_directory,
@@ -375,7 +375,7 @@ async fn options_enter_saves_and_esc_discards() {
     app.on_key_event(enter).await;
     assert!(app.options_dialog.editing_token);
     app.options.hf_token = Some("stale".to_string());
-    app.options_token_input = tui_input::Input::default(); // empty buffer
+    app.options_dialog.token_input = tui_input::Input::default(); // empty buffer
     app.on_key_event(enter).await;
     assert!(!app.options_dialog.editing_token);
     assert_eq!(

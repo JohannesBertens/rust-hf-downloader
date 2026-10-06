@@ -62,7 +62,7 @@ pub fn save_config(options: &AppOptions) -> Result<(), Box<dyn std::error::Error
 // One row per engine-tunable option; `apply_options`, and the test-only
 // `EngineGlobalsSnapshot` capture/restore, all iterate this table — adding
 // an option is ONE edit here instead of a three-site rewrite (the
-// OPTIONS_FIELDS precedent from ui/render/options_popup.rs). Behavior is
+// OPTIONS_FIELDS precedent from ui/app/options.rs). Behavior is
 // pinned field-by-field by `apply_options_maps_every_field_and_snapshot_round_trips`.
 // ---------------------------------------------------------------------------
 

@@ -201,8 +201,10 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 - **Status:** resolved (W-wave, W4.7/W5.3 era)
 - **Finding:** transient options-dialog UI state (cursor row, live-edit
   flags) used to sit inside `AppOptions`; it moved out to
-  `ui/render/options_popup.rs::OptionsDialogState`, making `AppOptions`
-  purely the persisted config schema.
+  `ui/app/options.rs::OptionsDialogState` (W4.7/W5.3 created it in
+  `ui/render/options_popup.rs`; M5/U1 moved it to the app layer together
+  with the two text-edit buffers), making `AppOptions` purely the
+  persisted config schema.
 - **Pin:** the TOML golden `appoptions_toml_golden_round_trip` in
   `src/models/options.rs` pins the exact persisted schema.
 - **Provenance:** readability plan §8 item 9 (the old `§8.9` anchor).

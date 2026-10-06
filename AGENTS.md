@@ -47,6 +47,7 @@ src/
     ├── mod.rs        # UI module exports
     ├── app/          # App module (W3.9: mod.rs — no app.rs indirection): run loop + draw + crossterm event loop + mouse click/scroll/hover handlers + submodule re-exports (App)
     │   ├── state.rs      # App state container and initialization
+    │   ├── options.rs    # Options-dialog ownership (M5/U1): OptionsDialogState (cursor + live-edit flags + the two text-edit buffers) + OptionsFieldId/Kind + the OPTIONS_FIELDS 16-row table — render/options_popup.rs is a pure consumer
     │   ├── events/       # Keyboard dispatch (W3.9): mod.rs = on_key_event router + shared navigation/filter-value methods + W4.6 advance contract tests; keys.rs = normal-mode + popup key handlers
     │   ├── filters.rs    # FilterState: single home of filter/sort values + cycle/step mutation rules (W4.5)
     │   ├── search.rs     # Model browsing logic (search, details, quantizations)
@@ -60,7 +61,7 @@ src/
         ├── gguf.rs        # GGUF mode: quantization groups + their files
         ├── hud.rs         # Activity HUD (row builders, column math, state glyphs)
         ├── popups.rs      # resume / search / download-path / auth-error overlays
-        ├── options_popup.rs # 16-field options dialog
+        ├── options_popup.rs # 16-field options dialog renderer — pure consumer since M5/U1 (dialog state + field table live in ui/app/options.rs, imported from there)
         ├── toolbar.rs     # filter & sort toolbar, hit areas, version badge
         └── *_tests.rs     # snapshot_tests / hud_tests / style_size_tests / tests — snaps in render/snapshots/
 ```
@@ -185,7 +186,7 @@ The TUI supports full mouse interaction with panels and filter toolbar:
   - `areas: MouseAreas` — hit-rects of the last rendered frame: `panels: Vec<(FocusedPane, Rect)>` (clickable regions per panel) and `filters: Vec<(usize, Rect)>` (filter fields 0=sort, 1=downloads, 2=likes); written once per frame by `App::draw` from `RenderOutput::mouse`
   - `hovered_panel: Option<FocusedPane>` — currently hovered panel for border highlighting
   - `last_move: Instant` — hover-update throttle (~60fps)
-- `options_dialog: OptionsDialogState` (§8.9) — transient options-dialog UI state (cursor row + live-edit flags); never serialized (AppOptions is pure config schema)
+- `options_dialog: OptionsDialogState` (owned by `ui/app/options.rs` since M5/U1) — transient options-dialog UI state (cursor row + live-edit flags + the two directory/token text-edit buffers); never serialized (AppOptions is pure config schema)
 
 **Event handling** (`src/ui/app/mod.rs`):
 - `handle_mouse_click(column, row)` - focus panel or cycle filter on click

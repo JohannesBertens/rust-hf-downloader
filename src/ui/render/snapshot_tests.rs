@@ -3,6 +3,7 @@ use crate::models::{
     AppOptions, DownloadMetadata, DownloadStatus, FileTreeNode, ModelMetadata, QuantizationGroup,
     QuantizationInfo, SortDirection, SortField,
 };
+use crate::ui::app::options::OptionsDialogState;
 use ratatui::{backend::TestBackend, Terminal};
 use std::collections::HashMap;
 

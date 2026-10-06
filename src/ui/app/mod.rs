@@ -8,6 +8,10 @@ mod events;
 mod filters;
 #[cfg(test)]
 mod mouse_tests;
+/// Options-dialog state + the 16-field table (M5/U1: moved out of
+/// `ui/render/options_popup.rs` so the app layer owns the dialog and the
+/// renderer is a pure consumer).
+pub mod options;
 #[cfg(test)]
 mod options_tests;
 mod search;
@@ -223,8 +227,8 @@ impl App {
                     frame,
                     &self.options,
                     &self.options_dialog,
-                    &self.options_directory_input,
-                    &self.options_token_input,
+                    &self.options_dialog.directory_input,
+                    &self.options_dialog.token_input,
                 );
             }
             PopupMode::AuthError { ref model_url } => {

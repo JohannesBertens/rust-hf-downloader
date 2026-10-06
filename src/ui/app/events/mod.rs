@@ -12,7 +12,7 @@ mod keys;
 
 use super::state::App;
 use crate::models::*;
-use crate::ui::render::{OptionsFieldId, OPTIONS_FIELDS};
+use crate::ui::app::options::{OptionsFieldId, OPTIONS_FIELDS};
 use crate::ui::tree::toggle_node_expansion;
 use crossterm::event::KeyEvent;
 use ratatui::widgets::ListState;

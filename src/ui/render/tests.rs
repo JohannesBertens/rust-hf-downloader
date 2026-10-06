@@ -1,5 +1,8 @@
 use super::*;
 use crate::models::{SortDirection, SortField};
+use crate::ui::app::options::{
+    OptionsDialogState, OptionsFieldId, OptionsFieldKind, OPTIONS_FIELDS,
+};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 

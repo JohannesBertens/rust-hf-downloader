@@ -11,7 +11,9 @@
 //! - `hud` — [`ActivityHudData`], [`activity_hud_height`],
 //!   `render_activity_hud` and the HUD row/column builders
 //! - `popups` — resume / search / download-path / auth-error overlays
-//! - `options_popup` — the 16-field options dialog
+//! - `options_popup` — the 16-field options dialog renderer (a pure
+//!   consumer since M5/U1: the dialog state + [`crate::ui::app::options::OPTIONS_FIELDS`]
+//!   table live in `ui/app/options.rs`, imported from there)
 //! - `toolbar` — the filter & sort toolbar with its click areas
 //!   ([`FilterCtx`] is its input group)
 //!

@@ -49,8 +49,11 @@ pub struct App {
     pub download_tx: mpsc::UnboundedSender<QueuedDownload>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
     pub options: crate::models::AppOptions,
-    pub options_directory_input: Input,
-    pub options_token_input: Input,
+    // Options-dialog transient UI state
+    // (docs/DEFERRED.md#options-dialog-transient-state: moved out of AppOptions —
+    // cursor row + live-edit flags + the two text-edit buffers, M5/U1;
+    // AppOptions is pure config schema). Lives in ui/app/options.rs.
+    pub options_dialog: super::options::OptionsDialogState,
     /// The ONE `reqwest::Client` this TUI session's API requests share
     /// (plan M4/B5), built from `options.hf_token` — the token lives in
     /// the client's default `Authorization` header, so no call site
@@ -76,10 +79,6 @@ pub struct App {
     // Mouse interaction state (one bundle — the fields travel together
     // through the render pass and the mouse handlers; see MouseState)
     pub mouse: MouseState,
-    // Options-dialog transient UI state
-    // (docs/DEFERRED.md#options-dialog-transient-state: moved out of AppOptions —
-    // cursor row + live-edit flags; AppOptions is pure config schema)
-    pub options_dialog: crate::ui::render::OptionsDialogState,
     // Last-known-good snapshots of the engine's tokio::Mutex state for
     // non-blocking rendering: draw() refreshes each field via
     // `snapshot_in_place` when the lock is free and falls back to the
@@ -159,8 +158,6 @@ impl App {
             download_tx,
             incomplete_downloads: Vec::new(),
             options,
-            options_directory_input: Input::default(),
-            options_token_input: Input::default(),
             api_client,
             // Non-GGUF model support
             model_metadata: Arc::new(RwLock::new(None)),
@@ -174,7 +171,7 @@ impl App {
             focused_filter_field: 0,
             // Mouse interaction state
             mouse: MouseState::default(),
-            options_dialog: crate::ui::render::OptionsDialogState::default(),
+            options_dialog: super::options::OptionsDialogState::default(),
             // Cached values for non-blocking render
             render_cache: RenderCache::default(),
         }
