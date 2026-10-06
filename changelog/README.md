@@ -24,10 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matrix, registry byte-goldens); the known registry lost-update race
   is now pinned by a test. Windows CI fixed: the registry TOML
   byte-goldens now expect the literal-string form the `toml` serializer
-  actually emits for backslash paths, the token-matrix temp dirs no
-  longer embed Debug quotes (invalid Windows filename chars), and
-  `ENV_MUTEX` test locks recover from poisoning so one failure cannot
-  cascade into ~19 unrelated ones.
+  actually emits for backslash paths (and the `register_pending` golden
+  builds its expected path the way production does, one component per
+  join), the token-matrix temp dirs no longer embed Debug quotes
+  (invalid Windows filename chars), the engine/ui test `EnvGuard`s
+  redirect `RUST_HF_DOWNLOADER_DATA_DIR` instead of `HOME` (`HOME` does
+  not move the registry path on Windows), and `ENV_MUTEX` test locks
+  recover from poisoning so one failure cannot cascade into ~19
+  unrelated ones.
 
 ## [2.13.1] - 2026-10-05
 

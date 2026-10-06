@@ -576,17 +576,20 @@ mod tests {
     }
 
     struct EnvGuard {
-        home: Option<String>,
+        data_dir: Option<std::ffi::OsString>,
         endpoint: Option<String>,
     }
 
     impl EnvGuard {
-        fn install(home: &std::path::Path, endpoint: &str) -> Self {
+        fn install(data_dir: &std::path::Path, endpoint: &str) -> Self {
+            // `RUST_HF_DOWNLOADER_DATA_DIR` moves the registry path on every
+            // platform; `HOME` alone would not isolate on Windows, where
+            // `dirs::home_dir()` reads `USERPROFILE` instead.
             let guard = Self {
-                home: std::env::var("HOME").ok(),
+                data_dir: std::env::var_os(crate::paths::ENV_DATA_DIR),
                 endpoint: std::env::var("HF_ENDPOINT").ok(),
             };
-            std::env::set_var("HOME", home);
+            std::env::set_var(crate::paths::ENV_DATA_DIR, data_dir);
             std::env::set_var("HF_ENDPOINT", endpoint);
             guard
         }
@@ -594,9 +597,9 @@ mod tests {
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            match &self.home {
-                Some(h) => std::env::set_var("HOME", h),
-                None => std::env::remove_var("HOME"),
+            match &self.data_dir {
+                Some(d) => std::env::set_var(crate::paths::ENV_DATA_DIR, d),
+                None => std::env::remove_var(crate::paths::ENV_DATA_DIR),
             }
             match &self.endpoint {
                 Some(e) => std::env::set_var("HF_ENDPOINT", e),
