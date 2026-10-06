@@ -472,7 +472,7 @@ async fn execute_download_with_retry(
                 // Check for 401 Unauthorized errors
                 if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
                     if reqwest_err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                        let _ = status_tx.send(crate::engine::auth_status_message(model_id));
+                        let _ = status_tx.send(crate::models::auth_status_message(model_id));
 
                         // Delete incomplete file
                         if incomplete_path.exists() {

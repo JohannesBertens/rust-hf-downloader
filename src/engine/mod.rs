@@ -209,31 +209,17 @@ impl EngineState {
     }
 }
 
-/// Auth-status channel contract (W2.6). When a download hits HTTP 401, the
-/// engine sends `AUTH_ERROR:<model_id>` on the free-text status channel;
-/// both frontends detect that line through [`parse_auth_status`] (the TUI
-/// opens the AuthError popup from it, the human CLI prints its auth hint).
-/// The typed signal lives in the outcome stream
-/// (`FileOutcome::AuthRequired`), which the CLI maps to
-/// `error [auth_required]` / `EXIT_AUTH`. Defining the string in exactly
-/// one place (builder + parser here, one producer in `download.rs`, two
-/// consumers calling this parser) removes the duplicated string contract
-/// without changing a byte on the wire; a future typed-event migration
-/// swaps this one function instead of N call sites.
-pub const AUTH_STATUS_PREFIX: &str = "AUTH_ERROR:";
-
-/// Build the auth-status line for `model_id` — byte-identical to the
-/// previous inline `format!("AUTH_ERROR:{}", model_id)` producer.
-pub fn auth_status_message(model_id: &str) -> String {
-    format!("{AUTH_STATUS_PREFIX}{model_id}")
-}
-
-/// Parse a status line back into its auth model id; `None` for any other
-/// status line. `Some("")` for the bare prefix pins the
-/// `format!`/`strip_prefix` round-trip behavior.
-pub fn parse_auth_status(status: &str) -> Option<&str> {
-    status.strip_prefix(AUTH_STATUS_PREFIX)
-}
+/// Auth-status contract (`AUTH_STATUS_PREFIX` /
+/// `auth_status_message` / `parse_auth_status`): moved to
+/// `crate::models` (data-only module) in M3 step 2 — see
+/// plans/architecture-simplification-review.md §5 M3 step 2. The engine
+/// re-export below is a one-cycle compatibility shim with a named
+/// expiry: it is deleted in this milestone's FINAL commit, together with
+/// the last `crate::engine::auth_status_*` consumer. (No consumer remains
+/// already — the three call sites switched in the same commit — so the
+/// re-export is `allow(unused_imports)` for its one-cycle lifetime.)
+#[allow(unused_imports)]
+pub use crate::models::{auth_status_message, parse_auth_status, AUTH_STATUS_PREFIX};
 
 /// Env plumbing shared by the engine submodule tests (`enqueue`, `workers`,
 /// `bootstrap`): the EnvGuard redirects `RUST_HF_DOWNLOADER_DATA_DIR`
@@ -381,34 +367,5 @@ mod tests {
         state.verification_in_flight.fetch_sub(1, Ordering::Relaxed);
 
         assert!(state.verification_idle(), "idle again after drain");
-    }
-
-    /// W2.6: the auth-status line's exact bytes and both parse outcomes are
-    /// the pinned contract shared by the download-task producer and the TUI
-    /// and human-CLI consumers (the typed signal is `FileOutcome::AuthRequired`).
-    #[test]
-    fn auth_status_string_contract_is_pinned() {
-        // Producer: byte-identical to the legacy inline format!.
-        assert_eq!(
-            auth_status_message("meta-llama/Llama-3-8B-Instruct"),
-            "AUTH_ERROR:meta-llama/Llama-3-8B-Instruct"
-        );
-        // Consumers: the same model id both frontends extracted via
-        // strip_prefix before the parser was centralized.
-        assert_eq!(
-            parse_auth_status("AUTH_ERROR:meta-llama/Llama-3-8B-Instruct"),
-            Some("meta-llama/Llama-3-8B-Instruct")
-        );
-        // Non-auth status lines must not match (they reach the status
-        // handlers verbatim).
-        assert_eq!(
-            parse_auth_status("Error: Download failed after retries: boom"),
-            None
-        );
-        assert_eq!(parse_auth_status(""), None);
-        // Bare prefix pins the format!/strip_prefix round-trip (empty id).
-        assert_eq!(parse_auth_status(AUTH_STATUS_PREFIX), Some(""));
-        // Builder/parser round-trip.
-        assert_eq!(parse_auth_status(&auth_status_message("a/b")), Some("a/b"));
     }
 }
