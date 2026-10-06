@@ -160,8 +160,10 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 - **Symbol:** `download_queue_items`
 - **Status:** open
 - **Finding:** the download manager removes the HUD-mirror queue item by
-  first **filename** match (`src/engine/workers.rs`) — two queued files
-  sharing a filename across models/revisions remove the wrong row.
+  first **filename** match (the manager loop in `src/engine/workers.rs`, via
+  `QueueAccounting::remove_started` in `src/engine/mod.rs` since M3) — two
+  queued files sharing a filename across models/revisions remove the wrong
+  row.
 - **Remedy:** match on model+revision+filename; needs the
   `QueueItemSummary` mirror schema extended.
 - **Provenance:** readability plan §8 item 6.

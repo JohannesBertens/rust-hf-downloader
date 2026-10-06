@@ -286,18 +286,6 @@ impl EngineState {
     }
 }
 
-/// Auth-status contract (`AUTH_STATUS_PREFIX` /
-/// `auth_status_message` / `parse_auth_status`): moved to
-/// `crate::models` (data-only module) in M3 step 2 — see
-/// plans/architecture-simplification-review.md §5 M3 step 2. The engine
-/// re-export below is a one-cycle compatibility shim with a named
-/// expiry: it is deleted in this milestone's FINAL commit, together with
-/// the last `crate::engine::auth_status_*` consumer. (No consumer remains
-/// already — the three call sites switched in the same commit — so the
-/// re-export is `allow(unused_imports)` for its one-cycle lifetime.)
-#[allow(unused_imports)]
-pub use crate::models::{auth_status_message, parse_auth_status, AUTH_STATUS_PREFIX};
-
 /// Env plumbing shared by the engine submodule tests (`enqueue`, `workers`,
 /// `bootstrap`): the EnvGuard redirects `RUST_HF_DOWNLOADER_DATA_DIR`
 /// (registry path — `HOME` alone does not isolate on Windows, where
