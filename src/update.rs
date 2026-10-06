@@ -46,7 +46,7 @@ pub fn base_url() -> String {
 pub struct Manifest {
     pub version: String,
     /// Manifest metadata kept for schema completeness / future display.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // 2026-10 (R4): serialized in latest.json parsing; display consumer pending
     #[serde(default)]
     pub released_at: Option<String>,
     #[serde(default)]
@@ -190,7 +190,7 @@ impl std::error::Error for UpdateError {}
 /// startup check, phase 2 of plans/self-update.md). The CLI's `run_update`
 /// composes `fetch_manifest` + `manifest_asset` directly because `--force`
 /// needs the asset even when current.
-#[allow(dead_code)]
+#[allow(dead_code)] // 2026-10 (R4): constructed by check(); consumed once an interactive 'update available?' prompt lands
 pub enum CheckOutcome {
     Current {
         current: VersionTriple,
@@ -203,7 +203,7 @@ pub enum CheckOutcome {
     },
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // 2026-10 (R4): exposed for the future `update --check` prompt path; run_update inlines its own fetch today
 pub async fn check(client: &reqwest::Client, base: &str) -> Result<CheckOutcome, UpdateError> {
     let (manifest, latest) = fetch_manifest(client, base).await?;
 

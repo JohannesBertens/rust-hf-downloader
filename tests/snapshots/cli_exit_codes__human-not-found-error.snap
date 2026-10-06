@@ -1,0 +1,5 @@
+---
+source: tests/cli_exit_codes.rs
+expression: normalize(&stderr)
+---
+error [not_found]: failed to fetch model info for x/y: HTTP status client error (404 Not Found) for url (http://127.0.0.1:$PORT/api/models/x/y)

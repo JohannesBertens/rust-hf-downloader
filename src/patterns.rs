@@ -25,7 +25,6 @@
 /// and sharded safetensors in subfolders (`*` crosses `/`). Data table,
 /// not code — when vLLM's own `allow_patterns` drift, this is a one-line
 /// fix.
-#[cfg_attr(not(test), allow(dead_code))] // wired up by the CLI once hf-cache sync lands
 pub const VLLM_ALLOW: &[&str] = &[
     "*.safetensors", // sharded weights, incl. subfolders
     "*.json",        // config.json, tokenizer.json, *.safetensors.index.json, …
@@ -37,7 +36,6 @@ pub const VLLM_ALLOW: &[&str] = &[
 /// Ignore-list patterns for `--for vllm` (plans/hf-cache-sync.md §2.3):
 /// the formats vLLM never reads — fallback weight formats, ONNX exports,
 /// docs, and the untouched `original/` upstream weights.
-#[cfg_attr(not(test), allow(dead_code))] // wired up by the CLI once hf-cache sync lands
 pub const VLLM_IGNORE: &[&str] = &[
     "original/**", // redundant-but-readable next to `*` crossing `/` (§7)
     "*.bin",       // pytorch fallback
@@ -63,7 +61,6 @@ pub const VLLM_IGNORE: &[&str] = &[
 /// compile into a valid regex (e.g. the reversed range `[z-a]`, which
 /// Python rejects at match time with `re.error`) never matches instead of
 /// panicking — patterns arrive from `--include`/`--exclude` argv.
-#[cfg_attr(not(test), allow(dead_code))] // wired up by the CLI once hf-cache sync lands
 pub fn fnmatch(pattern: &str, name: &str) -> bool {
     let anchored = format!(r"(?s)\A{}\z", translate(pattern));
     regex::Regex::new(&anchored).is_ok_and(|re| re.is_match(name))
@@ -78,7 +75,6 @@ pub fn fnmatch(pattern: &str, name: &str) -> bool {
 ///
 /// Matching uses [`fnmatch`] over repo-relative POSIX paths; the input
 /// order is preserved.
-#[cfg_attr(not(test), allow(dead_code))] // wired up by the CLI once hf-cache sync lands
 pub fn filter_paths<'a>(paths: &[&'a str], include: &[String], exclude: &[String]) -> Vec<&'a str> {
     paths
         .iter()

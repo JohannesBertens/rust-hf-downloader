@@ -1,0 +1,61 @@
+---
+source: src/cli/tests.rs
+expression: "long_help(|c| c.find_subcommand_mut(\"download\"))"
+---
+One-shot model download (non-interactive, script/AI-friendly)
+
+Usage: download [OPTIONS] <MODEL_ID>
+
+Arguments:
+  <MODEL_ID>
+          Model ID, e.g. "bartowski/Qwen2.5-7B-GGUF"
+
+Options:
+      --quant <TYPE>
+          Quantization type filter for GGUF models, e.g. Q4_K_M, Q8_0
+
+      --file <PATH>
+          Exact repo-relative file path (repeatable)
+
+      --all
+          Download the entire repository
+
+  -o, --output <DIR>
+          Base output directory [default: config, usually ~/models]
+
+      --token <TOKEN>
+          HuggingFace token [default: $HF_TOKEN, then config]
+
+      --no-verify
+          Skip SHA256 verification
+
+      --json
+          JSON Lines events on stdout (progress included, throttled)
+
+  -q, --quiet
+          Suppress progress output; errors and the final summary only
+
+      --progress <MODE>
+          Progress output mode: auto (tty rewrites), plain (one line every ~10 s, works without a tty), none
+
+          Possible values:
+          - auto:  Single-line `\r` rewrites on a tty; nothing when piped (default)
+          - plain: One newline progress line every ~10 s, tty-independent (for docker run / CI logs); adds a verification heartbeat during the post-download SHA256 drain
+          - none:  No progress output at all
+          
+          [default: auto]
+
+      --rate-limit
+          Enable download rate limiting (uses --rate-limit-mbps or the config-file value)
+
+      --no-rate-limit
+          Disable download rate limiting (overrides the config file)
+
+      --rate-limit-mbps <MBPS>
+          Download rate limit in Mbps (implies --rate-limit)
+
+      --revision <REV>
+          Git revision to download from: branch, tag, or commit SHA [default: main]
+
+  -h, --help
+          Print help (see a summary with '-h')

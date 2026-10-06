@@ -1,0 +1,9 @@
+---
+source: tests/cli_exit_codes.rs
+expression: normalize(&stderr)
+---
+tip: use --for vllm to fetch only what vLLM reads
+1 file(s) to sync for a/b ($N KB total, 0 already cached)
+ + model.gguf ($N KB)
+ ✓ verified: model.gguf
+ ✓ published model.gguf → blobs/8e14743130bb…

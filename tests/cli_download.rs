@@ -11,492 +11,14 @@
 //! The isolated config.toml shrinks `min_chunk_size`/`max_chunk_size` so
 //! small fixtures still exercise the multi-chunk download path.
 
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server, StatusCode};
+mod common;
+
+use common::{
+    assert_exit_code, assert_file_content, event_of, fixture_bytes, json_lines, model, parse_range,
+    sha256_hex, spawn_mock, FileEntry, MockRepo, TestEnv,
+};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
-
-// ---------------------------------------------------------------------------
-// Mock model repo
-// ---------------------------------------------------------------------------
-
-struct FileEntry {
-    path: String,
-    content: Vec<u8>,
-    /// SHA256 advertised in the tree API's LFS metadata (may deliberately
-    /// differ from the actual content to test hash mismatches; None = no LFS
-    /// pointer, i.e. no verification possible).
-    advertised_sha256: Option<String>,
-}
-
-struct MockRepo {
-    model_id: String,
-    files: Vec<FileEntry>,
-    /// Respond 401 to /resolve/ requests (gated repo).
-    gated: bool,
-    /// Respond 404 to /resolve/ requests (forces the /raw/ fallback).
-    resolve_404: bool,
-    /// Sleep once on the first /resolve/ request (timeout/retry test).
-    sleep_once: Option<Duration>,
-    /// Delay before every request (stretches fast local downloads so the
-    /// CLI monitor loop visibly samples progress).
-    per_request_delay: Duration,
-    /// Fixture served for `/api/models` (search endpoint). The search term
-    /// is ignored (full-text matching is the real API's job) but `limit=`
-    /// from the query string is honored, mirroring the upstream contract.
-    search_results: Vec<Value>,
-    /// Extra revisions (branch names, slash-free) this repo serves in
-    /// addition to `main`. When set, `main` serves an EMPTY tree — the
-    /// issue #28 layout where all files live on a branch. Unknown
-    /// revisions 404, like the real Hub.
-    branches: Vec<String>,
-}
-
-impl MockRepo {
-    /// Tree listing for a directory path ("" = repo root), deriving
-    /// directory entries from file paths — mirrors the real API where
-    /// subdir listings carry full paths (`Dynamic/model.gguf`).
-    fn tree_json_for(&self, dir: &str) -> Vec<u8> {
-        let prefix = if dir.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", dir)
-        };
-        let mut entries: Vec<Value> = Vec::new();
-        let mut seen_dirs = std::collections::BTreeSet::new();
-
-        for f in &self.files {
-            if !f.path.starts_with(&prefix) {
-                continue;
-            }
-            let rest = &f.path[prefix.len()..];
-            if let Some(slash) = rest.find('/') {
-                // First-level subdirectory: one directory entry per name
-                let dir_name = &rest[..slash];
-                if seen_dirs.insert(dir_name.to_string()) {
-                    entries.push(json!({
-                        "type": "directory",
-                        "path": format!("{}{}", prefix, dir_name),
-                        "size": 0,
-                    }));
-                }
-            } else {
-                let mut entry = json!({
-                    "type": "file",
-                    "path": f.path,
-                    "size": f.content.len(),
-                });
-                if let Some(oid) = &f.advertised_sha256 {
-                    entry["lfs"] = json!({
-                        "oid": oid,
-                        "size": f.content.len(),
-                        "pointerSize": 136,
-                    });
-                }
-                entries.push(entry);
-            }
-        }
-        serde_json::to_vec(&entries).unwrap()
-    }
-
-    fn tree_json(&self) -> Vec<u8> {
-        self.tree_json_for("")
-    }
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    hex::encode(Sha256::digest(data))
-}
-
-/// Parse a `Range: bytes=start-end` header.
-fn parse_range(value: &str) -> Option<(u64, u64)> {
-    let spec = value.strip_prefix("bytes=")?;
-    let (start, end) = spec.split_once('-')?;
-    Some((start.parse().ok()?, end.parse().ok()?))
-}
-
-async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
-    let path = req.uri().path().to_string();
-
-    // Search endpoint (exact match; /api/models/{id} is the metadata route)
-    if path == "/api/models" {
-        let limit = req
-            .uri()
-            .query()
-            .and_then(|q| q.split('&').find(|p| p.starts_with("limit=")))
-            .and_then(|p| p.split('=').nth(1))
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(100);
-        let results: Vec<Value> = repo.search_results.iter().take(limit).cloned().collect();
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&results).unwrap()))
-            .unwrap();
-    }
-
-    let api_prefix = format!("/api/models/{}", repo.model_id);
-    if path == api_prefix {
-        let body = json!({ "id": repo.model_id });
-        return response_json(StatusCode::OK, &body);
-    }
-    if let Some(rest) = path.strip_prefix(&format!("{}/tree/", api_prefix)) {
-        // rest is "<rev>" or "<rev>/<subdir>" (mock branches are slash-free)
-        let (rev, subdir) = match rest.split_once('/') {
-            Some((rev, subdir)) => (rev, subdir),
-            None => (rest, ""),
-        };
-        let known = rev == "main" || repo.branches.iter().any(|b| b == rev);
-        // With branches configured, main is the empty branch (issue #28)
-        let empty_main = rev == "main" && !repo.branches.is_empty();
-        if !known || empty_main {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
-                .unwrap();
-        }
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "application/json")
-            .body(Body::from(repo.tree_json_for(subdir)))
-            .unwrap();
-    }
-
-    // main plus any configured branch revision (mock branches are slash-free)
-    let mut revisions = vec!["main".to_string()];
-    revisions.extend(repo.branches.iter().cloned());
-
-    let mut file_path: Option<(String, bool)> = None;
-    for rev in &revisions {
-        if let Some(rest) = path.strip_prefix(&format!("/{}/resolve/{}/", repo.model_id, rev)) {
-            file_path = Some((rest.to_string(), false));
-            break;
-        }
-        if let Some(rest) = path.strip_prefix(&format!("/{}/raw/{}/", repo.model_id, rev)) {
-            file_path = Some((rest.to_string(), true));
-            break;
-        }
-    }
-    let (file_path, is_raw) = match file_path {
-        Some(pair) => pair,
-        None => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
-                .unwrap();
-        }
-    };
-
-    if repo.gated && !is_raw {
-        return Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(Body::empty())
-            .unwrap();
-    }
-    if repo.resolve_404 && !is_raw {
-        return Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Body::empty())
-            .unwrap();
-    }
-
-    let entry = match repo.files.iter().find(|f| f.path == file_path) {
-        Some(entry) => entry,
-        None => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Body::empty())
-                .unwrap()
-        }
-    };
-
-    let range = req
-        .headers()
-        .get("range")
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_range);
-
-    let total = entry.content.len() as u64;
-    let (status, body, content_range) = match range {
-        Some((start, end)) => {
-            let end = end.min(total - 1);
-            let slice = entry.content[start as usize..=(end as usize)].to_vec();
-            (
-                StatusCode::PARTIAL_CONTENT,
-                slice,
-                format!("bytes {}-{}/{}", start, end, total),
-            )
-        }
-        None => (StatusCode::OK, entry.content.clone(), String::new()),
-    };
-
-    let mut builder = Response::builder().status(status);
-    if !content_range.is_empty() {
-        builder = builder.header("content-range", content_range);
-    }
-    builder.body(Body::from(body)).unwrap()
-}
-
-fn response_json(status: StatusCode, value: &Value) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(value).unwrap()))
-        .unwrap()
-}
-
-/// Spawn the mock server; returns its base URL (`HF_ENDPOINT` value).
-async fn spawn_mock(repo: MockRepo) -> String {
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
-
-    // One-shot stall flag for the timeout/retry test; extracted before the
-    // repo is frozen behind an Arc.
-    let sleep_once = repo.sleep_once;
-    let repo = Arc::new(repo);
-    let sleep_flag = Arc::new(Mutex::new(sleep_once));
-
-    let make_service = make_service_fn(move |_| {
-        let repo = repo.clone();
-        let sleep_flag = sleep_flag.clone();
-        async move {
-            Ok::<_, hyper::Error>(service_fn(move |req| {
-                let repo = repo.clone();
-                let sleep_flag = sleep_flag.clone();
-                async move {
-                    let is_resolve = req.uri().path().contains("/resolve/main/");
-                    if is_resolve {
-                        let mut guard = sleep_flag.lock().await;
-                        if let Some(delay) = guard.take() {
-                            tokio::time::sleep(delay).await;
-                        }
-                    }
-                    if !repo.per_request_delay.is_zero() {
-                        tokio::time::sleep(repo.per_request_delay).await;
-                    }
-                    Ok::<Response<Body>, hyper::Error>(handle(req, repo).await)
-                }
-            }))
-        }
-    });
-
-    let server = Server::bind(&addr).serve(make_service);
-    let url = format!("http://{}", server.local_addr());
-    tokio::spawn(server);
-    url
-}
-
-// ---------------------------------------------------------------------------
-// Test environment (fake HOME: config + registry + downloads)
-// ---------------------------------------------------------------------------
-
-struct TestEnv {
-    home: PathBuf,
-    endpoint: String,
-}
-
-impl TestEnv {
-    /// Create an isolated HOME with an engine config tuned for small
-    /// fixtures: 1 KiB chunks so a 100 KB file splits into many chunks.
-    fn new(endpoint: &str) -> Self {
-        let home = std::env::temp_dir().join(format!(
-            "hf-cli-e2e-{}-{}",
-            std::process::id(),
-            nanos_suffix()
-        ));
-        std::fs::create_dir_all(home.join("config")).unwrap();
-
-        let config = format!(
-            r#"
-default_directory = '{models_dir}'
-hf_token = ""
-concurrent_threads = 4
-num_chunks = 8
-min_chunk_size = 1024
-max_chunk_size = 4096
-max_retries = 5
-download_timeout_secs = 300
-retry_delay_secs = 0
-progress_update_interval_ms = 50
-verification_on_completion = true
-concurrent_verifications = 2
-verification_buffer_size = 65536
-verification_update_interval = 16
-download_rate_limit_enabled = false
-download_rate_limit_mbps = 50.0
-"#,
-            models_dir = home.join("models").display(),
-        );
-        std::fs::write(home.join("config/config.toml"), config).unwrap();
-
-        Self {
-            home,
-            endpoint: endpoint.to_string(),
-        }
-    }
-
-    /// Override scalar engine options in the child config (timeout/retry tests).
-    fn set(&self, key: &str, value: &str) {
-        let path = self.home.join("config/config.toml");
-        let mut text = std::fs::read_to_string(&path).unwrap();
-        let mut updated = false;
-        text = text
-            .lines()
-            .map(|line| {
-                if line.starts_with(key) {
-                    updated = true;
-                    format!("{} = {}", key, value)
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !updated {
-            text.push_str(&format!("\n{} = {}", key, value));
-        }
-        std::fs::write(&path, text + "\n").unwrap();
-    }
-
-    fn models_dir(&self) -> PathBuf {
-        self.home.join("models")
-    }
-
-    fn registry_toml(&self) -> String {
-        std::fs::read_to_string(self.home.join("models/hf-downloads.toml")).unwrap_or_default()
-    }
-
-    /// Run the real binary headlessly with this environment.
-    async fn run(&self, args: &[&str]) -> (i32, String, String) {
-        let binary = env!("CARGO_BIN_EXE_rust-hf-downloader");
-        let output = tokio::time::timeout(
-            Duration::from_secs(60),
-            tokio::process::Command::new(binary)
-                .args(args)
-                .env("RUST_HF_DOWNLOADER_CONFIG_DIR", self.home.join("config"))
-                .env("RUST_HF_DOWNLOADER_DATA_DIR", self.home.join("models"))
-                .env("HF_ENDPOINT", &self.endpoint)
-                .env_remove("HF_TOKEN")
-                .current_dir(&self.home)
-                .output(),
-        )
-        .await
-        .expect("child timed out")
-        .expect("failed to spawn binary");
-
-        (
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-        )
-    }
-}
-
-impl Drop for TestEnv {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.home);
-    }
-}
-
-/// Unique per-process suffix for test-home directories.
-///
-/// Incident #37 root cause: `SystemTime::as_nanos()` alone COLLIDES when
-/// two tests construct a `TestEnv` in the same clock tick — the tests then
-/// share one home, one test's cleanup deletes the other's downloads
-/// mid-flight (sporadic ENOENT / missing files / clobbered registry),
-/// reproducing only under parallel load. The atomic counter guarantees
-/// in-process uniqueness; the pid covers cross-process runs.
-fn nanos_suffix() -> u128 {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    (nanos << 21) | u128::from(seq) // counter can never collide within the process
-}
-
-fn fixture_bytes(len: usize) -> Vec<u8> {
-    (0..len).map(|i| (i * 31 + 7) as u8).collect()
-}
-
-/// A ModelInfo-shaped fixture for the search endpoint.
-fn model(id: &str, downloads: u64, likes: u64) -> Value {
-    json!({
-        "id": id,
-        "author": id.split('/').next(),
-        "downloads": downloads,
-        "likes": likes,
-        "tags": [],
-        "lastModified": "2026-08-14T10:00:00Z",
-    })
-}
-
-/// Parse stdout into NDJSON events; panics on any non-JSON line.
-fn json_lines(stdout: &str) -> Vec<Value> {
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str(line).unwrap_or_else(|e| panic!("bad JSON {:?}: {}", line, e))
-        })
-        .collect()
-}
-
-/// Assert the child's exit code, dumping BOTH streams on failure.
-///
-/// Incident #37: the Windows-only flake produced exit 1 with empty stderr
-/// because JSON-mode error events go to stdout — asserts that only printed
-/// stderr were blind.
-fn assert_exit_code(code: i32, expected: i32, stdout: &str, stderr: &str) {
-    assert_eq!(
-        code, expected,
-        "exit {code} != {expected}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
-    );
-}
-
-/// Find the first event of `ty`, dumping every event type present (plus the
-/// raw stdout) on failure. Incident #37: bare `.unwrap()` on the find
-/// printed nothing, hiding whether e.g. a `verification_error` (file
-/// reported missing) replaced the expected `verification_result`.
-fn event_of<'a>(events: &'a [Value], ty: &str, stdout: &str) -> &'a Value {
-    events.iter().find(|e| e["type"] == ty).unwrap_or_else(|| {
-        let present: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
-        panic!("no {ty:?} event; event types present: {present:?}\n--- stdout ---\n{stdout}")
-    })
-}
-
-fn assert_file_content(path: &Path, expected: &[u8]) {
-    let actual = std::fs::read(path).unwrap_or_else(|e| {
-        // Incident #37 diagnostics: list the directory so a missing file is
-        // distinguishable from a renamed-elsewhere file (e.g. an orphaned
-        // `.incomplete` sibling).
-        let mut siblings = Vec::new();
-        if let Some(parent) = path.parent() {
-            if let Ok(dir) = std::fs::read_dir(parent) {
-                siblings.extend(dir.flatten().map(|d| d.path().display().to_string()));
-            }
-        }
-        panic!(
-            "read {}: {}\ndirectory contents of {}: {:?}",
-            path.display(),
-            e,
-            path.parent()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-            siblings
-        )
-    });
-    assert_eq!(
-        actual,
-        expected,
-        "file content mismatch at {}",
-        path.display()
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -513,14 +35,17 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         files: vec![FileEntry {
             path: "model-Q4_K_M.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::from_millis(10),
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -563,14 +88,17 @@ async fn human_mode_summary_on_stdout() {
         files: vec![FileEntry {
             path: "only.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -605,14 +133,17 @@ async fn already_exists_skips_download_and_verifies() {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -645,14 +176,17 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(wrong.clone()),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -685,14 +219,17 @@ async fn gated_repo_exits_two() {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: None,
+            advertised_size: None,
             content,
         }],
         gated: true,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -716,20 +253,24 @@ async fn ambiguous_selector_exits_64_with_available_list() {
             FileEntry {
                 path: "model-Q4_K_M.gguf".to_string(),
                 advertised_sha256: None,
+                advertised_size: None,
                 content: fixture_bytes(10),
             },
             FileEntry {
                 path: "model-Q8_0.gguf".to_string(),
                 advertised_sha256: None,
+                advertised_size: None,
                 content: fixture_bytes(20),
             },
         ],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -757,20 +298,24 @@ async fn quant_selector_downloads_only_that_quantization() {
             FileEntry {
                 path: "model-Q4_K_M.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&q4)),
+                advertised_size: None,
                 content: q4.clone(),
             },
             FileEntry {
                 path: "model-Q8_0.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&q8)),
+                advertised_size: None,
                 content: q8.clone(),
             },
         ],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -798,20 +343,24 @@ async fn all_selector_downloads_every_file() {
             FileEntry {
                 path: "one.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&one)),
+                advertised_size: None,
                 content: one.clone(),
             },
             FileEntry {
                 path: "two.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&two)),
+                advertised_size: None,
                 content: two.clone(),
             },
         ],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -836,15 +385,18 @@ async fn transient_timeout_is_retried() {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         // First resolve request stalls 3s; client timeout is 1s (below)
         sleep_once: Some(Duration::from_secs(3)),
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -868,14 +420,17 @@ async fn no_verify_skips_verification_events() {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -913,14 +468,17 @@ async fn raw_endpoint_fallback_after_resolve_404() {
             path: "model.gguf".to_string(),
             // no LFS pointer: nothing to verify anyway
             advertised_sha256: None,
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: true,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -950,14 +508,17 @@ async fn revision_flag_downloads_from_branch() {
         files: vec![FileEntry {
             path: "model-2.0bpw.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1007,14 +568,17 @@ async fn revision_default_main_empty_exits_64() {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
             content: content.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1034,11 +598,13 @@ async fn revision_unknown_branch_exits_64() {
         model_id: "a/b".to_string(),
         files: vec![],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1064,11 +630,13 @@ async fn usage_errors_exit_64() {
         model_id: "a/b".to_string(),
         files: vec![],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
     let env = TestEnv::new(&endpoint);
@@ -1113,9 +681,11 @@ fn search_repo() -> MockRepo {
         files: vec![FileEntry {
             path: "model.gguf".to_string(),
             advertised_sha256: None,
+            advertised_size: None,
             content: fixture_bytes(10),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
@@ -1125,6 +695,7 @@ fn search_repo() -> MockRepo {
             model("mid/obscure-model", 50, 0),
         ],
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     }
 }
 
@@ -1274,25 +845,30 @@ async fn nested_subdirectory_files_download_and_verify() {
             FileEntry {
                 path: "README.md".to_string(),
                 advertised_sha256: None,
+                advertised_size: None,
                 content: b"# readme".to_vec(),
             },
             FileEntry {
                 path: "Dynamic/model.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&weights)),
+                advertised_size: None,
                 content: weights.clone(),
             },
             FileEntry {
                 path: "Dynamic/mmproj-model.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mmproj)),
+                advertised_size: None,
                 content: mmproj.clone(),
             },
         ],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1371,30 +947,36 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
             FileEntry {
                 path: "model.Q8_0.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&weights)),
+                advertised_size: None,
                 content: weights.clone(),
             },
             FileEntry {
                 path: "model.mmproj-Q8_0.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mmproj)),
+                advertised_size: None,
                 content: mmproj.clone(),
             },
             FileEntry {
                 path: "model.mxfp4_moe-00001-of-00002.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mxfp4_p1)),
+                advertised_size: None,
                 content: mxfp4_p1.clone(),
             },
             FileEntry {
                 path: "model.mxfp4_moe-00002-of-00002.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mxfp4_p2)),
+                advertised_size: None,
                 content: mxfp4_p2.clone(),
             },
         ],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         per_request_delay: Duration::ZERO,
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1456,15 +1038,18 @@ async fn download_progress_plain_prints_lines_without_tty() {
             FileEntry {
                 path: "one.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&one)),
+                advertised_size: None,
                 content: one.clone(),
             },
             FileEntry {
                 path: "two.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&two)),
+                advertised_size: None,
                 content: two.clone(),
             },
         ],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         // Slow requests keep file 1 in flight across the monitor's first
@@ -1472,6 +1057,7 @@ async fn download_progress_plain_prints_lines_without_tty() {
         per_request_delay: Duration::from_millis(250),
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 
@@ -1530,9 +1116,11 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
         files: vec![FileEntry {
             path: "one.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&one)),
+            advertised_size: None,
             content: one.clone(),
         }],
         gated: false,
+        fail_status_after_first_range: None,
         resolve_404: false,
         sleep_once: None,
         // Keeps the file in flight across the monitor's 400 ms poll tick so
@@ -1540,6 +1128,7 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
         per_request_delay: Duration::from_millis(250),
         search_results: Vec::new(),
         branches: Vec::new(),
+        range_scripts: Vec::new(),
     })
     .await;
 

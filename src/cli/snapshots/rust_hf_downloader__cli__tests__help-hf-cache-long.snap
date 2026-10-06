@@ -1,0 +1,16 @@
+---
+source: src/cli/tests.rs
+expression: "long_help(|c| c.find_subcommand_mut(\"hf-cache\"))"
+---
+Populate the HuggingFace hub cache for offline serving (vLLM, transformers)
+
+Usage: hf-cache <COMMAND>
+
+Commands:
+  sync  Populate the real HuggingFace hub cache (~/.cache/huggingface/hub) so vLLM/transformers/`hf download` find a revision-pinned snapshot with zero network calls
+  path  Print the snapshot path for a model/revision (refs/ lookup with an online fallback; scripting helper)
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help
+          Print help

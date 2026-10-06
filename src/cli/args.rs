@@ -131,6 +131,60 @@ impl From<&crate::models::ModelInfo> for ModelDto {
     }
 }
 
+/// Shared run-output flag block (W4.1): the identical `token` /
+/// `no_verify` / `json` / `quiet` / `progress` flags on `download` and
+/// `hf-cache sync`, extracted so the two surfaces cannot drift. Flattened
+/// at the exact position the flags used to occupy — clap's display-order
+/// counter runs across the flatten boundary, so each command's `--help`
+/// byte-stays identical (H2 snapshots enforce this).
+#[derive(Args, Debug)]
+pub struct RunOutputArgs {
+    /// HuggingFace token [default: $HF_TOKEN, then config]
+    #[arg(long, value_name = "TOKEN")]
+    pub token: Option<String>,
+
+    /// Skip SHA256 verification
+    #[arg(long)]
+    pub no_verify: bool,
+
+    /// JSON Lines events on stdout (progress included, throttled)
+    #[arg(long)]
+    pub json: bool,
+
+    /// Suppress progress output; errors and the final summary only
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Progress output mode: auto (tty rewrites), plain (one line every
+    /// ~10 s, works without a tty), none
+    #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
+    pub progress: ProgressMode,
+}
+
+/// Shared rate-limit flag block (W4.1): `rate_limit` / `no_rate_limit` /
+/// `rate_limit_mbps` with their conflicts, extracted from `download` and
+/// `hf-cache sync`. Same flatten-position rule as [`RunOutputArgs`].
+#[derive(Args, Debug)]
+pub struct RateLimitArgs {
+    /// Enable download rate limiting (uses --rate-limit-mbps or the
+    /// config-file value)
+    #[arg(long, conflicts_with = "no_rate_limit")]
+    pub rate_limit: bool,
+
+    /// Disable download rate limiting (overrides the config file)
+    #[arg(long)]
+    pub no_rate_limit: bool,
+
+    /// Download rate limit in Mbps (implies --rate-limit)
+    #[arg(
+        long,
+        value_name = "MBPS",
+        value_parser = parse_rate_limit_mbps,
+        conflicts_with = "no_rate_limit"
+    )]
+    pub rate_limit_mbps: Option<f64>,
+}
+
 #[derive(Args, Debug)]
 pub struct DownloadArgs {
     /// Model ID, e.g. "bartowski/Qwen2.5-7B-GGUF"
@@ -153,44 +207,11 @@ pub struct DownloadArgs {
     #[arg(short, long, value_name = "DIR")]
     pub output: Option<String>,
 
-    /// HuggingFace token [default: $HF_TOKEN, then config]
-    #[arg(long, value_name = "TOKEN")]
-    pub token: Option<String>,
+    #[command(flatten)]
+    pub run_output: RunOutputArgs,
 
-    /// Skip SHA256 verification
-    #[arg(long)]
-    pub no_verify: bool,
-
-    /// JSON Lines events on stdout (progress included, throttled)
-    #[arg(long)]
-    pub json: bool,
-
-    /// Suppress progress output; errors and the final summary only
-    #[arg(short, long)]
-    pub quiet: bool,
-
-    /// Progress output mode: auto (tty rewrites), plain (one line every
-    /// ~10 s, works without a tty), none
-    #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
-    pub progress: ProgressMode,
-
-    /// Enable download rate limiting (uses --rate-limit-mbps or the
-    /// config-file value)
-    #[arg(long, conflicts_with = "no_rate_limit")]
-    pub rate_limit: bool,
-
-    /// Disable download rate limiting (overrides the config file)
-    #[arg(long)]
-    pub no_rate_limit: bool,
-
-    /// Download rate limit in Mbps (implies --rate-limit)
-    #[arg(
-        long,
-        value_name = "MBPS",
-        value_parser = parse_rate_limit_mbps,
-        conflicts_with = "no_rate_limit"
-    )]
-    pub rate_limit_mbps: Option<f64>,
+    #[command(flatten)]
+    pub rate_limits: RateLimitArgs,
 
     /// Git revision to download from: branch, tag, or commit SHA
     /// [default: main]
@@ -265,44 +286,11 @@ pub struct HfCacheSyncArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// HuggingFace token [default: $HF_TOKEN, then config]
-    #[arg(long, value_name = "TOKEN")]
-    pub token: Option<String>,
+    #[command(flatten)]
+    pub run_output: RunOutputArgs,
 
-    /// Skip SHA256 verification
-    #[arg(long)]
-    pub no_verify: bool,
-
-    /// JSON Lines events on stdout (progress included, throttled)
-    #[arg(long)]
-    pub json: bool,
-
-    /// Suppress progress output; errors and the final summary only
-    #[arg(short, long)]
-    pub quiet: bool,
-
-    /// Progress output mode: auto (tty rewrites), plain (one line every
-    /// ~10 s, works without a tty), none
-    #[arg(long, value_enum, default_value_t = ProgressMode::Auto, value_name = "MODE")]
-    pub progress: ProgressMode,
-
-    /// Enable download rate limiting (uses --rate-limit-mbps or the
-    /// config-file value)
-    #[arg(long, conflicts_with = "no_rate_limit")]
-    pub rate_limit: bool,
-
-    /// Disable download rate limiting (overrides the config file)
-    #[arg(long)]
-    pub no_rate_limit: bool,
-
-    /// Download rate limit in Mbps (implies --rate-limit)
-    #[arg(
-        long,
-        value_name = "MBPS",
-        value_parser = parse_rate_limit_mbps,
-        conflicts_with = "no_rate_limit"
-    )]
-    pub rate_limit_mbps: Option<f64>,
+    #[command(flatten)]
+    pub rate_limits: RateLimitArgs,
 }
 
 #[derive(Args, Debug)]
@@ -338,7 +326,7 @@ fn parse_preset(s: &str) -> Result<String, String> {
 }
 
 /// Token precedence: `--token` flag → `$HF_TOKEN` env → config file.
-pub fn merge_token(
+pub(super) fn merge_token(
     flag: Option<String>,
     env: Option<String>,
     file: Option<String>,
@@ -366,7 +354,7 @@ pub(super) fn parse_rate_limit_mbps(s: &str) -> Result<f64, String> {
 /// pipeline use without a config file). Explicit flags win over the config
 /// file; `--no-rate-limit` wins over `--rate-limit`; `--rate-limit-mbps`
 /// implies enabling.
-pub fn apply_rate_limit_overrides(
+pub(super) fn apply_rate_limit_overrides(
     options: &mut crate::models::AppOptions,
     rate_limit: bool,
     no_rate_limit: bool,
@@ -404,7 +392,7 @@ pub(super) fn parse_revision(s: &str) -> Result<String, String> {
 }
 
 /// A model ID must be exactly `author/name` with non-empty parts.
-pub fn valid_model_id(model_id: &str) -> bool {
+pub(super) fn valid_model_id(model_id: &str) -> bool {
     let parts: Vec<&str> = model_id.split('/').collect();
     parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty()
 }

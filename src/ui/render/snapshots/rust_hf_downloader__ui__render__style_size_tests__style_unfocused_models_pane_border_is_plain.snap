@@ -1,0 +1,22 @@
+---
+source: src/ui/render.rs
+expression: signature
+---
+y0: 0..99 fg=Cyan
+y1: 0 fg=Cyan | 1..6 fg=DarkGray | 7..17 fg=White,mod=BOLD | 18..22 fg=Cyan | 23..37 fg=DarkGray | 38 fg=White | 39..43 fg=Cyan | 44..54 fg=DarkGray | 55 fg=White | 56..60 fg=Cyan | 61..72 fg=Green,mod=BOLD | 73..91 fg=Cyan | 92..98 fg=DarkGray | 99 fg=Cyan
+y2: 0..99 fg=Cyan
+y4: 1..5 fg=DarkGray | 6..28 fg=Cyan,mod=BOLD | 33..42 fg=Green | 56..68 fg=Cyan | 69..93 fg=Yellow
+y5: 1..5 fg=DarkGray | 6..30 fg=Cyan,mod=BOLD | 35..43 fg=Green | 58..75 fg=Yellow
+y6: 1..5 fg=DarkGray | 6..36 fg=Cyan,mod=BOLD | 41..44 fg=Green | 57..69 fg=Cyan
+y14: 50..99 fg=Yellow
+y15: 1..15 bg=DarkGray,mod=BOLD | 16..30 fg=Cyan,bg=DarkGray,mod=BOLD | 31..40 fg=DarkGray,bg=DarkGray,mod=BOLD | 41..48 bg=DarkGray,mod=BOLD | 50 fg=Yellow | 51..65 bg=DarkGray,mod=BOLD | 66..89 fg=White,bg=DarkGray,mod=BOLD | 90..98 bg=DarkGray,mod=BOLD | 99 fg=Yellow
+y16: 16..30 fg=Cyan,mod=BOLD | 50 fg=Yellow | 66..98 fg=White | 99 fg=Yellow
+y17: 50 fg=Yellow | 99 fg=Yellow
+y18: 50 fg=Yellow | 99 fg=Yellow
+y19: 50 fg=Yellow | 99 fg=Yellow
+y20: 50 fg=Yellow | 99 fg=Yellow
+y21: 50 fg=Yellow | 99 fg=Yellow
+y22: 50 fg=Yellow | 99 fg=Yellow
+y23: 50 fg=Yellow | 99 fg=Yellow
+y24: 50 fg=Yellow | 99 fg=Yellow
+y25: 50..99 fg=Yellow

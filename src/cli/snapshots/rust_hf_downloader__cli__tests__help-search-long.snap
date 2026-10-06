@@ -1,0 +1,42 @@
+---
+source: src/cli/tests.rs
+expression: "long_help(|c| c.find_subcommand_mut(\"search\"))"
+---
+Search HuggingFace models (query-only; prints a table or a JSON array)
+
+Usage: search [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>
+          Search query, e.g. "qwen 2.5 gguf"
+
+Options:
+      --sort <SORT>
+          Sort field [default: config default_sort_field]
+          
+          [possible values: downloads, likes, modified, name]
+
+      --direction <DIRECTION>
+          Sort direction [default: config default_sort_direction]
+          
+          [possible values: ascending, descending]
+
+      --min-downloads <N>
+          Minimum downloads filter (applied client-side)
+
+      --min-likes <N>
+          Minimum likes filter (applied client-side)
+
+      --limit <LIMIT>
+          Maximum number of results (1-500)
+          
+          [default: 100]
+
+      --token <TOKEN>
+          HuggingFace token [default: $HF_TOKEN, then config]
+
+      --json
+          One JSON array on stdout (queries emit a document, not NDJSON events)
+
+  -h, --help
+          Print help

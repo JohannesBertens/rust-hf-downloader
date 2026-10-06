@@ -2,7 +2,7 @@
 
 use super::args::UpdateArgs;
 use super::{EXIT_CHECKSUM, EXIT_FAILURE, EXIT_OK, EXIT_UPDATE_AVAILABLE};
-use crate::utils::format_size;
+use crate::fmt::size_full;
 use serde::Serialize;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
@@ -154,11 +154,11 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
             if total > 0 {
                 eprint!(
                     "\r  downloading… {} / {} ({percent:.0}%)",
-                    format_size(downloaded),
-                    format_size(total)
+                    size_full(downloaded),
+                    size_full(total)
                 );
             } else {
-                eprint!("\r  downloading… {}", format_size(downloaded));
+                eprint!("\r  downloading… {}", size_full(downloaded));
             }
             let _ = std::io::stderr().flush();
         }

@@ -1,17 +1,15 @@
+//! Configuration persistence: load/save [`AppOptions`] as TOML at the
+//! canonical config path (`crate::paths::config_path()` — writes must
+//! always use that path; reads go through
+//! `crate::paths::read_config_path()` to honour the legacy layout), plus
+//! `apply_options` to push engine tuning into the shared atomics.
+
 use crate::models::AppOptions;
 use std::fs;
-use std::path::PathBuf;
-
-/// Get the canonical path to the configuration file.
-/// Writes must always use this path; reads go through
-/// [`crate::paths::read_config_path`] to honour the legacy layout.
-pub fn get_config_path() -> PathBuf {
-    crate::paths::config_path()
-}
 
 /// Ensure the config directory exists
 fn ensure_config_dir() -> Result<(), std::io::Error> {
-    let config_path = get_config_path();
+    let config_path = crate::paths::config_path();
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -52,7 +50,7 @@ pub fn save_config(options: &AppOptions) -> Result<(), Box<dyn std::error::Error
     ensure_config_dir()?;
 
     let toml_string = toml::to_string_pretty(options)?;
-    fs::write(get_config_path(), toml_string)?;
+    fs::write(crate::paths::config_path(), toml_string)?;
 
     Ok(())
 }
@@ -123,6 +121,89 @@ pub fn apply_options(options: &AppOptions) {
         .store(options.verification_update_interval, Ordering::Relaxed);
 }
 
+/// Test-only snapshot of every engine-global atomic `apply_options`
+/// writes, so tests that legitimately drive the full production
+/// bootstrap (`run::load_run_config`'s `apply_options` tail, the TUI's
+/// `modify_option`→save path) can restore the pre-test values on the way
+/// out — cargo runs unit tests as parallel threads of one process, and
+/// the globals are shared. Callers must also serialize against tests
+/// that mutate these atomics mid-flight (the crate-wide `ENV_MUTEX`
+/// convention; see the T1/W-final test-hardening notes in `cli::tests`).
+#[cfg(test)]
+pub(crate) struct EngineGlobalsSnapshot {
+    concurrent_threads: usize,
+    target_chunks: usize,
+    min_chunk_size: u64,
+    max_chunk_size: u64,
+    enable_verification: bool,
+    max_retries: u32,
+    download_timeout_secs: u64,
+    retry_delay_secs: u64,
+    progress_update_interval_ms: u64,
+    rate_limit_enabled: bool,
+    rate_limit_bytes_per_sec: u64,
+    concurrent_verifications: usize,
+    verification_buffer_size: usize,
+    verification_update_interval: usize,
+}
+
+#[cfg(test)]
+impl EngineGlobalsSnapshot {
+    pub(crate) fn capture() -> Self {
+        use std::sync::atomic::Ordering;
+        let d = &crate::download::DOWNLOAD_CONFIG;
+        let v = &crate::verification::VERIFICATION_CONFIG;
+        Self {
+            concurrent_threads: d.concurrent_threads.load(Ordering::Relaxed),
+            target_chunks: d.target_chunks.load(Ordering::Relaxed),
+            min_chunk_size: d.min_chunk_size.load(Ordering::Relaxed),
+            max_chunk_size: d.max_chunk_size.load(Ordering::Relaxed),
+            enable_verification: d.enable_verification.load(Ordering::Relaxed),
+            max_retries: d.max_retries.load(Ordering::Relaxed),
+            download_timeout_secs: d.download_timeout_secs.load(Ordering::Relaxed),
+            retry_delay_secs: d.retry_delay_secs.load(Ordering::Relaxed),
+            progress_update_interval_ms: d.progress_update_interval_ms.load(Ordering::Relaxed),
+            rate_limit_enabled: d.rate_limit_enabled.load(Ordering::Relaxed),
+            rate_limit_bytes_per_sec: d.rate_limit_bytes_per_sec.load(Ordering::Relaxed),
+            concurrent_verifications: v.concurrent_verifications.load(Ordering::Relaxed),
+            verification_buffer_size: v.buffer_size.load(Ordering::Relaxed),
+            verification_update_interval: v.update_interval_iterations.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn restore(self) {
+        use std::sync::atomic::Ordering;
+        let d = &crate::download::DOWNLOAD_CONFIG;
+        let v = &crate::verification::VERIFICATION_CONFIG;
+        d.concurrent_threads
+            .store(self.concurrent_threads, Ordering::Relaxed);
+        d.target_chunks.store(self.target_chunks, Ordering::Relaxed);
+        d.min_chunk_size
+            .store(self.min_chunk_size, Ordering::Relaxed);
+        d.max_chunk_size
+            .store(self.max_chunk_size, Ordering::Relaxed);
+        d.enable_verification
+            .store(self.enable_verification, Ordering::Relaxed);
+        d.max_retries.store(self.max_retries, Ordering::Relaxed);
+        d.download_timeout_secs
+            .store(self.download_timeout_secs, Ordering::Relaxed);
+        d.retry_delay_secs
+            .store(self.retry_delay_secs, Ordering::Relaxed);
+        d.progress_update_interval_ms
+            .store(self.progress_update_interval_ms, Ordering::Relaxed);
+        d.rate_limit_enabled
+            .store(self.rate_limit_enabled, Ordering::Relaxed);
+        d.rate_limit_bytes_per_sec
+            .store(self.rate_limit_bytes_per_sec, Ordering::Relaxed);
+        v.concurrent_verifications
+            .store(self.concurrent_verifications, Ordering::Relaxed);
+        v.buffer_size
+            .store(self.verification_buffer_size, Ordering::Relaxed);
+        v.update_interval_iterations
+            .store(self.verification_update_interval, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,7 +213,7 @@ mod tests {
         let _guard = crate::paths::ENV_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let path = get_config_path();
+        let path = crate::paths::config_path();
         // Separator-agnostic assertions (would fail on Windows if built
         // with hardcoded '/' separators).
         assert_eq!(

@@ -27,6 +27,10 @@
 //! `HF_HUB_CACHE` / `HF_HOME`) so the cache we write is interchangeable
 //! with the Python client's, regardless of where this app keeps its own
 //! config and data.
+//!
+//! Path *security* policy — sanitizing user-supplied path components and
+//! the traversal-checked final-path builder — lives in the [`sanitize`]
+//! submodule.
 
 use std::path::{Path, PathBuf};
 
@@ -306,6 +310,419 @@ pub fn write_cachedir_tag(cache_root: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&tag, CACHEDIR_TAG_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Path-security policy
+//
+
+/// Path-security policy for everything a user or the Hub can influence in
+/// a filesystem path: per-component sanitization
+/// ([`sanitize_path_component`], including Windows reserved-name and
+/// illegal-character rejection) and the containment-checked
+/// [`validate_and_sanitize_path`] driver built on it. Every download path
+/// is constructed through this module; its [`sanitize::PathError`]
+/// messages are user-visible (status messages, CLI error events) and must
+/// stay byte-identical — the `Display` strings are pinned by golden
+/// tests.
+pub mod sanitize {
+    use std::fmt;
+    use std::path::PathBuf;
+
+    /// Typed validation error for [`validate_and_sanitize_path`]. The
+    /// `Display` strings are the exact historical `String` messages
+    /// (user-visible in TUI status/error lines and CLI `InvalidPath`
+    /// events) — pinned verbatim by the golden tests below; changing a
+    /// variant's wording is an observable-behavior change.
+    #[derive(Debug)]
+    pub enum PathError {
+        /// The current working directory could not be resolved for a
+        /// relative base path.
+        CurrentDirectory(std::io::Error),
+        /// The (existing) base path could not be canonicalized.
+        InvalidBase(std::io::Error),
+        /// Model ID is not exactly `author/model-name`.
+        InvalidModelId(String),
+        /// The author component of the model ID failed sanitization.
+        InvalidAuthor(String),
+        /// The model-name component of the model ID failed sanitization.
+        InvalidModelName(String),
+        /// A `/`-separated component of the filename failed sanitization.
+        InvalidFilenameComponent(String),
+        /// The sanitized final path resolves outside the base directory.
+        TraversalFinalEscape,
+        /// The first existing ancestor of the final path resolves outside
+        /// the base directory (and is not an ancestor of it).
+        TraversalParentEscape,
+    }
+
+    impl fmt::Display for PathError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                PathError::CurrentDirectory(e) => {
+                    write!(f, "Cannot determine current directory: {}", e)
+                }
+                PathError::InvalidBase(e) => write!(f, "Invalid base path: {}", e),
+                PathError::InvalidModelId(id) => write!(f, "Invalid model ID format: {}", id),
+                PathError::InvalidAuthor(author) => {
+                    write!(f, "Invalid author in model ID: {}", author)
+                }
+                PathError::InvalidModelName(name) => {
+                    write!(f, "Invalid model name in model ID: {}", name)
+                }
+                PathError::InvalidFilenameComponent(part) => {
+                    write!(f, "Invalid filename component: {}", part)
+                }
+                PathError::TraversalFinalEscape => {
+                    write!(
+                        f,
+                        "Path traversal detected: final path escapes base directory"
+                    )
+                }
+                PathError::TraversalParentEscape => {
+                    write!(
+                        f,
+                        "Path traversal detected: parent path escapes base directory"
+                    )
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for PathError {}
+
+    pub fn sanitize_path_component(component: &str) -> Option<String> {
+        // Reject path components that contain path traversal or are invalid
+        if component.is_empty()
+            || component == "."
+            || component == ".."
+            || component.contains('/')
+            || component.contains('\\')
+            || component.contains('\0')
+        {
+            return None;
+        }
+
+        // Reject any ASCII control character (0x00-0x1F, 0x7F) and the
+        // Windows-illegal characters `< > : " | ? *`. Rejecting these on all
+        // platforms keeps behaviour consistent across Unix and Windows; they
+        // never occur in real HuggingFace file names.
+        if component
+            .chars()
+            .any(|c| c.is_ascii_control() || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        {
+            return None;
+        }
+
+        // Remove leading/trailing whitespace, but preserve leading dots (for dotfiles like .gitattributes)
+        // Only trim trailing dots (can cause issues on Windows)
+        let trimmed = component.trim().trim_end_matches('.');
+
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        // Reject Windows reserved device names, case-insensitive, with or
+        // without a file extension (e.g. `CON`, `con.txt`, `LPT3.gguf` are all
+        // reserved). Opening such names on Windows can target a device or hang
+        // legacy I/O; rejecting them on every platform is safe — they are not
+        // used by real HuggingFace model files.
+        const RESERVED: &[&str] = &[
+            "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+            "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+        ];
+        let stem = trimmed
+            .split('.')
+            .next()
+            .unwrap_or(trimmed)
+            .to_ascii_lowercase();
+        if RESERVED.contains(&stem.as_str()) {
+            return None;
+        }
+
+        Some(trimmed.to_string())
+    }
+
+    /// Canonicalized nearest existing ancestor of `path` (path itself excluded).
+    /// Used to keep containment checks symlink-consistent when the base
+    /// directory does not exist yet (e.g. a first download into ~/models).
+    fn nearest_existing_ancestor(path: &std::path::Path) -> Option<PathBuf> {
+        let mut current = path;
+        loop {
+            let parent = current.parent()?;
+            if parent.as_os_str().is_empty() {
+                return None;
+            }
+            if let Ok(canonical) = parent.canonicalize() {
+                return Some(canonical);
+            }
+            current = parent;
+        }
+    }
+
+    pub fn validate_and_sanitize_path(
+        base_path: &str,
+        model_id: &str,
+        filename: &str,
+    ) -> Result<PathBuf, PathError> {
+        // Validate base path (relative paths resolve against the current dir,
+        // preserving the previous behavior)
+        let mut base = PathBuf::from(base_path);
+        if !base.is_absolute() {
+            base = std::env::current_dir()
+                .map_err(PathError::CurrentDirectory)?
+                .join(&base);
+        }
+
+        // Canonicalize base path if it exists; otherwise resolve to its nearest
+        // existing ancestor so the containment checks below stay correct (and
+        // symlink-consistent) for a not-yet-created base directory.
+        let canonical_base = if base.exists() {
+            base.canonicalize().map_err(PathError::InvalidBase)?
+        } else {
+            match nearest_existing_ancestor(&base) {
+                Some(ancestor) => ancestor,
+                None => base.clone(),
+            }
+        };
+
+        // Validate and sanitize model_id (format: "author/model-name")
+        let model_parts: Vec<&str> = model_id.split('/').collect();
+        if model_parts.len() != 2 {
+            return Err(PathError::InvalidModelId(model_id.to_string()));
+        }
+
+        let author = sanitize_path_component(model_parts[0])
+            .ok_or_else(|| PathError::InvalidAuthor(model_parts[0].to_string()))?;
+        let model_name = sanitize_path_component(model_parts[1])
+            .ok_or_else(|| PathError::InvalidModelName(model_parts[1].to_string()))?;
+
+        // Validate and sanitize filename - may contain subdirectory (e.g., "Q4_K_M/file.gguf")
+        let filename_parts: Vec<&str> = filename.split('/').collect();
+        let mut sanitized_filename_parts = Vec::new();
+
+        for part in filename_parts {
+            let sanitized = sanitize_path_component(part)
+                .ok_or_else(|| PathError::InvalidFilenameComponent(part.to_string()))?;
+            sanitized_filename_parts.push(sanitized);
+        }
+
+        // Build the final path: base/author/model_name/[subdir/]filename.
+        // Built from the *original* base, not the canonical anchor, so a
+        // not-yet-created base directory keeps its place in the result.
+        let mut final_path = base.join(&author).join(&model_name);
+        for part in sanitized_filename_parts {
+            final_path = final_path.join(&part);
+        }
+
+        // Final safety check: ensure the resulting path is still under the base directory
+        if let Ok(canonical_final) = final_path.canonicalize() {
+            if !canonical_final.starts_with(&canonical_base) {
+                return Err(PathError::TraversalFinalEscape);
+            }
+        } else {
+            // File doesn't exist yet, check parent directories. The first
+            // existing ancestor of the final path must be under the base — or an
+            // *ancestor of* the base, which is the normal first-download case
+            // where the base directory has not been created yet (no symlink can
+            // exist under a nonexistent path, so containment still holds).
+            let mut check_path = final_path.clone();
+            while let Some(parent) = check_path.parent() {
+                if parent.exists() {
+                    if let Ok(canonical_parent) = parent.canonicalize() {
+                        if !canonical_parent.starts_with(&canonical_base)
+                            && !canonical_base.starts_with(&canonical_parent)
+                        {
+                            return Err(PathError::TraversalParentEscape);
+                        }
+                    }
+                    break;
+                }
+                check_path = parent.to_path_buf();
+            }
+        }
+
+        Ok(final_path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn sanitize_accepts_normal_components() {
+            assert_eq!(
+                sanitize_path_component("Qwen3.5-27B-Q8_0.gguf"),
+                Some("Qwen3.5-27B-Q8_0.gguf".to_string())
+            );
+            assert_eq!(
+                sanitize_path_component(".gitattributes"),
+                Some(".gitattributes".to_string())
+            );
+            assert_eq!(
+                sanitize_path_component("dir v2"),
+                Some("dir v2".to_string())
+            );
+        }
+
+        #[test]
+        fn sanitize_rejects_windows_illegal_characters() {
+            for bad in ["a<b", "a>b", "a:b", "a\"b", "a|b", "a?b", "a*b"] {
+                assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+            }
+        }
+
+        #[test]
+        fn sanitize_rejects_control_characters() {
+            for bad in ["a\nb", "a\tb", "a\u{1b}b", "a\u{7f}"] {
+                assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+            }
+        }
+
+        #[test]
+        fn sanitize_rejects_windows_reserved_device_names() {
+            for bad in [
+                "CON",
+                "con",
+                "con.txt",
+                "LPT3.gguf",
+                "aux",
+                "NUL",
+                "com7.safetensors",
+            ] {
+                assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+            }
+            // Stem-based check must not reject similar-but-fine names.
+            assert!(sanitize_path_component("config.json").is_some());
+            assert!(sanitize_path_component("console.log").is_some());
+            assert!(sanitize_path_component("nul-pre-check.json").is_some());
+        }
+
+        #[test]
+        fn sanitize_rejects_traversal_and_empty() {
+            for bad in ["", ".", "..", "a/b", "a\\\\b", "a\0b", "   ", "..."] {
+                assert!(sanitize_path_component(bad).is_none(), "accepted {bad:?}");
+            }
+        }
+
+        #[test]
+        fn validate_accepts_not_yet_created_base_directory() {
+            // Regression: a first-ever download into a fresh base directory was
+            // falsely rejected as path traversal (the parent-walk found an
+            // ancestor OF the base, which is normal when the base doesn't exist).
+            let home = std::env::temp_dir().join(format!("validate-test-{}", std::process::id()));
+            let base = home.join("models"); // deliberately not created
+            let path = validate_and_sanitize_path(base.to_str().unwrap(), "a/b", "x.gguf");
+            assert!(path.is_ok(), "fresh base rejected: {:?}", path);
+            assert_eq!(path.unwrap(), base.join("a").join("b").join("x.gguf"));
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn validate_accepts_existing_base_directory() {
+            let home =
+                std::env::temp_dir().join(format!("validate-test-exists-{}", std::process::id()));
+            let base = home.join("models");
+            std::fs::create_dir_all(base.join("a/b")).unwrap();
+            let path = validate_and_sanitize_path(base.to_str().unwrap(), "a/b", "sub/dir/x.gguf");
+            assert!(path.is_ok());
+            assert_eq!(
+                path.unwrap(),
+                base.join("a")
+                    .join("b")
+                    .join("sub")
+                    .join("dir")
+                    .join("x.gguf")
+            );
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn validate_rejects_traversal_and_bad_model_ids() {
+            let home =
+                std::env::temp_dir().join(format!("validate-test-bad-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            let base = home.to_str().unwrap().to_string();
+
+            // traversal in filename
+            assert!(validate_and_sanitize_path(&base, "a/b", "../escape.gguf").is_err());
+            assert!(validate_and_sanitize_path(&base, "a/b", "sub/../../escape.gguf").is_err());
+            // bad model ids
+            assert!(validate_and_sanitize_path(&base, "nodash", "x.gguf").is_err());
+            assert!(validate_and_sanitize_path(&base, "a/b/c", "x.gguf").is_err());
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn path_error_display_strings_are_pinned_verbatim() {
+            // Golden tests: one assert per variant. These strings are
+            // user-visible (TUI error lines, CLI InvalidPath events) and
+            // must stay byte-identical to the pre-typed-error messages.
+            let io = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+            assert_eq!(
+                PathError::CurrentDirectory(io()).to_string(),
+                "Cannot determine current directory: no such file"
+            );
+            assert_eq!(
+                PathError::InvalidBase(io()).to_string(),
+                "Invalid base path: no such file"
+            );
+            assert_eq!(
+                PathError::InvalidModelId("a/b/c".to_string()).to_string(),
+                "Invalid model ID format: a/b/c"
+            );
+            assert_eq!(
+                PathError::InvalidAuthor("bad author".to_string()).to_string(),
+                "Invalid author in model ID: bad author"
+            );
+            assert_eq!(
+                PathError::InvalidModelName("..".to_string()).to_string(),
+                "Invalid model name in model ID: .."
+            );
+            assert_eq!(
+                PathError::InvalidFilenameComponent("a/b".to_string()).to_string(),
+                "Invalid filename component: a/b"
+            );
+            assert_eq!(
+                PathError::TraversalFinalEscape.to_string(),
+                "Path traversal detected: final path escapes base directory"
+            );
+            assert_eq!(
+                PathError::TraversalParentEscape.to_string(),
+                "Path traversal detected: parent path escapes base directory"
+            );
+        }
+
+        #[test]
+        fn validate_returns_the_typed_variant_for_each_failure() {
+            let home =
+                std::env::temp_dir().join(format!("validate-test-vars-{}", std::process::id()));
+            std::fs::create_dir_all(&home).unwrap();
+            let base = home.to_str().unwrap().to_string();
+
+            // traversal in a filename component -> InvalidFilenameComponent
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "a/b", "../escape.gguf"),
+                Err(PathError::InvalidFilenameComponent(part)) if part == ".."
+            ));
+            // model id without exactly one slash -> InvalidModelId
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "nodash", "x.gguf"),
+                Err(PathError::InvalidModelId(id)) if id == "nodash"
+            ));
+            // reserved device name as author -> InvalidAuthor
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "CON/model", "x.gguf"),
+                Err(PathError::InvalidAuthor(a)) if a == "CON"
+            ));
+            // reserved device name as model name -> InvalidModelName
+            assert!(matches!(
+                validate_and_sanitize_path(&base, "a/aux", "x.gguf"),
+                Err(PathError::InvalidModelName(n)) if n == "aux"
+            ));
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
 }
 
 /// Serialises tests that read or mutate the process env vars used by path

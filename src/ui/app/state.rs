@@ -1,23 +1,22 @@
+//! App state: the `App` struct, its construction, and the non-blocking
+//! render cache (`RenderCache` + [`snapshot`] helper). Engine-owned state
+//! lives on `App::engine` (one `EngineState`, W2.3); only TUI concerns and
+//! `download_tx` are direct fields.
 use crate::models::*;
-use crossterm::event::EventStream;
 use parking_lot::RwLock;
-use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
-use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tui_input::Input;
 
-// The queue transport types live in the engine module (single source of
+// The queue transport type lives in the engine module (single source of
 // truth shared with the CLI frontend).
-pub use crate::engine::{DownloadMessage, DownloadReceiver};
+pub use crate::engine::QueuedDownload;
 
 /// Main application state container
 #[derive(Debug)]
 pub struct App {
     pub running: bool,
-    pub event_stream: EventStream,
     pub input: Input,
     pub input_mode: InputMode,
     pub focused_pane: FocusedPane,
@@ -38,33 +37,18 @@ pub struct App {
     /// pressed on the Standard-mode file tree: (repo path, is_directory).
     /// A directory queues every file under it. Cleared on confirm/cancel.
     pub pending_tree_download: Option<(String, bool)>,
-    pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub download_tx: mpsc::UnboundedSender<DownloadMessage>,
-    pub download_rx: DownloadReceiver,
-    pub download_queue: Arc<Mutex<crate::models::QueueState>>, // Combined queue state to reduce lock complexity
-    /// Mirror of files waiting in the download channel, for HUD display
-    /// (names + sizes). Same lock level as `download_queue`.
-    pub download_queue_items: Arc<Mutex<Vec<crate::models::QueueItemSummary>>>,
+    /// Single owned bundle of engine-owned shared state (channels, queue/
+    /// registry/progress Arcs, verification counters). Every TUI access to
+    /// engine state goes through explicit `self.engine.<field>` reads — no
+    /// Deref, no flattened mirrors.
+    pub engine: crate::engine::EngineState,
+    /// Sender half of the engine's download queue channel, held by the TUI
+    /// for the whole session so the manager loop runs until App drops
+    /// (dropping the last clone ends the manager once the queue drains).
+    /// Not part of EngineState on purpose: the engine consumes the receiver,
+    /// the frontend owns the sender.
+    pub download_tx: mpsc::UnboundedSender<QueuedDownload>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
-    pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
-    pub status_tx: mpsc::UnboundedSender<String>,
-    pub download_registry: Arc<Mutex<DownloadRegistry>>,
-    pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
-    pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<AtomicUsize>,
-    /// Verification tasks spawned but unfinished (engine drain signal;
-    /// unread by the TUI itself, rendered through verification_progress)
-    pub verification_in_flight: Arc<AtomicUsize>,
-    /// Typed verification results (engine channel; the TUI does not read it,
-    /// the CLI consumes it for events/exit codes). The sender half is held so
-    /// the channel stays connected for the engine's lifetime.
-    pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
-    pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
-    /// Per-file download outcomes streamed by the engine manager (the TUI
-    /// does not read this channel; the CLI renders live events from it).
-    pub outcome_tx: mpsc::UnboundedSender<FileOutcome>,
-    pub outcome_rx: Arc<Mutex<mpsc::UnboundedReceiver<FileOutcome>>>,
     pub options: crate::models::AppOptions,
     pub options_directory_input: Input,
     pub options_token_input: Input,
@@ -78,27 +62,21 @@ pub struct App {
     pub needs_search_models: bool,
     // Prefetch debounce timer
     pub last_prefetch_time: Arc<Mutex<std::time::Instant>>,
-    // Filter & Sort state
-    pub sort_field: crate::models::SortField,
-    pub sort_direction: crate::models::SortDirection,
-    pub filter_min_downloads: u64,
-    pub filter_min_likes: u64,
+    // Filter & Sort values (cycling/stepping rules in ui/app/filters.rs;
+    // focused_filter_field is focus state and stays on App)
+    pub filters: super::filters::FilterState,
     pub focused_filter_field: usize, // 0=sort, 1=downloads, 2=likes
-    // Mouse interaction state
-    pub mouse_position: Option<(u16, u16)>, // Current mouse position (x, y)
-    pub panel_areas: Vec<(FocusedPane, Rect)>, // Store panel areas for click/hover detection
-    pub hovered_panel: Option<FocusedPane>, // Currently hovered panel for visual feedback
-    pub last_mouse_event_time: std::time::Instant, // Track time of last processed mouse event
-    pub filter_areas: Vec<(usize, Rect)>, // Store filter field areas (0=sort, 1=downloads, 2=likes)
-    // Cached values for non-blocking render (used when tokio Mutex is locked)
-    pub cached_complete_downloads: CompleteDownloads,
-    pub cached_download_progress: Option<DownloadProgress>,
-    pub cached_download_queue: crate::models::QueueState, // Combined cache
-    pub cached_download_queue_items: Vec<crate::models::QueueItemSummary>,
-    pub cached_verification_queue_bytes: u64,
-    pub cached_verification_progress: Vec<VerificationProgress>,
-    /// Session-lifetime hash verification result counters (HUD footer)
-    pub verification_results: crate::verification::VerificationResultCounters,
+    // Mouse interaction state (one bundle — the fields travel together
+    // through the render pass and the mouse handlers; see MouseState)
+    pub mouse: MouseState,
+    // Options-dialog transient UI state (§8.9: moved out of AppOptions —
+    // cursor row + live-edit flags; AppOptions is pure config schema)
+    pub options_dialog: crate::ui::render::OptionsDialogState,
+    // Last-known-good snapshots of the engine's tokio::Mutex state for
+    // non-blocking rendering: draw() refreshes each field via `snapshot`
+    // when the lock is free and falls back to the previous snapshot when
+    // the lock is held by another task.
+    pub render_cache: RenderCache,
 }
 
 impl Default for App {
@@ -117,19 +95,18 @@ impl App {
 
         let quant_file_list_state = ListState::default();
 
-        let (download_tx, download_rx) = mpsc::unbounded_channel();
-        let (status_tx, status_rx) = mpsc::unbounded_channel();
-        let (verify_tx, verify_rx) = mpsc::unbounded_channel();
-        let (outcome_tx, outcome_rx) = mpsc::unbounded_channel();
+        // One engine bundle owns every shared channel and Arc the engine
+        // tasks communicate through; App keeps the download sender half to
+        // enqueue work (dropping it ends the manager loop once drained).
+        let (engine, download_tx) = crate::engine::EngineState::new();
 
         // Load options from config file (or use defaults)
         let options = crate::config::load_config();
 
-        // Extract filter settings before moving options
-        let default_sort_field = options.default_sort_field;
-        let default_sort_direction = options.default_sort_direction;
-        let default_min_downloads = options.default_min_downloads;
-        let default_min_likes = options.default_min_likes;
+        // Seed filter state from the persisted config defaults before
+        // `options` moves into Self (config load/save mapping unchanged —
+        // AppOptions stays the serde surface, App only borrows the seeds)
+        let filters = super::filters::FilterState::from_options(&options);
 
         let mut download_path_input = Input::default();
         download_path_input = download_path_input.with_value(options.default_directory.clone());
@@ -138,7 +115,6 @@ impl App {
 
         Self {
             running: false,
-            event_stream: EventStream::default(),
             input: Input::default(),
             input_mode: InputMode::Normal, // Start in normal mode
             focused_pane: FocusedPane::Models,
@@ -158,24 +134,9 @@ impl App {
             popup_mode: PopupMode::None,
             download_path_input,
             pending_tree_download: None,
-            download_progress: Arc::new(Mutex::new(None)),
+            engine,
             download_tx,
-            download_rx: Arc::new(Mutex::new(download_rx)),
-            download_queue: Arc::new(Mutex::new(crate::models::QueueState::new(0, 0))),
-            download_queue_items: Arc::new(Mutex::new(Vec::new())),
             incomplete_downloads: Vec::new(),
-            status_rx: Arc::new(Mutex::new(status_rx)),
-            status_tx,
-            download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
-            complete_downloads: Arc::new(Mutex::new(HashMap::new())),
-            verification_progress: Arc::new(Mutex::new(Vec::new())),
-            verification_queue: Arc::new(Mutex::new(Vec::new())),
-            verification_queue_size: Arc::new(AtomicUsize::new(0)),
-            verification_in_flight: Arc::new(AtomicUsize::new(0)),
-            verify_tx,
-            verify_rx: Arc::new(Mutex::new(verify_rx)),
-            outcome_tx,
-            outcome_rx: Arc::new(Mutex::new(outcome_rx)),
             options,
             options_directory_input: Input::default(),
             options_token_input: Input::default(),
@@ -187,51 +148,13 @@ impl App {
             needs_load_quantizations: false,
             needs_search_models: false,
             last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),
-            sort_field: default_sort_field,
-            sort_direction: default_sort_direction,
-            filter_min_downloads: default_min_downloads,
-            filter_min_likes: default_min_likes,
+            filters,
             focused_filter_field: 0,
             // Mouse interaction state
-            mouse_position: None,
-            panel_areas: Vec::new(),
-            hovered_panel: None,
-            last_mouse_event_time: std::time::Instant::now(),
-            filter_areas: Vec::new(),
+            mouse: MouseState::default(),
+            options_dialog: crate::ui::render::OptionsDialogState::default(),
             // Cached values for non-blocking render
-            cached_complete_downloads: HashMap::new(),
-            cached_download_progress: None,
-            cached_download_queue: crate::models::QueueState::new(0, 0),
-            cached_download_queue_items: Vec::new(),
-            cached_verification_queue_bytes: 0,
-            cached_verification_progress: Vec::new(),
-            verification_results: crate::verification::VerificationResultCounters::default(),
-        }
-    }
-
-    /// Bundle this app's shared handles into an engine state snapshot
-    /// (cheap: every field is an Arc or a channel endpoint clone). Used to
-    /// spawn the shared engine tasks and keeps the App the single owner of
-    /// the state the renderer reads.
-    pub fn engine_state(&self) -> crate::engine::EngineState {
-        crate::engine::EngineState {
-            download_rx: self.download_rx.clone(),
-            download_queue: self.download_queue.clone(),
-            download_queue_items: self.download_queue_items.clone(),
-            download_progress: self.download_progress.clone(),
-            complete_downloads: self.complete_downloads.clone(),
-            status_tx: self.status_tx.clone(),
-            status_rx: self.status_rx.clone(),
-            verification_queue: self.verification_queue.clone(),
-            verification_queue_size: self.verification_queue_size.clone(),
-            verification_in_flight: self.verification_in_flight.clone(),
-            verification_progress: self.verification_progress.clone(),
-            download_registry: self.download_registry.clone(),
-            verify_tx: self.verify_tx.clone(),
-            verify_rx: self.verify_rx.clone(),
-            outcome_tx: self.outcome_tx.clone(),
-            outcome_rx: self.outcome_rx.clone(),
-            verification_results: self.verification_results.clone(),
+            render_cache: RenderCache::default(),
         }
     }
 
@@ -243,5 +166,111 @@ impl App {
     /// Terminate application
     pub fn quit(&mut self) {
         self.running = false;
+    }
+}
+
+/// Mouse interaction state (W5.3): the per-frame hit-rect registry the
+/// render pass RETURNS (stored here by `App::draw` — the render side is
+/// pure) plus the hover and throttle state the event handlers maintain.
+/// Hit-testing is first-match over each list; registration order is
+/// behavior (see `render::MouseAreas`).
+#[derive(Debug)]
+pub struct MouseState {
+    /// Hit-rects of the last rendered frame: clickable panel regions and
+    /// filter-field regions (0=sort, 1=downloads, 2=likes).
+    pub areas: crate::ui::render::MouseAreas,
+    /// Panel currently under the mouse cursor, for border feedback.
+    pub hovered_panel: Option<FocusedPane>,
+    /// Time of the last processed mouse move; hover updates are throttled
+    /// to ~60fps against it.
+    pub last_move: std::time::Instant,
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self {
+            areas: crate::ui::render::MouseAreas::default(),
+            hovered_panel: None,
+            last_move: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Last-known-good snapshots of the engine's `tokio::Mutex` state, used by
+/// `App::draw` for non-blocking rendering. Each field mirrors one engine
+/// mutex; `draw` refreshes it through [`snapshot`] when the lock is free
+/// and renders the previous snapshot when the lock is held by another
+/// task. Defaults equal the engine's fresh-state initial values.
+#[derive(Debug, Default)]
+pub struct RenderCache {
+    pub complete_downloads: CompleteDownloads,
+    pub download_progress: Option<DownloadProgress>,
+    /// Combined cache for the queue summary (`size`, `bytes`).
+    pub download_queue: crate::models::QueueState,
+    pub download_queue_items: Vec<crate::models::QueueItemSummary>,
+    /// Derived under the verification-queue lock (summed `total_size`),
+    /// not a clone of the queue itself.
+    pub verification_queue_bytes: u64,
+    pub verification_progress: Vec<VerificationProgress>,
+}
+
+/// Non-blocking snapshot of an engine `tokio::Mutex<T>` for rendering:
+/// when the lock is free, copy the guarded value into `cache` and return
+/// the fresh clone; when the lock is held by another task, return the
+/// last-good `cache` value instead. The guard is scoped inside this
+/// helper only — no lock is ever held beyond the copy (W0.8 rule).
+pub(super) fn snapshot<T: Clone>(m: &Mutex<T>, cache: &mut T) -> T {
+    match m.try_lock() {
+        Ok(guard) => {
+            *cache = guard.clone();
+            guard.clone()
+        }
+        Err(_) => cache.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_refreshes_cache_when_lock_is_free() {
+        let m = Mutex::new(vec![1u64, 2]);
+        let mut cache = Vec::new();
+
+        let got = snapshot(&m, &mut cache);
+
+        assert_eq!(got, vec![1, 2]);
+        assert_eq!(cache, vec![1, 2], "cache must be refreshed on success");
+    }
+
+    #[test]
+    fn snapshot_falls_back_to_cache_when_lock_is_held() {
+        let m = Mutex::new(vec![9u64]);
+        let mut cache = vec![7u64];
+
+        // Hold the lock across the call — try_lock must fail and the
+        // helper must yield the cached value without touching the cache.
+        let guard = m.try_lock().unwrap();
+        let got = snapshot(&m, &mut cache);
+        drop(guard);
+
+        assert_eq!(got, vec![7], "held lock must yield the cached value");
+        assert_eq!(cache, vec![7], "cache must be untouched on fallback");
+    }
+
+    #[test]
+    fn render_cache_defaults_match_fresh_engine_state() {
+        // Per-field defaults must equal the pre-RenderCache initial values
+        // (HashMap::new(), None, QueueState::new(0, 0), Vec::new(), 0,
+        // Vec::new()) so a fresh App renders exactly as before.
+        let c = RenderCache::default();
+        assert!(c.complete_downloads.is_empty());
+        assert!(c.download_progress.is_none());
+        assert_eq!(c.download_queue.size, 0);
+        assert_eq!(c.download_queue.bytes, 0);
+        assert!(c.download_queue_items.is_empty());
+        assert_eq!(c.verification_queue_bytes, 0);
+        assert!(c.verification_progress.is_empty());
     }
 }

@@ -1,5 +1,10 @@
+//! SHA256 verification worker: drains the engine's verification queue,
+//! hashes files (bounded by a semaphore), reports typed
+//! [`VerifyOutcome`]s over the engine's outcome channel, and signals
+//! idle when the queue is exhausted.
+
 use crate::engine::EngineState;
-use crate::models::{DownloadStatus, VerificationProgress, VerificationQueueItem, VerifyOutcome};
+use crate::models::{VerificationProgress, VerificationQueueItem, VerifyOutcome};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -92,23 +97,6 @@ pub struct VerificationResultCounters {
     pub failed: Arc<AtomicUsize>,
 }
 
-/// Whether a registry-recorded path string refers to the same file as
-/// `actual`. Registry entries record the user-facing path (original base,
-/// e.g. `/var/...` on macOS or `C:\...` on Windows) while download
-/// internals canonicalize (`/private/var/...`, `\\?\C:\...`), so raw
-/// string equality fails cross-platform. Canonicalize both sides when the
-/// raw forms differ; falls back to `false` when either side cannot be
-/// resolved.
-fn path_matches(recorded: &str, actual: &Path) -> bool {
-    if recorded == actual.to_string_lossy() {
-        return true;
-    }
-    match (Path::new(recorded).canonicalize(), actual.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 /// Verify a single file's SHA256 hash and report a typed
 /// [`VerifyOutcome`] through the engine's verify channel.
 async fn verify_file(item: VerificationQueueItem, state: EngineState) {
@@ -182,26 +170,14 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
 
                 // Mark the mismatch in the on-disk registry (the source of
                 // truth — the in-memory engine mirror may be empty, e.g. for
-                // CLI runs that never loaded it) and keep the mirror in sync
-                // for TUI views.
-                let mut registry = crate::registry::load_registry();
-                if let Some(entry) = registry
-                    .downloads
-                    .iter_mut()
-                    .find(|d| path_matches(&d.local_path, &local_path))
-                {
-                    entry.status = DownloadStatus::HashMismatch;
-                }
-                crate::registry::save_registry(&registry);
-
-                let mut mirror = state.download_registry.lock().await;
-                if let Some(entry) = mirror
-                    .downloads
-                    .iter_mut()
-                    .find(|d| path_matches(&d.local_path, &local_path))
-                {
-                    entry.status = DownloadStatus::HashMismatch;
-                }
+                // CLI runs that never loaded it), then patch the mirror for
+                // TUI views. Layering (final pass): the disk op is the pure
+                // registry op; the engine-mirror patch lives here, with the
+                // caller — same timing as when the op did both: mirror
+                // immediately after the disk save, regardless of its
+                // outcome.
+                crate::registry::mark_mismatch(&local_path);
+                mark_mismatch_mirror(&state.download_registry, &local_path).await;
             }
         }
         Err(e) => {
@@ -220,6 +196,27 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
     {
         let mut progress = state.verification_progress.lock().await;
         progress.retain(|p| p.filename != item.filename);
+    }
+}
+
+/// Patch the engine's in-memory registry mirror for a SHA mismatch
+/// (final layering pass: moved out of the `registry::mark_mismatch` op so
+/// that module is pure disk ops; the engine mirror is engine-caller
+/// state). Same contract as when the op owned it: called immediately
+/// after the disk op, regardless of whether the disk save succeeded; the
+/// mirror is patched independently and may lack the entry entirely (the
+/// disk is the source of truth). Pinned by the tests below.
+async fn mark_mismatch_mirror(
+    download_registry: &Arc<Mutex<crate::models::DownloadRegistry>>,
+    local_path: &Path,
+) {
+    let mut mirror = download_registry.lock().await;
+    if let Some(entry) = mirror
+        .downloads
+        .iter_mut()
+        .find(|d| crate::registry::path_matches(&d.local_path, local_path))
+    {
+        entry.status = crate::models::DownloadStatus::HashMismatch;
     }
 }
 
@@ -252,66 +249,61 @@ async fn calculate_sha256_with_progress(
     // tokio::fs, i.e. one blocking-pool dispatch per buffer (~160k hops for
     // a 20 GiB file); sync reads measure ~12% faster end-to-end on a warm
     // cache (1.87 -> 2.10 GiB/s) and keep the SHA-NI hasher saturated.
+    // The loop itself is the shared streaming-digest core
+    // (`utils::stream_file_digest`); this closure only contributes the
+    // progress accounting.
     let digest = tokio::task::spawn_blocking(move || -> std::io::Result<String> {
-        use std::io::Read;
-
-        let mut file = std::fs::File::open(&path)?;
-        let mut hasher = Sha256::new();
         let buffer_size = VERIFICATION_CONFIG.buffer_size.load(Ordering::Relaxed);
-        let mut buffer = vec![0u8; buffer_size];
-
-        let mut bytes_verified = 0u64;
+        let mut hasher = Sha256::new();
         let mut iteration = 0u64;
         let mut last_update = std::time::Instant::now();
         let mut last_bytes = 0u64;
 
-        loop {
-            let bytes_read = file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..bytes_read]);
+        let _ = crate::utils::stream_file_digest(
+            &path,
+            &mut hasher,
+            buffer_size,
+            |_, bytes_verified| {
+                iteration += 1;
 
-            bytes_verified += bytes_read as u64;
-            iteration += 1;
-
-            // Update progress at configured interval to avoid excessive
-            // lock traffic. Publish the exact running total. (An earlier
-            // version did `fetch_add(bytes_read)` here, which credited only
-            // the last chunk at each checkpoint - the UI advanced at
-            // 1/update_interval of the real speed and looked stalled on
-            // multi-GB files.)
-            let update_interval = VERIFICATION_CONFIG
-                .update_interval_iterations
-                .load(Ordering::Relaxed);
-            #[allow(clippy::manual_is_multiple_of)]
-            // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
-            if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
-                if let Some(ref vb) = verified_bytes {
-                    vb.store(bytes_verified, Ordering::Relaxed);
-                }
-
-                let now = std::time::Instant::now();
-                let elapsed = now.duration_since(last_update).as_secs_f64();
-
-                if elapsed >= 0.2 {
-                    let bytes_since_last = bytes_verified - last_bytes;
-                    let speed = (bytes_since_last as f64 / elapsed) / 1_048_576.0;
-
-                    // Best-effort speed publish from this blocking thread:
-                    // try_lock avoids blocking; skip the update if the UI
-                    // currently holds the progress lock.
-                    if let Ok(mut progress) = progress_shared.try_lock() {
-                        if let Some(entry) = progress.iter_mut().find(|p| p.filename == name) {
-                            entry.speed_mbps = speed;
-                        }
+                // Update progress at configured interval to avoid excessive
+                // lock traffic. Publish the exact running total. (An earlier
+                // version did `fetch_add(bytes_read)` here, which credited only
+                // the last chunk at each checkpoint - the UI advanced at
+                // 1/update_interval of the real speed and looked stalled on
+                // multi-GB files.)
+                let update_interval = VERIFICATION_CONFIG
+                    .update_interval_iterations
+                    .load(Ordering::Relaxed);
+                #[allow(clippy::manual_is_multiple_of)]
+                // is_multiple_of() not available in Rust 1.75.0 (Ubuntu 22.04)
+                if iteration % (update_interval as u64) == 0 || bytes_verified >= total_size {
+                    if let Some(ref vb) = verified_bytes {
+                        vb.store(bytes_verified, Ordering::Relaxed);
                     }
 
-                    last_update = now;
-                    last_bytes = bytes_verified;
+                    let now = std::time::Instant::now();
+                    let elapsed = now.duration_since(last_update).as_secs_f64();
+
+                    if elapsed >= 0.2 {
+                        let bytes_since_last = bytes_verified - last_bytes;
+                        let speed = (bytes_since_last as f64 / elapsed) / 1_048_576.0;
+
+                        // Best-effort speed publish from this blocking thread:
+                        // try_lock avoids blocking; skip the update if the UI
+                        // currently holds the progress lock.
+                        if let Ok(mut progress) = progress_shared.try_lock() {
+                            if let Some(entry) = progress.iter_mut().find(|p| p.filename == name) {
+                                entry.speed_mbps = speed;
+                            }
+                        }
+
+                        last_update = now;
+                        last_bytes = bytes_verified;
+                    }
                 }
-            }
-        }
+            },
+        )?;
 
         // Final progress update to ensure 100%. If verified_bytes is Some,
         // update atomically; otherwise entry was removed (cancellation)
@@ -342,36 +334,6 @@ pub async fn queue_verification(
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn path_matches_accepts_raw_string_equality() {
-        let f = temp_file("path-eq", 4, 1);
-        let s = f.to_string_lossy().to_string();
-        assert!(path_matches(&s, &f));
-        let _ = std::fs::remove_file(&f);
-    }
-
-    /// Registry entries record the user-facing path while download
-    /// internals canonicalize; on macOS the temp dir lives behind the
-    /// /var -> /private/var symlink, on Windows canonicalize adds a
-    /// \\?\ prefix. A symlinked alias reproduces the divergence on any
-    /// Unix: the raw strings differ but both resolve to the same file.
-    #[cfg(unix)]
-    #[test]
-    fn path_matches_resolves_symlinked_aliases() {
-        let f = temp_file("path-symlink", 4, 1);
-        let dir = std::env::temp_dir().join(format!("rhd-verify-alias-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let alias_dir = dir.join("alias");
-        std::os::unix::fs::symlink(f.parent().unwrap(), &alias_dir).unwrap();
-        let alias_path = alias_dir.join(f.file_name().unwrap());
-        let recorded = alias_path.to_string_lossy().to_string();
-        assert_ne!(recorded, f.to_string_lossy().to_string());
-        assert!(path_matches(&recorded, &f));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_file(&f);
-    }
 
     fn temp_file(name: &str, size_bytes: usize, fill: u8) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -426,7 +388,16 @@ mod tests {
     /// ~1% on multi-GB files). The counter must now track the true running
     /// total at every checkpoint.
     #[tokio::test]
+    // Holding the (std) env mutex across the awaits below is intentional:
+    // this test sets non-default VERIFICATION_CONFIG values and samples
+    // progress mid-flight, so it must be serialized against any test that
+    // runs `config::apply_options` (which writes the same globals) — the
+    // T1/W-final matrix and options-dialog tests all take this mutex.
+    #[allow(clippy::await_holding_lock)]
     async fn progress_counter_tracks_actual_bytes() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         const TOTAL: usize = 64 * 1024 * 1024; // 64 MiB
         let path = temp_file("progress", TOTAL, 0xCD);
 
@@ -497,5 +468,68 @@ mod tests {
             .update_interval_iterations
             .store(old_interval, Ordering::Relaxed);
         std::fs::remove_file(&path).ok();
+    }
+
+    // ----------------- mark_mismatch_mirror (final layering pass) ---------
+    // The mirror patch moved out of `registry::mark_mismatch` so that
+    // module is pure disk ops; these tests pin its caller-side contract:
+    // only the matching entry flips, an empty mirror stays empty, and a
+    // mirror lacking the entry is untouched. In-memory only — no registry
+    // path involved, so no ENV_MUTEX/DataDirGuard is needed.
+
+    fn mirror_with(
+        entries: &[(&str, crate::models::DownloadStatus)],
+    ) -> Arc<Mutex<crate::models::DownloadRegistry>> {
+        Arc::new(Mutex::new(crate::models::DownloadRegistry {
+            downloads: entries
+                .iter()
+                .map(|(path, status)| crate::models::DownloadMetadata {
+                    model_id: "org/model".to_string(),
+                    filename: path.rsplit('/').next().unwrap().to_string(),
+                    url: format!("https://huggingface.co/org/model/resolve/main/{}", path),
+                    local_path: path.to_string(),
+                    total_size: 1,
+                    downloaded_size: 0,
+                    status: status.clone(),
+                    expected_sha256: None,
+                    revision: None,
+                })
+                .collect(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn mismatch_mirror_patch_flips_only_the_matching_entry() {
+        let mirror = mirror_with(&[
+            ("/x/a.gguf", crate::models::DownloadStatus::Complete),
+            ("/x/b.gguf", crate::models::DownloadStatus::Incomplete),
+        ]);
+        mark_mismatch_mirror(&mirror, std::path::Path::new("/x/a.gguf")).await;
+        let m = mirror.lock().await;
+        assert_eq!(
+            m.downloads[0].status,
+            crate::models::DownloadStatus::HashMismatch
+        );
+        assert_eq!(
+            m.downloads[1].status,
+            crate::models::DownloadStatus::Incomplete
+        );
+    }
+
+    #[tokio::test]
+    async fn mismatch_mirror_patch_leaves_empty_and_unmatched_mirrors_untouched() {
+        // The CLI-before-bootstrap case: an empty mirror stays empty (the
+        // disk is the source of truth).
+        let empty = mirror_with(&[]);
+        mark_mismatch_mirror(&empty, std::path::Path::new("/x/missing.gguf")).await;
+        assert!(empty.lock().await.downloads.is_empty());
+
+        // A mirror lacking the matching entry is untouched.
+        let other = mirror_with(&[("/x/b.gguf", crate::models::DownloadStatus::Incomplete)]);
+        mark_mismatch_mirror(&other, std::path::Path::new("/x/a.gguf")).await;
+        assert_eq!(
+            other.lock().await.downloads[0].status,
+            crate::models::DownloadStatus::Incomplete
+        );
     }
 }

@@ -1,9 +1,10 @@
 mod api;
+mod cache_layout;
 mod cli;
 mod config;
 mod download;
 mod engine;
-mod hf_cache;
+mod fmt;
 mod http_client;
 mod models;
 mod paths;

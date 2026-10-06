@@ -13,7 +13,7 @@
 //!
 //! `hf-cache sync` (plans/hf-cache-sync.md §2/§5.2) reuses the same engine
 //! to populate the real HuggingFace hub cache, publishing staged downloads
-//! atomically through [`crate::hf_cache`]; `hf-cache path` is the pure
+//! atomically through [`crate::cache_layout`]; `hf-cache path` is the pure
 //! path-math scripting helper.
 //!
 //! The TUI remains the default when the binary is started without a
@@ -24,9 +24,10 @@ use clap::{Parser, Subcommand};
 mod args;
 mod download_cmd;
 mod events;
-mod hf_cache_cmd;
+mod hf_cache;
 mod report;
 mod resolve;
+mod run;
 mod search_cmd;
 mod update_cmd;
 
@@ -35,35 +36,9 @@ mod tests;
 
 use args::{DownloadArgs, HfCacheArgs, SearchArgs, UpdateArgs};
 use download_cmd::run_download;
-use hf_cache_cmd::run_hf_cache;
+use hf_cache::run_hf_cache;
 use search_cmd::run_search;
 use update_cmd::run_update;
-
-#[cfg(test)]
-use crate::models::{ModelMetadata, QuantizationGroup};
-#[cfg(test)]
-use args::{
-    apply_rate_limit_overrides, merge_token, parse_rate_limit_mbps, parse_revision, valid_model_id,
-    HfCacheCommand, ModelDto,
-};
-#[cfg(test)]
-use events::{Event, FileDto, OverallProgress, Summary};
-#[cfg(test)]
-use hf_cache_cmd::{
-    absolute_path, ref_name_for_revision, select_sync_files, symlinks_enabled, SelectionMode,
-    SyncSelectionError,
-};
-#[cfg(test)]
-use report::{
-    format_eta, format_file_progress, format_overall_progress, render_bar, truncate_path,
-    verification_heartbeat_line, ProgressMode, Reporter,
-};
-#[cfg(test)]
-use resolve::{parse_selector, resolve_files, FileSpec, ResolveError, Selector};
-#[cfg(test)]
-use search_cmd::effective_search_params;
-#[cfg(test)]
-use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(

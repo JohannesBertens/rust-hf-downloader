@@ -1,0 +1,73 @@
+---
+source: src/cli/tests.rs
+expression: help
+---
+Populate the real HuggingFace hub cache (~/.cache/huggingface/hub) so vLLM/transformers/`hf download` find a revision-pinned snapshot with zero network calls
+
+Usage: sync [OPTIONS] <MODEL_ID> [FILE]...
+
+Arguments:
+  <MODEL_ID>
+          Model ID, e.g. "Qwen/Qwen2.5-7B-Instruct"
+
+  [FILE]...
+          Exact repo-relative file paths (repeatable positional)
+
+Options:
+      --revision <REV>
+          Git revision to sync: branch, tag, or 40-hex commit SHA [default: main]
+
+      --for <PRESET>
+          Fetch only the files a target runtime reads (preset selection)
+
+      --include <GLOB>
+          Include only files matching GLOB (repeatable, fnmatch semantics: `*` crosses `/`)
+
+      --exclude <GLOB>
+          Exclude files matching GLOB (repeatable; applies after every selection mode)
+
+      --cache-dir <DIR>
+          HuggingFace hub cache directory [default: $HF_HUB_CACHE, then $HF_HOME/hub, then the platform default]
+
+      --no-symlinks
+          Copy files into snapshots/ instead of symlinking to blobs/
+
+      --force
+          Re-download even if the blob already exists in the cache
+
+      --dry-run
+          List what would be fetched/skipped; no writes
+
+      --token <TOKEN>
+          HuggingFace token [default: $HF_TOKEN, then config]
+
+      --no-verify
+          Skip SHA256 verification
+
+      --json
+          JSON Lines events on stdout (progress included, throttled)
+
+  -q, --quiet
+          Suppress progress output; errors and the final summary only
+
+      --progress <MODE>
+          Progress output mode: auto (tty rewrites), plain (one line every ~10 s, works without a tty), none
+
+          Possible values:
+          - auto:  Single-line `\r` rewrites on a tty; nothing when piped (default)
+          - plain: One newline progress line every ~10 s, tty-independent (for docker run / CI logs); adds a verification heartbeat during the post-download SHA256 drain
+          - none:  No progress output at all
+          
+          [default: auto]
+
+      --rate-limit
+          Enable download rate limiting (uses --rate-limit-mbps or the config-file value)
+
+      --no-rate-limit
+          Disable download rate limiting (overrides the config file)
+
+      --rate-limit-mbps <MBPS>
+          Download rate limit in Mbps (implies --rate-limit)
+
+  -h, --help
+          Print help (see a summary with '-h')

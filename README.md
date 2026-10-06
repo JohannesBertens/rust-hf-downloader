@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.13.1
+# Rust HF Downloader v2.13.2
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
@@ -714,42 +714,48 @@ rust-hf-downloader/
     │   ├── mod.rs          # Cli/Command clap roots, run() dispatcher
     │   ├── args.rs         # Argument structs + parse/merge helpers
     │   ├── resolve.rs      # File selection/resolution (pure)
-    │   ├── events.rs       # NDJSON event schema
+    │   ├── events/            # mod.rs (dispatch) + keys.rs (popup keys)       # NDJSON event schema
     │   ├── report.rs       # Human/JSON reporters, --progress modes
-    │   ├── download_cmd.rs # download orchestration + drain
+    │   ├── download_cmd.rs # download orchestration (run_download)
+    │   ├── run.rs          # cross-command runner: RunTally/monitor/poll_once drain, shared bootstrap helpers
     │   ├── search_cmd.rs   # search subcommand
-    │   ├── hf_cache_cmd.rs # hf-cache sync/path pipeline
-    │   └── update_cmd.rs   # self-update subcommand
-    ├── engine.rs           # Shared download engine (manager + verification bootstrap)
-    ├── models.rs           # Data structures & types
+    │   ├── hf_cache/       # hf-cache group: selection (pure) / sync (pipeline) / path
+    │   ├── update_cmd.rs   # self-update subcommand
+    │   └── tests.rs        # cli::tests — insta snapshots in src/cli/snapshots/
+    ├── engine/            # mod.rs, enqueue.rs (sealed EnqueuePolicy), workers.rs, bootstrap.rs           # Shared download engine (manager + verification bootstrap)
+    ├── models/            # api/ui/engine/options/cache behind a facade           # Data structures & types
+    ├── paths.rs            # Cross-platform config/registry/download path resolution
+    ├── cache_layout.rs    # HuggingFace hub cache layout writer (cache_layout: the on-disk shape; cli/hf_cache/ is the command group)
+    ├── patterns.rs         # Python-fnmatch parity glob matcher (--include/--exclude)
+    ├── update.rs           # Self-update backend (latest.json manifest + verified swap)
     ├── config.rs           # Configuration persistence (v0.9.0)
-    ├── utils.rs            # Formatting utilities
-    ├── api.rs              # HuggingFace API client with auth (v0.9.5)
+    ├── utils.rs            # Streaming-digest + atomic-rename primitives (formatting lives in fmt.rs)
+    ├── api/               # client/quant/tree behind a facade              # HuggingFace API client with auth (v0.9.5)
     ├── http_client.rs      # Authenticated HTTP requests (v0.9.5)
     ├── registry.rs         # Download registry persistence
-    ├── download.rs         # Download manager & security
+    ├── download/          # mod.rs (phases) + chunked.rs         # Download manager & security
     ├── rate_limiter.rs     # Token bucket rate limiter (v1.2.0)
     ├── verification.rs     # SHA256 verification worker
     └── ui/
         ├── mod.rs          # UI module declaration
-        ├── app.rs          # Module re-exports (v0.9.5)
+        ├── mod.rs             # App + run loop + mouse (was app.rs)          # Module re-exports (v0.9.5)
         ├── app/            # App submodules (v0.9.5)
         │   ├── state.rs        # AppState initialization
-        │   ├── events.rs       # Event handling
-        │   ├── models.rs       # Model browsing logic
+        │   ├── events/            # mod.rs (dispatch) + keys.rs (popup keys)       # Event handling
+        │   ├── models/            # api/ui/engine/options/cache behind a facade       # Model browsing logic
         │   ├── downloads.rs    # Download management
         │   └── verification.rs # Verification UI
-        └── render.rs       # TUI rendering logic
+        ├── tree.rs         # File-tree navigation model (flatten/toggle/count)
+        └── render/         # TUI rendering logic (facade + one file per panel)
 ```
 
 **Version 0.7.0** introduces a modular architecture with clear separation of concerns:
-- **6 top-level modules** for business logic
-- **2 UI submodules** for presentation layer
-- **~240 lines average** per file (previously 2,074 in one file)
+- **Focused top-level modules** for business logic
+- **Separate UI submodules** for presentation layer
 - **Improved maintainability, testability, and readability**
 
 **Version 0.9.5** further refines the architecture:
-- **Split app.rs** into 5 focused submodules (~250 lines each)
+- **Split app.rs** into 5 focused submodules
 - **New http_client module** for authentication
 - **Better code organization** with clear responsibility separation
 

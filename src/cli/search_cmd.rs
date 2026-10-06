@@ -2,9 +2,10 @@
 
 use std::io::Write;
 
-use super::args::{merge_token, ModelDto, SearchArgs};
-use super::events::Event;
-use super::report::{truncate_path, ProgressMode, Reporter};
+use super::args::{ModelDto, SearchArgs};
+use super::events::{ErrorCode, Event};
+use super::report::{ProgressMode, Reporter};
+use super::run::resolve_run_token;
 use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
@@ -60,9 +61,9 @@ fn render_search_table(models: &[ModelDto]) {
         let _ = writeln!(
             stdout,
             "{:<id_w$}  {:>10}  {:>7}  {}",
-            truncate_path(&m.id, id_width),
-            crate::utils::format_number(m.downloads),
-            crate::utils::format_number(m.likes),
+            crate::fmt::truncate_path_cli(&m.id, id_width),
+            crate::fmt::number(m.downloads),
+            crate::fmt::number(m.likes),
             updated,
             id_w = id_width
         );
@@ -74,11 +75,9 @@ fn render_search_table(models: &[ModelDto]) {
 pub(super) async fn run_search(args: SearchArgs) -> i32 {
     let mut reporter = Reporter::new(args.json, false, ProgressMode::Auto);
     let options = crate::config::load_config();
-    let token = merge_token(
-        args.token.clone(),
-        std::env::var("HF_TOKEN").ok(),
-        options.hf_token.clone(),
-    );
+    // Runner partial bootstrap: token by the run precedence (flag >
+    // $HF_TOKEN > config); the options stay for the search defaults.
+    let token = resolve_run_token(args.token.clone(), &options);
 
     let (sort, direction, min_downloads, min_likes) = effective_search_params(&args, &options);
 
@@ -107,11 +106,10 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
                     }
                     Err(e) => {
                         drop(stdout);
-                        reporter.emit(&Event::Error {
-                            code: "internal".to_string(),
-                            message: format!("failed to serialize results: {}", e),
-                            available: None,
-                        });
+                        reporter.emit(&Event::error(
+                            ErrorCode::Internal,
+                            format!("failed to serialize results: {}", e),
+                        ));
                         return EXIT_FAILURE;
                     }
                 }
@@ -125,11 +123,10 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
             EXIT_OK
         }
         Err(e) => {
-            reporter.emit(&Event::Error {
-                code: "network".to_string(),
-                message: format!("search failed: {}", e),
-                available: None,
-            });
+            reporter.emit(&Event::error(
+                ErrorCode::Network,
+                format!("search failed: {}", e),
+            ));
             EXIT_FAILURE
         }
     }
