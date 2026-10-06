@@ -2,6 +2,7 @@
 //! engine (download manager and verification worker).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -71,6 +72,20 @@ pub struct DownloadMetadata {
 pub struct DownloadRegistry {
     pub downloads: Vec<DownloadMetadata>,
 }
+
+/// Completed-download mirror: bare FILENAME → the entry's metadata.
+/// Lives next to `DownloadMetadata` since M5/U6 (moved from
+/// `models/cache.rs` — it is an engine-side completion mirror keyed by
+/// the metadata type, not an API cache container).
+///
+/// Key contract: the key is the BARE filename — no model, revision, or
+/// path component — so two models (or revisions) downloading a file
+/// with the same name overwrite each other's completion/HUD entry. The
+/// collision is a known deferred defect: the fix (keying by
+/// model/revision/path) changes registry-adjacent bytes and needs its
+/// own sign-off — see
+/// docs/DEFERRED.md#complete-downloads-filename-key-collision.
+pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
 
 /// Typed per-file result of a download attempt, collected by the engine's
 /// download manager. The TUI ignores these (it renders from status strings);

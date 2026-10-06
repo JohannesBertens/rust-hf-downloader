@@ -1,9 +1,10 @@
 //! API cache containers: the per-endpoint map aliases, the search key, the
 //! `ApiCache` aggregate that holds them, and its shared get-or-fetch
-//! helper (W4.11).
+//! helper (W4.11). The `CompleteDownloads` mirror used to live here too —
+//! M5/U6 moved it to `models/engine.rs` next to `DownloadMetadata` (it is
+//! an engine-side completion mirror, not an API cache container).
 
 use super::api::{ModelInfo, ModelMetadata, QuantizationGroup};
-use super::engine::DownloadMetadata;
 use super::ui::{FileTreeNode, SortDirection, SortField};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -11,7 +12,6 @@ use std::future::Future;
 use std::sync::Arc;
 
 pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
-pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
 
 // Additional cache types for comprehensive API caching
 pub type MetadataCache = HashMap<String, ModelMetadata>;

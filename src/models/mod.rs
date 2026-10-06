@@ -12,10 +12,11 @@
 //!   `FileTreeNode` (constructed by `api`, owned by the UI that renders it)
 //! - `engine` — progress, queue and verification types exchanged with the
 //!   engine: `ChunkProgress`, `DownloadProgress`, `DownloadStatus`,
-//!   `DownloadMetadata`, `DownloadRegistry`, `FileOutcome`, `VerifyOutcome`,
+//!   `DownloadMetadata`, `DownloadRegistry`, `CompleteDownloads` (moved
+//!   here from `cache` in M5/U6), `FileOutcome`, `VerifyOutcome`,
 //!   `QueueTotals`, `QueueItemSummary`, `VerificationProgress`,
 //!   `VerificationQueueItem`
-//! - `cache` — cache aliases (`QuantizationCache`, `CompleteDownloads`,
+//! - `cache` — cache aliases (`QuantizationCache`,
 //!   `MetadataCache`, `FileTreeCache`, `SearchCache`), `SearchKey`, `ApiCache`
 //! - `options` — `AppOptions`, the persisted config-file schema (every serde
 //!   attribute is load-bearing)
