@@ -51,3 +51,23 @@ Executes `plans/readability-maintainability-refactor.md` in full
 266 → 431 tests; every commit individually gated (full suite +
 clippy-zero + fmt-clean). New families: style-signature, size-matrix,
 HUD-threshold, enqueue-policy, exit-code matrix, registry byte-goldens.
+
+## Windows CI fixes
+
+The new test families were only ever exercised on Linux; the v2.13.2
+tag build caught three Windows-only issues (28 failures, run
+37419080867), all in test code:
+
+- The registry TOML byte-goldens expected `"C:\\Users\\…"` (escaped
+  basic string), but the `toml` serializer emits a literal string
+  (`'C:\Users\…'`, raw separators) when a value contains backslashes.
+  The `esc()` helper now produces exactly the token `toml` emits;
+  Linux bytes are unchanged.
+- The token-matrix temp config dirs embedded `{env:?}` → `Some("env")`;
+  the Debug quotes are invalid Windows filename characters
+  (CreateFile error 123). Stripped.
+- One golden assert panicked while holding the crate-wide `ENV_MUTEX`,
+  poisoning it — every later `.lock().unwrap()` on it (19 tests across
+  engine/, ui/app) then failed with `PoisonError`. All test-side
+  `ENV_MUTEX` locks now recover from poisoning, matching the pattern
+  the registry and options tests already used.

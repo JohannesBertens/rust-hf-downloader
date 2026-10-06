@@ -108,7 +108,7 @@ mod tests {
     // serializes env-mutating tests; other tokio workers keep making progress.
     #[allow(clippy::await_holding_lock)]
     async fn manager_drains_when_channel_closed() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-drain-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));

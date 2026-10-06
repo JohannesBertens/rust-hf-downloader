@@ -512,7 +512,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_tui_quant_records_zero_size_registry_entries_and_queues_all() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-quant-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -561,7 +561,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_tui_repository_records_queued_size_registry_entries() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-repo-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -598,7 +598,7 @@ mod tests {
     async fn enqueue_mirror_dedupes_by_url_and_skips_invalid_files_but_still_queues_them() {
         use crate::paths::sanitize::PathError;
 
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-dup-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -665,7 +665,7 @@ mod tests {
     async fn enqueue_disk_policy_aborts_on_first_invalid_file_without_queueing() {
         use crate::paths::sanitize::PathError;
 
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-abort-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -708,7 +708,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_disk_policy_upserts_disk_registry_not_the_mirror() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-disk-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -774,7 +774,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_failed_sends_roll_back_queue_accounting_for_tui_confirm_flavors() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-roll-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -809,7 +809,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_resume_flavor_accounts_after_sends_and_never_rolls_back() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-resume-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -841,7 +841,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_cli_flavors_push_items_upfront_without_rollback() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-cli-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
