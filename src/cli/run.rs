@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::args::{apply_rate_limit_overrides, merge_token};
+use super::args::{apply_rate_limit_overrides, merge_token, valid_model_id};
 use super::events::{ErrorCode, Event, FileStatus, OverallProgress};
 use super::report::Reporter;
 use super::resolve::FileSpec;
@@ -166,6 +166,28 @@ pub(super) fn effective_revision(revision: &Option<String>) -> String {
     revision
         .clone()
         .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string())
+}
+
+/// Shared `--model-id` usage gate (M6/C1: the block was triplicated across
+/// `download_cmd`, `hf-cache sync`, and `hf-cache path`): a model id must
+/// be exactly `author/model-name`. Returns `Err(EXIT_USAGE)` for a
+/// malformed id; the caller owns emission — the human/JSON paths differ
+/// per site (Reporter `usage` event for the engine-driven commands, plain
+/// `error [usage]:` eprintln in `hf-cache path`), wording from
+/// [`invalid_model_id_message`].
+pub(super) fn require_valid_model_id(model_id: &str) -> Result<(), i32> {
+    if valid_model_id(model_id) {
+        Ok(())
+    } else {
+        Err(EXIT_USAGE)
+    }
+}
+
+/// Usage message for a malformed model id — the exact historical bytes of
+/// all three former call sites (pinned end-to-end by the H4
+/// `human-usage-error` golden in tests/cli_exit_codes.rs).
+pub(super) fn invalid_model_id_message(model_id: &str) -> String {
+    format!("invalid model ID {model_id:?} — expected \"author/model-name\"")
 }
 
 /// Metadata-fetch failure shared by `download` and `hf-cache sync`
@@ -792,6 +814,24 @@ mod tests {
         assert_eq!(
             effective_revision(&Some("deadbeef".repeat(5))),
             "deadbeef".repeat(5)
+        );
+    }
+
+    /// C1 pin: the shared model-id gate validates exactly like
+    /// `args::valid_model_id`, returns EXIT_USAGE, and the message is the
+    /// historical byte-exact wording all three call sites emitted.
+    #[test]
+    fn model_id_gate_wording_and_exit_code_are_pinned() {
+        assert_eq!(require_valid_model_id("a/b"), Ok(()));
+        for bad in ["a", "a/b/c", "/b", "a/", ""] {
+            assert!(
+                matches!(require_valid_model_id(bad), Err(EXIT_USAGE)),
+                "gate accepted {bad:?}"
+            );
+        }
+        assert_eq!(
+            invalid_model_id_message("nodash"),
+            "invalid model ID \"nodash\" — expected \"author/model-name\""
         );
     }
 
