@@ -28,15 +28,17 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 ## registry-atomic-save
 
 - **Symbol:** `save_registry`
-- **Status:** fix in flight (M1, finding R5)
-- **Finding:** the registry save in `src/registry.rs` is a plain
-  `fs::File::create` write — a crash mid-save truncates
+- **Status:** resolved (M1, finding R5 — landed 2026-10-06)
+- **Finding:** the registry save in `src/registry.rs` was a plain
+  `fs::File::create` write — a crash mid-save truncated
   `hf-downloads.toml`, and the load side silently resets to an empty
   registry on parse failure.
-- **Remedy:** same-directory temp file + `sync_all()` + rename-with-retry
-  (Windows-aware: the retry absorbs `rename` over a file a reader holds
-  without share-delete). Byte-level op behavior stays pinned by the
-  `registry_tests` goldens.
+- **Remedy (landed):** same-directory temp file + `sync_all()` +
+  rename-with-retry via `utils::atomic_rename_with_retry` (the sync twin;
+  the retry absorbs Windows `rename` over a file a reader holds without
+  share-delete). The temp file never litters (pinned by
+  `registry_tests::save_is_atomic_no_temp_litter`); op bytes stayed
+  pinned by the `registry_tests` goldens.
 - **Provenance:** readability plan §8 item 5; architecture plan §3.1 R5.
 
 ## registry-cross-process-lock
@@ -45,11 +47,12 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 - **Status:** deferred (optional follow-on to M1)
 - **Finding:** registry writes race across **processes** — a concurrent CLI
   run and TUI session (or two CLI runs) can lose updates. M1's single
-  writer will be process-global, not cross-process, and the atomic save
+  writer is process-global, not cross-process, and the atomic save
   prevents torn files, not lost writes. (The *in-process* variant —
   manager vs verification worker, previously pinned as desired by the
-  two-writer tests — will be fixed by M1 under the R4 sign-off: every
-  writer's update survives, no lost updates.)
+  two-writer tests — **was fixed by M1, landed 2026-10-06** under the R4
+  sign-off: every writer's update survives, no lost updates; the
+  two-writer tests now assert all-writers-win.)
 - **Remedy:** advisory lock file around the write window, if concurrent
   front-ends ever matter enough.
 - **Provenance:** architecture plan §8; readability plan §8 (the pinned

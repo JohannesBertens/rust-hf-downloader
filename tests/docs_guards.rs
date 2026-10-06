@@ -21,6 +21,14 @@
 //!    any library-target test flag) mentioned in TESTING.md resolves to a
 //!    real target — finding D1: TESTING.md prescribed non-existent targets
 //!    (`--test integration`, a lib target on a bin-only crate).
+//! 4. [`registry_disk_writes_confined_to_registry_module`] — no
+//!    `fs::write`/`File::create`/`write_all` on a registry path outside
+//!    `src/registry.rs` + its own submodule — M1 of
+//!    `plans/architecture-simplification-review.md`: registry writes are
+//!    serialized through `registry::with_registry` (single writer,
+//!    atomic save); `load_registry`/`save_registry` are module-private,
+//!    so this guard catches the *hand-rolled* fourth bypass site (a raw
+//!    fs write that privatization alone cannot stop).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -282,6 +290,45 @@ fn no_bare_plan_section_anchors_in_src() {
         "expected at least one checked symbol per register entry (checked {checked}, \
          entries {})",
         entries.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Guard (d): registry writes confined to the registry module (M1)
+// ---------------------------------------------------------------------------
+
+/// No direct filesystem write to the registry file outside `src/registry.rs`
+/// and its own submodules (`src/registry/**`). Every registry mutation must
+/// go through `registry::with_registry` — the process-global single writer
+/// with the atomic temp+rename save. `load_registry`/`save_registry` are
+/// module-private, so a bypass that *reuses* them cannot compile; this
+/// guard catches the shape privatization cannot: a call site hand-rolling
+/// `fs::write`/`File::create` (or `write_all` on a handle) against
+/// `registry_path()` / the `hf-downloads.toml` file name. The registry
+/// module's own tests (`registry_tests` fixtures) are exempt — they are
+/// inside the module that owns the write discipline.
+#[test]
+fn registry_disk_writes_confined_to_registry_module() {
+    let write_re = Regex::new(r"fs::write|File::create|write_all").unwrap();
+    let registry_path_re = Regex::new(r"registry_path|hf-downloads\.toml").unwrap();
+    let mut violations: Vec<String> = Vec::new();
+    for (path, contents) in src_files() {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        if normalized.ends_with("src/registry.rs") || normalized.contains("/registry/") {
+            continue; // the module that owns the discipline (+ its fixtures)
+        }
+        for (idx, line) in contents.lines().enumerate() {
+            if write_re.is_match(line) && registry_path_re.is_match(line) {
+                violations.push(format!("  {}:{}: {}", path.display(), idx + 1, line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "registry writes live outside src/registry.rs — every mutation must go \
+         through registry::with_registry (single writer, atomic save); a direct \
+         fs write to the registry path is a bypass site:\n{}",
+        violations.join("\n")
     );
 }
 

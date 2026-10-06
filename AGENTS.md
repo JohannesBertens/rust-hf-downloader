@@ -37,7 +37,7 @@ src/
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)
 ├── api/              # HuggingFace API client behind a facade (W3.2): client.rs (fetch + pure filter_models/sort_models W3.3; every fetch fn takes the run's shared &reqwest::Client, M4/B5 — no per-request clients; recursive tree fetch propagates subdir errors, M4/B3; api_base() honors HF_ENDPOINT), quant.rs (GGUF classification + unified multipart parsing), tree.rs (file-tree building)
 ├── http_client.rs    # Authenticated HTTP requests (v0.9.5; M4/B5): build_client_with_token constructs the ONE shared client per run (token = default Authorization header; a non-representable token is an explicit ClientBuildError, never a silent unauthenticated downgrade) + get_with_optional_token thin GET wrapper
-├── registry.rs       # Download metadata management + typed mutation ops (W2.4): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch — every registry write routes through them (disk is source of truth: load disk → mutate → non-atomic save; pure disk ops — the mismatch engine-mirror patch lives at the verification caller; see registry.rs module docs)
+├── registry.rs       # Download metadata management + typed mutation ops behind a single writer (W2.4 + M1): register_pending (CLI pending seeder) / upsert_pending / upsert_metadata / mark_complete (Completion::{AlreadyExists, Downloaded} flavors) / mark_failed / mark_mismatch / delete_incomplete_by_urls (TUI delete) / purge_staging (hf-cache) — every write runs inside with_registry (process-global std-mutex single writer, leaf-only sync closures, returns the post-write snapshot for mirror replacement): load disk → mutate → ATOMIC save (same-dir temp + sync_all + rename-with-retry, Windows-aware) ; load_registry/save_registry are module-private (bypass sites cannot compile; tests/docs_guards.rs rejects hand-rolled registry-path fs writes); reads (read_registry) take no lock — the atomic save means a reader never sees a torn file; see registry.rs module docs)
 ├── download/         # Download transport with auth; returns FileOutcome (v0.9.5). Facade (mod.rs) holds start_download = prepare_download_paths / handle_existing_file / execute_download_with_retry phases (W5.1a), retry glue, and the global DOWNLOAD_CONFIG/RATE_LIMITER atomics; private chunked.rs (W3.8) holds download_chunked = probe_file_size + spawn_chunk_tasks/wait_for_chunks phases (W5.1b — tasks live in a JoinSet, M4/B4: first error aborts every sibling before the retry loop recreates the file, pinned deterministically in chunked::abort_tests), the per-chunk worker (bundled ChunkContext, W5.6), and chunk-size math. Error paths pinned by tests/download_failures.rs; the cross-chunk byte counter is an Arc<AtomicU64> (single-counter audit), the speed-pacing Instant+marker pair stays mutexed (compound)
 ├── rate_limiter.rs   # Token bucket rate limiter (v1.2.0)
 ├── verification.rs   # SHA256 verification worker (typed outcomes + idle signal)
@@ -68,19 +68,37 @@ src/
 ### Frontends share one engine (v2.13.2)
 
 Every registry mutation goes through the typed ops in `registry.rs`
-(W2.4): `register_pending`, `upsert_pending`, `upsert_metadata`,
+(W2.4, M1): `register_pending`, `upsert_pending`, `upsert_metadata`,
 `mark_complete` (one fn taking a `Completion::{AlreadyExists, Downloaded}`
 flavor — the two former `mark_complete`/`mark_complete_with_url` ops
-merged), `mark_failed`, `mark_mismatch`. Each op loads
-the on-DISK registry, mutates, saves (non-atomic by design — §8.5); no
-lock is held across the load-modify-save (the concurrent-writer
-lost-update race is a known deferred defect, §8). `mark_complete`
-patches the caller's mirror after the save regardless of its outcome;
-`mark_mismatch` is pure disk ops — its engine-mirror patch lives at the
-caller (`verification::mark_mismatch_mirror`), run immediately after the
-op. Do not reintroduce inline load-modify-save
-sequences at call sites — the byte-level behavior of every op is pinned
-by the golden fixtures in `registry::registry_tests`.
+merged), `mark_failed`, `mark_mismatch`, plus the M1 bulk ops
+`delete_incomplete_by_urls` (TUI delete flow) and `purge_staging`
+(hf-cache sync). Every op runs inside `registry::with_registry` — the
+process-global single writer (`REGISTRY_WRITE`, a std mutex): load the
+on-DISK registry → mutate → **atomic** save (same-dir temp file +
+`sync_all()` + rename-with-retry) → return the post-write snapshot.
+Callers that keep an engine mirror replace it from the returned snapshot
+AFTER the writer releases (never patch the mirror under the lock);
+`mark_mismatch`'s surgical mirror patch stays at its caller
+(`verification::mark_mismatch_mirror`), run immediately after the op;
+`mark_complete` patches the caller's complete-downloads mirror after the
+save regardless of its outcome. Closures passed to `with_registry` are
+**leaf-only** (no nested registry ops — a debug assertion fires; the std
+mutex is non-reentrant) and must not `.await` (ops are sync; brief file
+IO under the lock is accepted). `load_registry`/`save_registry` are
+module-private to `registry.rs` — a new inline load-modify-save bypass
+site cannot compile, and a hand-rolled `fs::write`/`File::create`
+against the registry path fails
+`tests/docs_guards.rs::registry_disk_writes_confined_to_registry_module`.
+Reads (`registry::read_registry`) take no lock: the atomic save means a
+concurrent reader sees the complete pre- or post-write file, never a
+torn one. In-process lost updates are FIXED (M1, R4 sign-off: every
+writer's update survives — the two-writer tests in
+`registry::registry_tests` assert all-writers-win); cross-process safety
+remains deferred (docs/DEFERRED.md#registry-cross-process-lock). Do not
+reintroduce inline load-modify-save sequences at call sites — the
+byte-level behavior of every op is pinned by the golden fixtures in
+`registry::registry_tests`.
 
 The CLI frontends (`cli::run_download`, `cli::hf-cache sync`) bootstrap the
 queue/download pipeline through `engine::bootstrap()` — fresh
@@ -223,6 +241,13 @@ Lock Hierarchy (acquire in this order — the ordering constrains **blocking** `
 Also lock-free, no hierarchy level: `verification_results`
 (`VerificationResultCounters` — session-lifetime ok/failed counters, each an
 `Arc<AtomicUsize>`).
+
+Also registry-internal, no hierarchy level: `REGISTRY_WRITE` (the
+single-writer `std::sync::Mutex` inside `src/registry.rs`, M1). It is not
+an `EngineState` field and does not change the acquisition discipline
+above: registry ops are sync and leaf-only, so the guard is never held
+while acquiring an engine lock (mirror patches happen after
+`with_registry` returns, and reads take no lock at all).
 
 Key Rules:
 - The ordering rule applies to BLOCKING `.lock().await` acquisitions: ALWAYS acquire them in the order above

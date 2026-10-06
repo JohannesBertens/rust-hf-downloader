@@ -640,15 +640,148 @@ fn acquire_sync_lock_or_fail(
 /// hf-cache fetches there (it cannot tell cache syncs from flat
 /// downloads); those paths are renamed away or cleaned at publish, so the
 /// entries would dangle forever in the TUI's resume/complete views.
-/// Best-effort: registry errors are ignored (the sync itself must not
-/// fail because housekeeping did).
+/// Delegates to the typed op `registry::purge_staging` (M1 — this used to
+/// be the third inline load-modify-save bypass site); the op's exact
+/// predicate and TOML bytes are pinned in `registry::registry_tests` and
+/// the pin at the bottom of this file. Best-effort: registry errors are
+/// ignored (the sync itself must not fail because housekeeping did).
 fn purge_staging_registry_entries() {
-    let mut registry = crate::registry::load_registry();
-    let before = registry.downloads.len();
-    registry
-        .downloads
-        .retain(|d| !d.local_path.contains(".rhd-staging"));
-    if registry.downloads.len() != before {
-        crate::registry::save_registry(&registry);
+    crate::registry::purge_staging();
+}
+
+#[cfg(test)]
+mod tests {
+    //! M1 pin for the staging purge (typed-op conversion, validation-first):
+    //! the exact `contains(".rhd-staging")` predicate and the exact TOML
+    //! bytes the purge leaves behind, plus the conditional-save contract
+    //! (nothing to purge → NO write, a missing registry file is not
+    //! materialized). Seeding goes through `registry::upsert_pending` — the
+    //! registry module owns every disk write to its own file.
+    use super::*;
+
+    /// RAII guard redirecting `RUST_HF_DOWNLOADER_DATA_DIR` (moves the
+    /// registry path on every platform) — same pattern as the engine
+    /// tests' EnvGuard, minus the endpoint (the purge resolves no urls).
+    struct DataDirGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl DataDirGuard {
+        fn install(dir: &Path) -> Self {
+            let original = std::env::var_os(crate::paths::ENV_DATA_DIR);
+            std::env::set_var(crate::paths::ENV_DATA_DIR, dir);
+            Self { original }
+        }
+    }
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => std::env::set_var(crate::paths::ENV_DATA_DIR, v),
+                None => std::env::remove_var(crate::paths::ENV_DATA_DIR),
+            }
+        }
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rhd-purge-pin-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn entry(url: &str, filename: &str, local_path: String) -> crate::models::DownloadMetadata {
+        crate::models::DownloadMetadata {
+            model_id: "org/model".to_string(),
+            filename: filename.to_string(),
+            url: url.to_string(),
+            local_path,
+            total_size: 7,
+            downloaded_size: 3,
+            status: crate::models::DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: None,
+        }
+    }
+
+    fn read_registry_file() -> String {
+        std::fs::read_to_string(crate::paths::registry_path()).expect("registry file readable")
+    }
+
+    #[test]
+    fn purge_staging_pin_drops_only_rhd_staging_entries_and_pins_toml_bytes() {
+        let _env = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp("golden");
+        let _guard = DataDirGuard::install(&tmp);
+
+        // Three entries: two live under a `.rhd-staging` directory (one
+        // deep, one shallow), one is a regular download. Seeded through
+        // the typed op — never a hand-rolled write.
+        let keep = entry(
+            "https://huggingface.co/org/model/resolve/main/keep.bin",
+            "keep.bin",
+            tmp.join("org")
+                .join("model")
+                .join("keep.bin")
+                .to_string_lossy()
+                .to_string(),
+        );
+        let staging_deep = entry(
+            "https://huggingface.co/org/model/resolve/main/deep.safetensors",
+            "deep.safetensors",
+            tmp.join(".rhd-staging")
+                .join("pub")
+                .join("deep.safetensors")
+                .to_string_lossy()
+                .to_string(),
+        );
+        let staging_shallow = entry(
+            "https://huggingface.co/org/model/resolve/main/shallow.safetensors",
+            "shallow.safetensors",
+            tmp.join(".rhd-staging")
+                .join("shallow.safetensors")
+                .to_string_lossy()
+                .to_string(),
+        );
+        crate::registry::upsert_pending(&[staging_deep, keep.clone(), staging_shallow]);
+
+        purge_staging_registry_entries();
+
+        // Exact TOML golden: only the clean entry survives, every field
+        // byte-identical (order preserved — purge is a retain, not a sort).
+        let expected = toml::to_string_pretty(&crate::models::DownloadRegistry {
+            downloads: vec![keep],
+        })
+        .expect("serialize expected registry");
+        assert_eq!(read_registry_file(), expected);
+    }
+
+    #[test]
+    fn purge_staging_pin_writes_nothing_when_no_entry_matches() {
+        let _env = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tmp("noop");
+        let _guard = DataDirGuard::install(&tmp);
+
+        // No registry file at all: the purge must not materialize an empty
+        // one (the legacy conditional-save contract).
+        purge_staging_registry_entries();
+        assert!(!crate::paths::registry_path().exists());
+
+        // And with only clean entries on disk, the bytes stay untouched.
+        let keep = entry(
+            "https://huggingface.co/org/model/resolve/main/keep.bin",
+            "keep.bin",
+            tmp.join("keep.bin").to_string_lossy().to_string(),
+        );
+        crate::registry::upsert_pending(&[keep]);
+        let before = read_registry_file();
+        purge_staging_registry_entries();
+        assert_eq!(read_registry_file(), before);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

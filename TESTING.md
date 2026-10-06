@@ -51,7 +51,7 @@ Each `tests/<name>.rs` file is one cargo target; run with
 | `tests/download_failures.rs` | Wire-level download failure injection: exit codes, on-disk state, final registry state through the W5.1a/b phases |
 | `tests/hf_cache_sync.rs` | `hf-cache sync` / `hf-cache path` end-to-end: staging→publish, layout, exit codes |
 | `tests/update_e2e.rs` | Self-update flow against a fake release dir served over local HTTP (temp-copy binary swaps itself) |
-| `tests/docs_guards.rs` | Documentation truth guards: AGENTS.md lock-hierarchy completeness, §-anchor/DEFERRED hygiene, TESTING.md target existence |
+| `tests/docs_guards.rs` | Documentation truth guards: AGENTS.md lock-hierarchy completeness, §-anchor/DEFERRED hygiene, TESTING.md target existence, registry-write confinement to `src/registry.rs` (M1) |
 
 `tests/common/mod.rs` is the shared harness (mock server, env isolation) —
 not a target itself.
@@ -67,7 +67,7 @@ test splits.
 |---|---|---|
 | `src/config.rs` | config load/save/apply paths | `cargo test config` |
 | `src/paths.rs` | path-resolution precedence + sanitize security | `cargo test paths` |
-| `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, concurrency/failure contracts | `cargo test registry` |
+| `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, single-writer serialization + all-writers-win concurrency contracts, atomic-save temp-file hygiene | `cargo test registry` |
 | `src/engine/enqueue.rs` | 8 EnqueuePolicy characterization tests (the single enqueue transaction) | `cargo test enqueue` |
 | `src/engine/workers.rs` | manager drain/join contract | `cargo test workers` |
 | `src/engine/bootstrap.rs` | bootstrap sequence | `cargo test bootstrap` |

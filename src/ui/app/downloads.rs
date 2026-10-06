@@ -312,11 +312,12 @@ impl App {
         let mut deleted = 0;
         let mut errors = Vec::new();
 
-        // Load registry
-        let mut registry = {
-            let reg = self.engine.download_registry.lock().await;
-            reg.clone()
-        };
+        // The urls to drop from the registry, collected up front.
+        let urls: Vec<String> = self
+            .incomplete_downloads
+            .iter()
+            .map(|metadata| metadata.url.clone())
+            .collect();
 
         for metadata in &self.incomplete_downloads {
             // Try to delete the actual .incomplete file
@@ -329,17 +330,16 @@ impl App {
                     errors.push(format!("{}: {}", metadata.filename, e));
                 }
             }
-
-            // Remove from registry
-            registry.downloads.retain(|d| d.url != metadata.url);
         }
 
-        // Save updated registry
-        registry::save_registry(&registry);
-        {
-            let mut reg = self.engine.download_registry.lock().await;
-            *reg = registry;
-        }
+        // Registry write through the typed op (M1 — this used to clone the
+        // engine mirror and save it, the R1 bypass site): the op loads the
+        // on-DISK registry (never the mirror), drops the selected urls,
+        // saves atomically under the registry single writer, and returns
+        // the post-write snapshot — the mirror is replaced from it here,
+        // after the writer released.
+        let snapshot = registry::delete_incomplete_by_urls(&urls);
+        *self.engine.download_registry.lock().await = snapshot;
 
         if errors.is_empty() {
             *self.status.write() = format!("Deleted {} incomplete file(s)", deleted);
@@ -1116,6 +1116,86 @@ mod tests {
             .await
             .downloads
             .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// M1 pin for the TUI delete flow (typed-op conversion, validation-first):
+    /// the registry effect of deleting incomplete downloads — the selected
+    /// urls drop from DISK (exact TOML bytes), the engine mirror ends up
+    /// equal to what is on disk, the status line reports the deleted count,
+    /// and the `.incomplete` file on disk is removed. Disk and mirror are
+    /// seeded identically (what the TUI startup scan produces); the delete
+    /// file-removal step runs against a real temp file.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn delete_incomplete_pins_disk_bytes_mirror_and_status() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-delete-incomplete-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        fn entry(url: &str, filename: &str, local_path: String) -> DownloadMetadata {
+            DownloadMetadata {
+                model_id: "org/model".to_string(),
+                filename: filename.to_string(),
+                url: url.to_string(),
+                local_path,
+                total_size: 9,
+                downloaded_size: 4,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: None,
+                revision: None,
+            }
+        }
+
+        let selected = entry(
+            "https://huggingface.co/org/model/resolve/main/selected.bin",
+            "selected.bin",
+            tmp.join("selected.bin").to_string_lossy().to_string(),
+        );
+        let other = entry(
+            "https://huggingface.co/org/model/resolve/main/other.bin",
+            "other.bin",
+            tmp.join("other.bin").to_string_lossy().to_string(),
+        );
+
+        // Disk seeded through the typed op, mirror seeded from disk — the
+        // state the TUI startup scan leaves behind.
+        crate::registry::upsert_pending(&[selected.clone(), other.clone()]);
+        let mut app = App::new();
+        *app.engine.download_registry.lock().await = crate::registry::read_registry();
+        app.incomplete_downloads = vec![selected.clone()];
+
+        // The `.incomplete` file the delete flow removes on disk.
+        let incomplete_file =
+            std::path::PathBuf::from(format!("{}.incomplete", selected.local_path));
+        std::fs::write(&incomplete_file, b"partial").expect("write .incomplete fixture");
+
+        app.delete_incomplete_downloads().await;
+
+        // Status line: one file removed, no errors.
+        assert_eq!(*app.status.read(), "Deleted 1 incomplete file(s)");
+        assert!(app.incomplete_downloads.is_empty());
+        assert!(!incomplete_file.exists(), ".incomplete file removed");
+
+        // Disk: exact TOML golden — only the unselected entry survives.
+        let disk_bytes =
+            std::fs::read_to_string(crate::paths::registry_path()).expect("registry readable");
+        let expected = toml::to_string_pretty(&crate::models::DownloadRegistry {
+            downloads: vec![other.clone()],
+        })
+        .expect("serialize expected registry");
+        assert_eq!(disk_bytes, expected);
+
+        // Mirror: replaced from the post-delete registry state — equal to
+        // what is on disk.
+        let mirror = app.engine.download_registry.lock().await;
+        assert_eq!(mirror.downloads.len(), 1);
+        assert_eq!(mirror.downloads[0].url, other.url);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
