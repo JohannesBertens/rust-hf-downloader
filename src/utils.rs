@@ -2,9 +2,8 @@
 //! the formatting delegates moved to their single home [`crate::fmt`]):
 //!
 //! - **Digest streaming**: [`stream_file_digest`] (one buffered
-//!   read+hash loop with per-chunk callbacks) plus [`sha256_file`] and
-//!   [`DIGEST_CHUNK`] — used by the verification worker and the hub-cache
-//!   layout writer.
+//!   read+hash loop with per-chunk callbacks) and [`DIGEST_CHUNK`] — used
+//!   by the verification worker and the hub-cache layout writer.
 //! - **Atomic rename**: [`atomic_rename_with_retry`] and its async twin
 //!   [`atomic_rename_with_retry_async`] — the shared final-rename
 //!   primitive whose retry policy is chosen per call site (the download
@@ -14,12 +13,11 @@
 //! Nothing else belongs here — both families are generic over their
 //! callers (no UI, CLI, engine or registry concepts appear below).
 
-use sha2::Digest as _;
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-/// Read granularity of [`sha256_file`] and the hub-cache blob hasher.
+/// Read granularity of the hub-cache blob hasher.
 /// 64 KiB amortizes syscall overhead well below the SHA-NI hashing
 /// ceiling; callers with progress-reporting needs pick their own size via
 /// [`stream_file_digest`].
@@ -60,23 +58,6 @@ where
         on_chunk(&buffer[..bytes_read], hashed);
     }
     Ok(hashed)
-}
-
-/// Streaming SHA-256 of a file's contents, hex-encoded (BufReader with a
-/// fixed [`DIGEST_CHUNK`] buffer — the whole file is never held in
-/// memory). Files that change while being hashed produce whatever digest
-/// the interleaved reads saw; callers that must detect that race should
-/// use [`stream_file_digest`] and compare bytes read against a stat taken
-/// up front.
-// 2026-10 (W1.6): no production caller yet — verification streams with
-//  progress callbacks and `update.rs` hashes network chunks — so this is
-//  pinned only by the known-vector tests below until a whole-file
-//  SHA-256 consumer appears.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let mut hasher = sha2::Sha256::new();
-    stream_file_digest(path, &mut hasher, DIGEST_CHUNK, |_, _| {})?;
-    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Rename with bounded retry for transient filesystem locks.
@@ -145,6 +126,7 @@ pub async fn atomic_rename_with_retry_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("rhd-utils-{tag}-{}", std::process::id()));
@@ -224,34 +206,6 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, bytes).expect("write temp file");
         path
-    }
-
-    #[test]
-    fn sha256_file_known_vectors() {
-        // Reference vectors for the bare content hash (no git blob header).
-        let empty = write_tmp_file("digest-empty", "empty", b"");
-        assert_eq!(
-            sha256_file(&empty).unwrap(),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        let hello = write_tmp_file("digest-hello", "hello", b"hello\n");
-        assert_eq!(
-            sha256_file(&hello).unwrap(),
-            "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
-        );
-        let _ = std::fs::remove_dir_all(empty.parent().unwrap());
-        let _ = std::fs::remove_dir_all(hello.parent().unwrap());
-    }
-
-    #[test]
-    fn sha256_file_hashes_multi_chunk_files_exactly() {
-        // 1 MiB + 1 B: strictly larger than the 64 KiB digest buffer and
-        // not an exact multiple of it, so the loop must handle a short
-        // final chunk.
-        let payload = pseudo_random(1024 * 1024 + 1);
-        let path = write_tmp_file("digest-big", "big.bin", &payload);
-        assert_eq!(sha256_file(&path).unwrap(), sha256_one_shot(&payload));
-        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

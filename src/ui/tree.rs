@@ -49,6 +49,39 @@ pub fn flatten_tree_for_navigation(node: &FileTreeNode) -> Vec<FileTreeNode> {
     flatten_tree(node)
 }
 
+/// Count visible (flattened) nodes in the tree without cloning or allocating.
+pub fn count_visible_nodes(node: &FileTreeNode) -> usize {
+    let mut count = 0;
+    count_visible_nodes_recursive(node, &mut count);
+    count
+}
+
+fn count_visible_nodes_recursive(node: &FileTreeNode, count: &mut usize) {
+    for child in &node.children {
+        *count += 1;
+        if child.is_dir && child.expanded {
+            count_visible_nodes_recursive(child, count);
+        }
+    }
+}
+
+/// Flatten tree into a list of node references for inspection without cloning.
+#[allow(dead_code)] // 2026-10 (U3): borrowed tree flattening for zero-copy inspection
+pub fn flatten_tree_refs(node: &FileTreeNode) -> Vec<&FileTreeNode> {
+    let mut result = Vec::new();
+    flatten_tree_refs_recursive(node, &mut result);
+    result
+}
+
+fn flatten_tree_refs_recursive<'a>(node: &'a FileTreeNode, result: &mut Vec<&'a FileTreeNode>) {
+    for child in &node.children {
+        result.push(child);
+        if child.is_dir && child.expanded {
+            flatten_tree_refs_recursive(child, result);
+        }
+    }
+}
+
 /// Helper function to toggle a node's expansion state by path
 pub fn toggle_node_expansion(node: &mut FileTreeNode, target_path: &str) -> bool {
     for child in &mut node.children {
@@ -252,5 +285,39 @@ mod tests {
             &mut tree,
             "root/Q4_K_M/shards/s1.gguf"
         ));
+    }
+
+    #[test]
+    fn count_visible_nodes_matches_flatten_tree_len_across_permutations() {
+        let mut tree = nested_tree();
+
+        // 1. Initial state: Q4_K_M expanded, shards collapsed, original collapsed
+        assert_eq!(count_visible_nodes(&tree), flatten_tree(&tree).len());
+        assert_eq!(flatten_tree_refs(&tree).len(), flatten_tree(&tree).len());
+
+        // 2. Expand shards
+        toggle_node_expansion(&mut tree, "root/Q4_K_M/shards");
+        assert_eq!(count_visible_nodes(&tree), flatten_tree(&tree).len());
+        assert_eq!(flatten_tree_refs(&tree).len(), flatten_tree(&tree).len());
+
+        // 3. Expand original
+        toggle_node_expansion(&mut tree, "root/original");
+        assert_eq!(count_visible_nodes(&tree), flatten_tree(&tree).len());
+        assert_eq!(flatten_tree_refs(&tree).len(), flatten_tree(&tree).len());
+
+        // 4. Collapse Q4_K_M (which hides its expanded child shards)
+        toggle_node_expansion(&mut tree, "root/Q4_K_M");
+        assert_eq!(count_visible_nodes(&tree), flatten_tree(&tree).len());
+        assert_eq!(flatten_tree_refs(&tree).len(), flatten_tree(&tree).len());
+
+        // 5. Collapse original
+        toggle_node_expansion(&mut tree, "root/original");
+        assert_eq!(count_visible_nodes(&tree), flatten_tree(&tree).len());
+        assert_eq!(flatten_tree_refs(&tree).len(), flatten_tree(&tree).len());
+
+        // 6. Leaf file node
+        let leaf = file("root/README.md", 10);
+        assert_eq!(count_visible_nodes(&leaf), flatten_tree(&leaf).len());
+        assert_eq!(flatten_tree_refs(&leaf).len(), flatten_tree(&leaf).len());
     }
 }

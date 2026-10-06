@@ -1,12 +1,12 @@
 //! Keyboard event dispatch and the shared navigation surface (W3.9):
-//! [`App::on_key_event`] routes key presses by `PopupMode`/`InputMode`
-//! to the private [`keys`] submodule's handlers; this facade keeps the
-//! shared, non-keyboard-specific App methods — list navigation
-//! (`next`/`previous`, the quant/file/file-tree cursors via one
-//! `advance`), pane focus, filter-value mutation (presets, save,
-//! `modify_focused_filter`), `modify_option`, and file-tree expansion —
-//! plus the W4.6 navigation contract tests. Mouse handling lives in
-//! `ui/app/mod.rs` (next to the crossterm loop), not here.
+//! [`App::on_key_event`] routes key presses by `PopupMode` to the private
+//! [`keys`] submodule's handlers; this facade keeps the shared,
+//! non-keyboard-specific App methods — list navigation (`next`/`previous`,
+//! the quant/file/file-tree cursors via one `advance`), pane focus,
+//! filter-value mutation (presets, save, `modify_focused_filter`),
+//! `modify_option`, and file-tree expansion — plus the W4.6 navigation
+//! contract tests. Mouse handling lives in `ui/app/mod.rs` (next to the
+//! crossterm loop), not here.
 
 mod keys;
 
@@ -40,51 +40,19 @@ impl App {
             return;
         }
 
-        match self.input_mode {
-            InputMode::Normal => self.handle_normal_mode_input(key).await,
-        }
+        self.handle_normal_mode_input(key).await;
     }
 
     /// Navigate to next model in list
     pub fn next(&mut self) {
         let models_len = self.models.read().len();
-
-        if models_len == 0 {
-            return;
-        }
-
-        let i = match self.list_state.selected() {
-            Some(i) => {
-                if i >= models_len - 1 {
-                    0
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        self.list_state.select(Some(i));
+        advance(&mut self.list_state, models_len, true);
     }
 
     /// Navigate to previous model in list
     pub fn previous(&mut self) {
         let models_len = self.models.read().len();
-
-        if models_len == 0 {
-            return;
-        }
-
-        let i = match self.list_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    models_len - 1
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        self.list_state.select(Some(i));
+        advance(&mut self.list_state, models_len, false);
     }
 
     /// Focus a specific pane and select first item if needed
@@ -389,20 +357,18 @@ impl App {
 
     /// Navigate to next item in file tree
     pub fn next_file_tree_item(&mut self) {
-        let tree = self.file_tree.read().clone();
-
-        if let Some(tree) = tree {
-            let len = crate::ui::tree::flatten_tree_for_navigation(&tree).len();
+        let tree = self.file_tree.read();
+        if let Some(tree) = tree.as_ref() {
+            let len = crate::ui::tree::count_visible_nodes(tree);
             advance(&mut self.file_tree_state, len, true);
         }
     }
 
     /// Navigate to previous item in file tree
     pub fn previous_file_tree_item(&mut self) {
-        let tree = self.file_tree.read().clone();
-
-        if let Some(tree) = tree {
-            let len = crate::ui::tree::flatten_tree_for_navigation(&tree).len();
+        let tree = self.file_tree.read();
+        if let Some(tree) = tree.as_ref() {
+            let len = crate::ui::tree::count_visible_nodes(tree);
             advance(&mut self.file_tree_state, len, false);
         }
     }
@@ -417,7 +383,7 @@ impl App {
         let mut tree = self.file_tree.read().clone();
 
         if let Some(ref mut tree) = tree {
-            let flat = crate::ui::tree::flatten_tree_for_navigation(tree);
+            let flat = crate::ui::tree::flatten_tree_refs(tree);
 
             if selected_idx < flat.len() {
                 let selected_path = flat[selected_idx].path.clone();
@@ -432,16 +398,12 @@ impl App {
     }
 }
 
-/// Wrap-around cursor move shared by the quantization-group,
-/// quantization-file and file-tree lists (W4.6 — six per-fn copies of
-/// this match collapsed into one). Contract pinned by the table tests in
-/// `mod tests` below: `len == 0` is a no-op; an unselected list selects
-/// index 0 in BOTH directions; forward wraps last→first (and any
-/// out-of-bounds selection → 0); backward wraps first→last (an
+/// Wrap-around cursor move shared by all list navigations (W4.6).
+/// Contract pinned by the table tests in `mod tests` below: `len == 0` is a no-op;
+/// an unselected list selects index 0 in BOTH directions; forward wraps last→first
+/// (and any out-of-bounds selection → 0); backward wraps first→last (an
 /// out-of-bounds selection stays `i - 1`, out of bounds — historical
-/// behavior). The Models list keeps its own `next`/`previous` methods
-/// (their call sites also clear model details and trigger a quant
-/// reload).
+/// behavior).
 fn advance(state: &mut ListState, len: usize, forward: bool) {
     if len == 0 {
         return;

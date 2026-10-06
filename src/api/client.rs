@@ -245,6 +245,7 @@ fn fetch_recursive_tree<'a>(
 
 /// Fetch SHA256 hashes for multiple files in a single API call
 /// Returns a HashMap mapping filename to its SHA256 hash (if available)
+#[allow(dead_code)] // 2026-10 (B6): preserved in api::client facade
 pub async fn fetch_multipart_sha256s(
     model_id: &str,
     revision: &str,

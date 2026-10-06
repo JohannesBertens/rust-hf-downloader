@@ -32,7 +32,7 @@
 //! the macro call, i.e. `src/ui/render/snapshots/`. That is why the test
 //! modules are declared here as direct children instead of nesting deeper.
 
-use crate::models::{FocusedPane, InputMode, ModelDisplayMode, ModelInfo};
+use crate::models::{FocusedPane, ModelDisplayMode, ModelInfo, PopupMode};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -77,7 +77,7 @@ mod tests;
 /// precedence. One struct so the panel renderers no longer thread the
 /// three values separately.
 pub struct FocusCtx {
-    pub input_mode: InputMode,
+    pub popup_mode: PopupMode,
     pub focused_pane: FocusedPane,
     pub hovered_panel: Option<FocusedPane>,
 }
@@ -312,12 +312,12 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
 }
 
 /// Border style of a panel: yellow while the pane holds keyboard focus
-/// (Normal mode only), cyan while the mouse hovers it, default otherwise.
+/// (no popup open), cyan while the mouse hovers it, default otherwise.
 /// Single home for the guard the four panel renderers repeated verbatim
 /// (W3.4c); the H5 style-signature snapshots pin the precedence
 /// focus > hover > plain.
 pub(super) fn border_style(pane: FocusedPane, focus: &FocusCtx) -> Style {
-    if focus.input_mode == InputMode::Normal && focus.focused_pane == pane {
+    if focus.popup_mode == PopupMode::None && focus.focused_pane == pane {
         Style::default().fg(Color::Yellow)
     } else if focus.hovered_panel == Some(pane) {
         Style::default().fg(Color::Cyan)

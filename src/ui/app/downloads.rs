@@ -3,13 +3,11 @@
 //! policies (W2.1/W4.4). Observable behavior pinned byte-for-byte by the
 //! characterization tests at the bottom of this file.
 use super::state::App;
-use crate::api::fetch_multipart_sha256s;
 use crate::engine::{EnqueueOutcome, EnqueuePolicy, QueuedDownload};
 use crate::models::*;
 use crate::paths::sanitize::validate_and_sanitize_path;
 use crate::registry;
 use crate::ui::tree::count_tree_files;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tui_input::Input;
 
@@ -152,6 +150,11 @@ impl App {
             return;
         }
 
+        self.confirm_quant_download().await;
+    }
+
+    /// Download selected GGUF quantization (single file or entire group)
+    pub async fn confirm_quant_download(&mut self) {
         let models = self.models.read().clone();
         let quant_groups = self.quantizations.read().clone();
 
@@ -204,38 +207,7 @@ impl App {
                 // which will be appended during download, so we don't include them here
                 let model_path = model_root(&base_path, &model.id);
 
-                // Convert files_to_download to filenames
-                let filenames_to_download: Vec<String> = files_to_download
-                    .iter()
-                    .map(|f| f.filename.clone())
-                    .collect();
-
-                let num_files = filenames_to_download.len();
-
-                // Fetch multipart SHA256 hashes. The map itself is no
-                // longer read (every queued part carries its own sha from
-                // the quantization info; the map lookups were dead code),
-                // but the fetch and its failure warning are observable,
-                // so both stay.
-                let token = self.options.hf_token.as_ref();
-                let _sha256_map = if num_files > 1 {
-                    match fetch_multipart_sha256s(
-                        &model.id,
-                        crate::api::DEFAULT_REVISION,
-                        &filenames_to_download,
-                        token,
-                    )
-                    .await
-                    {
-                        Ok(map) => map,
-                        Err(e) => {
-                            *self.status.write() = format!("Warning: Failed to fetch SHA256 hashes: {}. Downloads will proceed without verification.", e);
-                            HashMap::new()
-                        }
-                    }
-                } else {
-                    HashMap::new() // Single file uses quant.sha256 directly
-                };
+                let num_files = files_to_download.len();
 
                 // Queue payload; the registry entries are derived from
                 // these same fields by the enqueue transaction below.
@@ -555,11 +527,7 @@ mod tests {
     //! test-constructible.
     //!
     //! Env discipline mirrors `engine.rs`'s tests: HOME (config + registry
-    //! path) and HF_ENDPOINT (api_base, `fetch_multipart_sha256s`) are
-    //! redirected under the crate-wide `ENV_MUTEX`; the endpoint points at
-    //! a closed localhost port so the multi-part SHA fetch fails fast and
-    //! deterministically (connection refused — the same observable the
-    //! status overwrite hides anyway).
+    //! path) and HF_ENDPOINT are redirected under the crate-wide `ENV_MUTEX`.
     use super::*;
     use crate::models::{
         DownloadStatus, LfsInfo, ModelDisplayMode, ModelInfo, ModelMetadata, PopupMode,
@@ -782,8 +750,7 @@ mod tests {
         .await;
 
         // Group focus downloads every part; the multi-part status string
-        // names the FIRST file. (The transient SHA-fetch warning — the
-        // endpoint is a closed port here — is overwritten by this line.)
+        // names the FIRST file.
         assert_eq!(app.popup_mode, PopupMode::None);
         let root = PathBuf::from(base_path(&tmp)).join("author").join("model");
         assert_eq!(

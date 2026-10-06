@@ -88,36 +88,32 @@ impl App {
         let model_metadata = self.model_metadata.read().clone();
         let file_tree = self.file_tree.read().clone();
 
-        // For tokio Mutex, snapshot() refreshes the render cache when the
-        // lock is free and falls back to the cached value when the lock is
+        // For tokio Mutex, snapshot_in_place() refreshes the render cache when the
+        // lock is free and leaves the cached value untouched when the lock is
         // held by another task (the render path never blocks).
-        let complete_downloads = state::snapshot(
+        state::snapshot_in_place(
             &self.engine.complete_downloads,
             &mut self.render_cache.complete_downloads,
         );
 
         // Activity HUD data is fetched BEFORE render_ui so the reserved
         // strip height is known when the main layout is split.
-        let download_progress = state::snapshot(
+        state::snapshot_in_place(
             &self.engine.download_progress,
             &mut self.render_cache.download_progress,
         );
 
-        let download_queue = {
-            // Cache the full QueueState; project the (size, bytes) pair.
-            let queue = state::snapshot(
-                &self.engine.download_queue,
-                &mut self.render_cache.download_queue,
-            );
-            (queue.size, queue.bytes)
-        };
+        state::snapshot_in_place(
+            &self.engine.download_queue,
+            &mut self.render_cache.download_queue,
+        );
 
-        let download_queue_items = state::snapshot(
+        state::snapshot_in_place(
             &self.engine.download_queue_items,
             &mut self.render_cache.download_queue_items,
         );
 
-        let verification_progress = state::snapshot(
+        state::snapshot_in_place(
             &self.engine.verification_progress,
             &mut self.render_cache.verification_progress,
         );
@@ -127,16 +123,9 @@ impl App {
         // Derived variant of the snapshot pattern: the cache stores the
         // summed bytes, not a clone of the queue — the sum is computed
         // under the guard so the queue Vec is never cloned per frame.
-        let verification_queue_bytes = self
-            .engine
-            .verification_queue
-            .try_lock()
-            .map(|guard| {
-                let bytes = guard.iter().map(|i| i.total_size).sum();
-                self.render_cache.verification_queue_bytes = bytes;
-                bytes
-            })
-            .unwrap_or(self.render_cache.verification_queue_bytes);
+        if let Ok(guard) = self.engine.verification_queue.try_lock() {
+            self.render_cache.verification_queue_bytes = guard.iter().map(|i| i.total_size).sum();
+        }
 
         let verified_ok = self.engine.verification_results.ok.load(Ordering::Relaxed);
         let verified_fail = self
@@ -146,13 +135,13 @@ impl App {
             .load(Ordering::Relaxed);
 
         let hud_params = crate::ui::render::ActivityHudData {
-            download_progress: &download_progress,
-            queue_size: download_queue.0,
-            queue_bytes: download_queue.1,
-            queue_items: &download_queue_items,
-            verification_progress: &verification_progress,
+            download_progress: &self.render_cache.download_progress,
+            queue_size: self.render_cache.download_queue.size,
+            queue_bytes: self.render_cache.download_queue.bytes,
+            queue_items: &self.render_cache.download_queue_items,
+            verification_progress: &self.render_cache.verification_progress,
             verification_queue_size,
-            verification_queue_bytes,
+            verification_queue_bytes: self.render_cache.verification_queue_bytes,
             verified_ok,
             verified_fail,
         };
@@ -166,7 +155,7 @@ impl App {
             crate::ui::render::RenderParams {
                 display_mode: *self.display_mode.read(),
                 focus: crate::ui::render::FocusCtx {
-                    input_mode: self.input_mode,
+                    popup_mode: self.popup_mode.clone(),
                     focused_pane: self.focused_pane,
                     hovered_panel: self.mouse.hovered_panel,
                 },
@@ -181,7 +170,7 @@ impl App {
                     quant_list_state: &mut self.quant_list_state,
                     quant_file_list_state: &mut self.quant_file_list_state,
                     loading_quants: *self.loading_quants.read(),
-                    complete_downloads: &complete_downloads,
+                    complete_downloads: &self.render_cache.complete_downloads,
                 },
                 standard: crate::ui::render::StandardPanelContext {
                     model_metadata: &model_metadata,

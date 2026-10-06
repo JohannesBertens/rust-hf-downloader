@@ -18,7 +18,6 @@ pub use crate::engine::QueuedDownload;
 pub struct App {
     pub running: bool,
     pub input: Input,
-    pub input_mode: InputMode,
     pub focused_pane: FocusedPane,
     pub models: Arc<RwLock<Vec<ModelInfo>>>,
     pub list_state: ListState,
@@ -116,7 +115,6 @@ impl App {
         Self {
             running: false,
             input: Input::default(),
-            input_mode: InputMode::Normal, // Start in normal mode
             focused_pane: FocusedPane::Models,
             models: Arc::new(RwLock::new(Vec::new())),
             list_state,
@@ -215,17 +213,13 @@ pub struct RenderCache {
 }
 
 /// Non-blocking snapshot of an engine `tokio::Mutex<T>` for rendering:
-/// when the lock is free, copy the guarded value into `cache` and return
-/// the fresh clone; when the lock is held by another task, return the
-/// last-good `cache` value instead. The guard is scoped inside this
-/// helper only — no lock is ever held beyond the copy (W0.8 rule).
-pub(super) fn snapshot<T: Clone>(m: &Mutex<T>, cache: &mut T) -> T {
-    match m.try_lock() {
-        Ok(guard) => {
-            *cache = guard.clone();
-            guard.clone()
-        }
-        Err(_) => cache.clone(),
+/// when the lock is free, copy the guarded value into `cache` in place;
+/// when the lock is held by another task, leave `cache` unchanged.
+/// The guard is scoped inside this helper only — no lock is ever held
+/// beyond the copy (W0.8 rule).
+pub(super) fn snapshot_in_place<T: Clone>(m: &Mutex<T>, cache: &mut T) {
+    if let Ok(guard) = m.try_lock() {
+        *cache = guard.clone();
     }
 }
 
@@ -234,28 +228,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_refreshes_cache_when_lock_is_free() {
+    fn snapshot_in_place_refreshes_cache_when_lock_is_free() {
         let m = Mutex::new(vec![1u64, 2]);
         let mut cache = Vec::new();
 
-        let got = snapshot(&m, &mut cache);
+        snapshot_in_place(&m, &mut cache);
 
-        assert_eq!(got, vec![1, 2]);
         assert_eq!(cache, vec![1, 2], "cache must be refreshed on success");
     }
 
     #[test]
-    fn snapshot_falls_back_to_cache_when_lock_is_held() {
+    fn snapshot_in_place_falls_back_to_cache_when_lock_is_held() {
         let m = Mutex::new(vec![9u64]);
         let mut cache = vec![7u64];
 
         // Hold the lock across the call — try_lock must fail and the
-        // helper must yield the cached value without touching the cache.
+        // helper must leave the cached value untouched.
         let guard = m.try_lock().unwrap();
-        let got = snapshot(&m, &mut cache);
+        snapshot_in_place(&m, &mut cache);
         drop(guard);
 
-        assert_eq!(got, vec![7], "held lock must yield the cached value");
         assert_eq!(cache, vec![7], "cache must be untouched on fallback");
     }
 

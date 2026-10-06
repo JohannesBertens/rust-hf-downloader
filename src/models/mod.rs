@@ -7,8 +7,8 @@
 //! - `api` — HuggingFace API DTOs: `ModelInfo`, `ModelMetadata`,
 //!   `ModelCardData`, `RepoFile`, `LfsInfo`, `ModelFile`, `QuantizationInfo`,
 //!   `QuantizationGroup`
-//! - `ui` — UI state enums: `PopupMode`, `FilterPreset`, `InputMode`,
-//!   `SortField`, `SortDirection`, `FocusedPane`, `ModelDisplayMode`, plus
+//! - `ui` — UI state enums: `PopupMode`, `FilterPreset`, `SortField`,
+//!   `SortDirection`, `FocusedPane`, `ModelDisplayMode`, plus
 //!   `FileTreeNode` (constructed by `api`, owned by the UI that renders it)
 //! - `engine` — progress, queue and verification types exchanged with the
 //!   engine: `ChunkProgress`, `DownloadProgress`, `DownloadStatus`,

@@ -106,7 +106,7 @@ fn mouse_areas_register_in_lookup_order() {
                     RenderParams {
                         display_mode,
                         focus: FocusCtx {
-                            input_mode: InputMode::Normal,
+                            popup_mode: PopupMode::None,
                             focused_pane: FocusedPane::Models,
                             hovered_panel: None,
                         },

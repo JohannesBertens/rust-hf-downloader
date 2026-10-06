@@ -103,7 +103,7 @@ fn draw_render_ui(
                 RenderParams {
                     display_mode: ModelDisplayMode::Gguf,
                     focus: FocusCtx {
-                        input_mode: InputMode::Normal,
+                        popup_mode: PopupMode::None,
                         focused_pane,
                         hovered_panel,
                     },
@@ -263,7 +263,7 @@ fn snapshot_search_popup_over_populated_ui() {
                 RenderParams {
                     display_mode: ModelDisplayMode::Gguf,
                     focus: FocusCtx {
-                        input_mode: InputMode::Normal,
+                        popup_mode: PopupMode::None,
                         focused_pane: FocusedPane::Models,
                         hovered_panel,
                     },
