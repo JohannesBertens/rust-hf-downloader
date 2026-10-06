@@ -58,10 +58,9 @@ not a target itself.
 
 ## Unit-test inventory (inline `#[cfg(test)]` in `src/**`)
 
-Skeleton: module → what it pins → how to run. M6 of
-[plans/architecture-simplification-review.md](plans/architecture-simplification-review.md)
-deepens this into a per-module what-it-pins table with per-subject CLI
-test splits.
+Skeleton: module → what it pins → how to run. The CLI rows are
+per-subject modules (M6/T1: the former `cli/tests.rs` grab-bag was split
+so each subject is discoverable and independently runnable).
 
 | Module | What it pins | Run |
 |---|---|---|
@@ -76,9 +75,17 @@ test splits.
 | `src/patterns.rs` | Python-fnmatch parity + `--for vllm` preset tables | `cargo test patterns` |
 | `src/api/*` | model filter/sort oracles, quant classification, tree building | `cargo test api` |
 | `src/models/*` | AppOptions TOML golden (config schema), engine/cache type invariants | `cargo test models` |
-| `src/cli/run.rs` | Runner helpers, token precedence matrix | `cargo test run` |
-| `src/cli/mod.rs` | dispatch + exit-code constants | `cargo test cli` |
-| `src/cli/*_tests.rs` + `src/cli/testutil.rs` | per-subject CLI suites (M6/T1 split of the old tests.rs grab-bag): args helpers + token matrix (`args_tests`), event-schema insta goldens (`events_tests`), hf-cache selection/policy/clap (`hf_cache_tests`), help snapshots (`help_snapshot_tests`), report formatters + heartbeat (`report_tests`), resolve/selector (`resolve_tests`), root surface (`cli_surface_tests`); shared fixtures in `testutil` (`src/cli/snapshots/`) | `cargo test cli::` |
+| `src/cli/run.rs` | Runner helpers (tally agreement, verify-outcome counters, run-tail order), token precedence matrix via the production resolvers, model-id gate wording + exit code (M6/C1) | `cargo test run` |
+| `src/cli/mod.rs` | dispatch + exit-code constants | `cargo test cli::` |
+| `src/cli/args_tests.rs` | args helpers (`valid_model_id`, `merge_token`, rate-limit overrides incl. the full cross-product, `parse_revision`, `ModelDto`) + clap parsing of `download`/`search` + the 27-cell token-precedence matrix | `cargo test args_tests` |
+| `src/cli/resolve_tests.rs` | `resolve_files` over every Selector flavor, ambiguity/miss error shapes, `parse_selector` conflicts, `FileSpec` sibling mapping (shared with hf-cache selection) | `cargo test resolve_tests` |
+| `src/cli/report_tests.rs` | progress-line formatters, plain-mode heartbeat throttle + skip-on-missed-snapshot through production `poll_once` | `cargo test report_tests` |
+| `src/cli/events_tests.rs` | NDJSON event insta goldens (byte-stable wire schema, `src/cli/snapshots/`) + literal wire-bytes tables for the error/file_complete variants | `cargo test events_tests` |
+| `src/cli/hf_cache_tests.rs` | §2.2 selection precedence, ref/symlink/absolute-path policy helpers, hf-cache clap surface | `cargo test hf_cache_tests` |
+| `src/cli/help_snapshot_tests.rs` | 7 long-help goldens (flag order/grouping/text of every command) | `cargo test help_snapshot` |
+| `src/cli/cli_surface_tests.rs` | root surface: version truth, no-subcommand-means-TUI, clap debug_assert | `cargo test cli_surface_tests` |
+| `src/cli/testutil.rs` | shared fixtures only (no tests): `file_spec`/`metadata_with`, the `snap!` snapshot macro, `SharedStderr`, `VarGuard` | — |
+| `src/cli/hf_cache/sync.rs` | publish gate (M6/C2): every gate arm — Ok / no-verify warning order / mismatch deletes staged bytes / verification error / missing result / failed-download skip / verification-off — with synthetic outcomes, no engine | `cargo test publish_gate` |
 | `src/rate_limiter.rs` | token-bucket refill math | `cargo test rate` |
 | `src/verification.rs` | verify outcomes, result counters | `cargo test verification` |
 | `src/update.rs` | version compare, manifest/asset selection | `cargo test update` |
