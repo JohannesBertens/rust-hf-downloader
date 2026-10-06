@@ -140,13 +140,34 @@ fn lock_hierarchy_documents_every_engine_mutex_field() {
 
     let mut mutex_fields: Vec<String> = Vec::new();
     let mut atomic_fields: Vec<String> = Vec::new();
-    for (src, bundle) in [
-        (&engine_src, "EngineState"),
-        (&engine_src, "QueueAccounting"),
-        (&engine_src, "EventBus"),
-        (&verification_src, "VerificationHub"),
+    // Fail-closed per struct: each named struct must be FOUND and yield at
+    // least one lock-carrying field — a rename/move/file-split that makes
+    // `struct_fields` return empty for one bundle cannot pass vacuously
+    // (the aggregate floors alone would only catch it if the TOTAL dropped).
+    for (src, bundle, min_mutex) in [
+        (&engine_src, "EngineState", 4usize),
+        (&engine_src, "QueueAccounting", 2),
+        (&engine_src, "EventBus", 3),
+        (&verification_src, "VerificationHub", 3),
     ] {
-        for (name, ty) in struct_fields(src, bundle) {
+        let fields = struct_fields(src, bundle);
+        assert!(
+            !fields.is_empty(),
+            "struct {bundle} was not found (or yields no fields) in its expected \
+             file — the lock-doc derivation is broken; update the guard's parse \
+             map in the same PR that moved the struct"
+        );
+        let mutex_here = fields
+            .iter()
+            .filter(|(_, ty)| ty.starts_with("Arc<Mutex<") || mutex_aliases.contains(&ty.as_str()))
+            .count();
+        assert!(
+            mutex_here >= min_mutex,
+            "struct {bundle} yields only {mutex_here} mutex fields (expected >= \
+             {min_mutex}) — fields moved or re-typed; update the guard in the \
+             same PR"
+        );
+        for (name, ty) in fields {
             if ty.starts_with("Arc<Mutex<") || mutex_aliases.contains(&ty.as_str()) {
                 mutex_fields.push(name);
             } else if ty.starts_with("Arc<Atomic") {

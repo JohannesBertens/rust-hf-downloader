@@ -102,9 +102,9 @@ pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>;
 //                                    drop-based completion), so this is not
 //                                    an event-bus channel either.
 //   download_queue                 → QueueAccounting.download_queue_totals
-//                                    (type renamed QueueTotals→QueueTotals;
+//                                    (type renamed QueueState→QueueTotals;
 //                                    U6 folded into M3 step 4)
-//   download_queue_items           → QueueAccounting.queue.download_queue_items
+//   download_queue_items           → QueueAccounting.download_queue_items
 //                                    (the name survives verbatim: it is the
 //                                    live-code anchor of
 //                                    docs/DEFERRED.md#queue-item-filename-only-match)

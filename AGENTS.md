@@ -246,7 +246,7 @@ ordering — only the inner locks do.
 5. `queue` (`Arc<Mutex<Vec<VerificationQueueItem>>>` — EngineState.verification, the VerificationHub)
 6. `size` (`Arc<AtomicUsize>` — VerificationHub) — lock-free atomic counter, carries no lock level
 7. `progress` (`Arc<Mutex<Vec<VerificationProgress>>>` — VerificationHub)
-8. `download_registry` (`Arc<Mutex<DownloadRegistry>>` — EngineState top level; the VerificationHub's `registry_mirror` is the SAME Arc shared into the hub, so this one level governs both names)
+8. `download_registry` (`Arc<Mutex<DownloadRegistry>>` — EngineState top level; the VerificationHub's `registry_mirror` is the SAME Arc shared into the hub, so this one level governs both names — and because a tokio Mutex is not re-entrant, NEVER acquire both names in one scope: holding one while awaiting the other self-deadlocks the task)
 9. RateLimiter state (`Arc<Mutex<RateLimiterState>>`) — consolidated single lock, outside EngineState
 10. Receiver tier — `status_rx`, `verify_rx`, `outcome_rx` (`Arc<Mutex<mpsc::UnboundedReceiver<..>>>`, all in EngineState.events, the EventBus; the matching `status_tx`/`verify_tx`/`outcome_tx` senders are plain channel endpoints and carry no lock): order-free under try_lock, drained one lock per scope with the guard released immediately (UI render snapshot; CLI `poll_once` drains status_rx → outcome_rx → the hub's `progress` → verify_rx via try_lock); never hold one receiver lock while blocking on another
 11. `in_flight` (`Arc<AtomicUsize>` — VerificationHub) — lock-free atomic counter, carries no lock level
