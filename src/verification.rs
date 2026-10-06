@@ -573,4 +573,45 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[tokio::test]
+    async fn long_expected_sha256_still_truncates_with_ellipsis() {
+        // Pins the OTHER branch of the conditional ellipsis: a full
+        // 64-char expected hash is truncated to 16 chars and keeps "...".
+        let tmp = std::env::temp_dir().join(format!("test-b2-long-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file_path = tmp.join("test.bin");
+        std::fs::write(&file_path, b"test payload").unwrap();
+
+        let (state, _download_tx) = EngineState::new();
+        let expected = "a".repeat(64);
+        let item = VerificationQueueItem {
+            filename: "test.bin".to_string(),
+            local_path: file_path.to_string_lossy().to_string(),
+            expected_sha256: expected.clone(),
+            total_size: 12,
+            is_manual: true,
+        };
+
+        verify_file(item, state.clone()).await;
+
+        let status_msg = {
+            let mut rx = state.status_rx.lock().await;
+            let mut msgs = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                msgs.push(msg);
+            }
+            msgs
+        };
+        let truncated = format!("expected {}..., got", "a".repeat(16));
+        assert!(
+            status_msg.iter().any(|m| m.contains(&truncated)),
+            "status should truncate a 64-char expected hash to 16 chars with \
+             an ellipsis (contained {:?}): {:?}",
+            truncated,
+            status_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

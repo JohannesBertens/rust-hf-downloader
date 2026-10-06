@@ -324,12 +324,15 @@ fn testing_md_targets_exist() {
     // Targets this crate does not have: no benches/, no doc tests on a
     // bin-only crate with no library, no examples/ — a `--bench`/`--doc`/
     // `--example` invocation in TESTING.md describes a target that cannot
-    // run (finding D1's class, on the flag side).
+    // run (finding D1's class, on the flag side). Intent: the docs must not
+    // prescribe targets the crate lacks; if the crate ever gains one of
+    // these targets, update this guard in the same PR.
     for flag in ["--bench", "--doc", "--example"] {
         assert!(
             !testing.contains(flag),
             "TESTING.md mentions `{flag}` but this crate has no such target \
-             (no benches/, no lib doc-tests, no examples/)"
+             (no benches/, no lib doc-tests, no examples/) — if the target was \
+             added, update this guard in the same PR"
         );
     }
 }

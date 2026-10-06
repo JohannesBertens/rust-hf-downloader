@@ -3,7 +3,7 @@
 //!
 //! Moved verbatim from `src/api.rs` (plan W3.2b): search with its client-side
 //! filtering/sorting pass, metadata enrichment with the complete recursive
-//! tree, revision-to-SHA resolution, and the multipart SHA256 lookup. Bodies,
+//! tree, revision-to-SHA resolution. Bodies,
 //! doc comments and request shapes are byte-identical to the originals; only
 //! `api_base` is now imported instead of being a sibling item.
 //!

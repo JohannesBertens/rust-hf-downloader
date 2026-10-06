@@ -10,7 +10,7 @@
 //!
 //! - `client` — everything that talks HTTP: search (with the client-side
 //!   filter/sort pass), metadata + recursive tree fetches, revision SHA
-//!   resolution, multipart SHA256 lookups
+//!   resolution
 //! - `quant` — the pure GGUF heuristics: quantization-group classification,
 //!   mmproj handling, `looks_like_quant_type`, the multipart filename
 //!   grammars

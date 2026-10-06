@@ -48,8 +48,8 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
   writer will be process-global, not cross-process, and the atomic save
   prevents torn files, not lost writes. (The *in-process* variant —
   manager vs verification worker, previously pinned as desired by the
-  two-writer tests — will be fixed by M1 under the R4 sign-off: all
-  writers win.)
+  two-writer tests — will be fixed by M1 under the R4 sign-off: every
+  writer's update survives, no lost updates.)
 - **Remedy:** advisory lock file around the write window, if concurrent
   front-ends ever matter enough.
 - **Provenance:** architecture plan §8; readability plan §8 (the pinned
@@ -110,7 +110,8 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 - **Status:** resolved (M2, finding B2 — landed 2026-10-06)
 - **Finding:** verification status text sliced `&expected_sha256[..16]` —
   panics on a short/corrupt registry hash.
-- **Remedy (landed):** `expected_sha256.get(..16)` with fallback truncation.
+- **Remedy (landed):** char-safe truncation (`chars().take(16)`) with the
+  ellipsis only when actually truncated.
 - **Provenance:** readability plan §8 item 3; architecture plan §3.4 B2.
 
 ## recursive-tree-error-swallow

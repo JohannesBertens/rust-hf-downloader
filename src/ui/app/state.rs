@@ -1,5 +1,5 @@
 //! App state: the `App` struct, its construction, and the non-blocking
-//! render cache (`RenderCache` + [`snapshot`] helper). Engine-owned state
+//! render cache (`RenderCache` + [`snapshot_in_place`] helper). Engine-owned state
 //! lives on `App::engine` (one `EngineState`, W2.3); only TUI concerns and
 //! `download_tx` are direct fields.
 use crate::models::*;
@@ -81,8 +81,9 @@ pub struct App {
     // cursor row + live-edit flags; AppOptions is pure config schema)
     pub options_dialog: crate::ui::render::OptionsDialogState,
     // Last-known-good snapshots of the engine's tokio::Mutex state for
-    // non-blocking rendering: draw() refreshes each field via `snapshot`
-    // when the lock is free and falls back to the previous snapshot when
+    // non-blocking rendering: draw() refreshes each field via
+    // `snapshot_in_place` when the lock is free and falls back to the
+    // previous snapshot when
     // the lock is held by another task.
     pub render_cache: RenderCache,
 }
@@ -233,7 +234,7 @@ impl Default for MouseState {
 
 /// Last-known-good snapshots of the engine's `tokio::Mutex` state, used by
 /// `App::draw` for non-blocking rendering. Each field mirrors one engine
-/// mutex; `draw` refreshes it through [`snapshot`] when the lock is free
+/// mutex; `draw` refreshes it through [`snapshot_in_place`] when the lock is free
 /// and renders the previous snapshot when the lock is held by another
 /// task. Defaults equal the engine's fresh-state initial values.
 #[derive(Debug, Default)]

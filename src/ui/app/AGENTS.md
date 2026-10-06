@@ -9,7 +9,7 @@ This submodule holds application state, event handling, and async orchestration 
 Files and roles
 - state.rs
   • struct App: central state with Arc<RwLock>/Arc<Mutex> fields for lists, caches, queues, progress
-  • RenderCache (W2.5): one struct field grouping the last-known-good snapshots of the engine's tokio::Mutex state; draw() refreshes each field via the `snapshot(m, cache)` helper when the lock is free and falls back to the cached value when held (verification_queue_bytes stays a derived variant — summed under the guard, never cloning the queue Vec per frame)
+  • RenderCache (W2.5): one struct field grouping the last-known-good snapshots of the engine's tokio::Mutex state; draw() refreshes each field via the `snapshot_in_place(m, cache)` helper when the lock is free and falls back to the cached value when held (verification_queue_bytes stays a derived variant — summed under the guard, never cloning the queue Vec per frame)
   • App::new is headless-safe (no EventStream field — the terminal event stream is constructed once at the top of App::run, after the caller's ratatui::init, and passed into handle_crossterm_events; crossterm's source eagerly opens a tty fd, so eager construction made App::new panic in test environments)
   • `engine: EngineState` owns the engine-side shared state (download/status/verify/outcome channels, queue/registry/progress Arcs, verification counters); App::new constructs it once via `EngineState::new()`; every TUI access goes through explicit `self.engine.<field>` reads (no Deref, no flattened mirrors)
   • `download_tx` is the only channel endpoint kept on App: the frontend-owned sender half of the engine's download queue (dropping it ends the manager loop once drained)
