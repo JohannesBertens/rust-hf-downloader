@@ -406,7 +406,10 @@ fn module_dependency_dag() {
             continue;
         }
         for (idx, line) in contents.lines().enumerate() {
-            if line.contains("crate::engine") {
+            // `crate::engine` is the canonical path; `super::engine` reaches the
+            // same module from these siblings (src/download/mod.rs,
+            // src/verification.rs) and would bypass a crate::-only match.
+            if line.contains("crate::engine") || line.contains("super::engine") {
                 violations.push(format!("  {}:{}: {}", path.display(), idx + 1, line.trim()));
             }
         }

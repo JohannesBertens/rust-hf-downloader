@@ -44,6 +44,35 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
   (losing the newest save) but cannot tear the file.
 - **Provenance:** readability plan §8 item 5; architecture plan §3.1 R5.
 
+## registry-write-sleep-under-lock
+
+- **Symbol:** `atomic_rename_with_retry`
+- **Status:** open
+- **Finding:** the registry save runs the SYNC rename-with-retry (up to ~1 s
+  of transient-lock backoff sleeps on Windows) while holding `REGISTRY_WRITE`
+  inside async callers. Disk writes are rare and the registry TOML is small,
+  so the blocking window is brief and bounded — accepted at Gate 2 and
+  flagged for future work — but a busy async runtime pays the stall.
+- **Remedy:** move the save off the async path (spawn_blocking) or accept
+  the documented tradeoff; the utils.rs async twin exists if the callers
+  can restructure.
+- **Provenance:** architecture-plan run Gate 2 review (GLM-5.3 + Opus
+  notes); M1 design tradeoff.
+
+## enqueue-mirror-overwrite-window
+
+- **Symbol:** `seed_registry_mirror`
+- **Status:** open
+- **Finding:** between `upsert_pending` returning its post-write snapshot
+  and the caller replacing the engine mirror (`engine/enqueue.rs` Mirror
+  arm), a concurrent `mark_mismatch_mirror` patch can be overwritten in the
+  MIRROR ONLY — disk stays correct post-M1, so this is a transient HUD/UI
+  display staleness window, not data loss.
+- **Remedy:** consolidate mirror mutation through one owner (an M3-follow-on
+  applying the same single-writer discipline to the mirror).
+- **Provenance:** architecture-plan run Gate 2 review (residual note); M1
+  left the window strictly narrower than pre-M1 (which could clobber disk).
+
 ## registry-cross-process-lock
 
 - **Symbol:** `load_registry`
