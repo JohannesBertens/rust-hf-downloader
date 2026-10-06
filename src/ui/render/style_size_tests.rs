@@ -187,7 +187,7 @@ fn draw_ui_with_overlay(
                 RenderParams {
                     display_mode: ModelDisplayMode::Gguf,
                     focus: FocusCtx {
-                        input_mode: InputMode::Normal,
+                        popup_mode: PopupMode::None,
                         focused_pane: focused,
                         hovered_panel: hovered,
                     },
@@ -416,7 +416,7 @@ fn draw_standard_ui(
                 RenderParams {
                     display_mode: ModelDisplayMode::Standard,
                     focus: FocusCtx {
-                        input_mode: InputMode::Normal,
+                        popup_mode: PopupMode::None,
                         focused_pane: focused,
                         hovered_panel: hovered,
                     },

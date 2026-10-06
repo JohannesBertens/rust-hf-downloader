@@ -3,7 +3,7 @@
 //! options, resume, download-path, auth-error), extracted verbatim from
 //! the old single-file `ui/app/events.rs`. The dispatcher
 //! (`App::on_key_event`) lives in the `events` facade (`mod.rs`) and
-//! routes here by `PopupMode`/`InputMode`. Mouse handling is NOT here —
+//! routes here by `PopupMode`. Mouse handling is NOT here —
 //! `handle_mouse_*`/hover/click live in `ui/app/mod.rs` next to the
 //! crossterm event loop.
 
@@ -225,7 +225,6 @@ impl App {
     pub(super) async fn handle_search_popup_input(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                self.input_mode = InputMode::Normal;
                 self.popup_mode = PopupMode::None;
                 // Clear results immediately before searching
                 self.clear_search_results();
@@ -233,7 +232,6 @@ impl App {
             }
             KeyCode::Esc => {
                 self.popup_mode = PopupMode::None;
-                self.input_mode = InputMode::Normal;
             }
             KeyCode::Char(c) => {
                 self.input.handle(tui_input::InputRequest::InsertChar(c));

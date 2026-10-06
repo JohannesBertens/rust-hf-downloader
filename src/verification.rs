@@ -156,10 +156,14 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
                     .verification_results
                     .failed
                     .fetch_add(1, Ordering::Relaxed);
+                let expected_trunc = item
+                    .expected_sha256
+                    .get(..16)
+                    .unwrap_or(&item.expected_sha256);
                 let _ = state.status_tx.send(format!(
                     "✗ Hash mismatch for {}: expected {}..., got {}...",
                     item.filename,
-                    &item.expected_sha256[..16],
+                    expected_trunc,
                     &calculated_hash[..16]
                 ));
                 let _ = state.verify_tx.send(VerifyOutcome::Mismatch {
@@ -531,5 +535,43 @@ mod tests {
             other.lock().await.downloads[0].status,
             crate::models::DownloadStatus::Incomplete
         );
+    }
+
+    #[tokio::test]
+    async fn short_expected_sha256_does_not_panic_on_mismatch() {
+        let tmp = std::env::temp_dir().join(format!("test-b2-short-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file_path = tmp.join("test.bin");
+        std::fs::write(&file_path, b"test payload").unwrap();
+
+        let (state, _download_tx) = EngineState::new();
+        let item = VerificationQueueItem {
+            filename: "test.bin".to_string(),
+            local_path: file_path.to_string_lossy().to_string(),
+            expected_sha256: "short".to_string(),
+            total_size: 12,
+            is_manual: true,
+        };
+
+        verify_file(item, state.clone()).await;
+
+        assert_eq!(state.verification_results.failed.load(Ordering::Relaxed), 1);
+        let status_msg = {
+            let mut rx = state.status_rx.lock().await;
+            let mut msgs = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                msgs.push(msg);
+            }
+            msgs
+        };
+        assert!(
+            status_msg
+                .iter()
+                .any(|m| m.contains("expected short..., got")),
+            "status should contain char-safe fallback: {:?}",
+            status_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
