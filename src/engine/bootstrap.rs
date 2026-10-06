@@ -83,7 +83,7 @@ mod tests {
     // progress.
     #[allow(clippy::await_holding_lock)]
     async fn seed_registry_mirror_loads_disk_into_mirror_and_returns_snapshot() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-seed-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -113,7 +113,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn bootstrap_seeds_mirror_and_spawns_draining_manager() {
-        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-bootstrap-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));

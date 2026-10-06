@@ -441,10 +441,10 @@ fn install_matrix_cell(
     config: ConfigFile,
     tag: &str,
 ) -> (std::path::PathBuf, VarGuard, VarGuard) {
-    let tmp = std::env::temp_dir().join(format!(
-        "rhd-token-{tag}-{}-{env:?}-{config:?}",
-        std::process::id()
-    ));
+    // `{env:?}` renders `Some("env")`; the Debug quotes are invalid in
+    // Windows filenames (CreateFile error 123), so strip them.
+    let cell = format!("{env:?}-{config:?}").replace('"', "");
+    let tmp = std::env::temp_dir().join(format!("rhd-token-{tag}-{}-{cell}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create temp config dir");
     let g1 = VarGuard::set(crate::paths::ENV_CONFIG_DIR, Some(tmp.to_str().unwrap()));

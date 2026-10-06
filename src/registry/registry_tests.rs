@@ -97,9 +97,17 @@ const URL_STAGING: &str =
 const URL_QUANT: &str = "https://huggingface.co/org/model/resolve/main/quant.gguf";
 const URL_RAW_QUANT: &str = "https://huggingface.co/org/model/raw/main/quant.gguf";
 
-/// TOML basic-string escaping for path values (Windows separators).
+/// TOML string token for a path value, byte-matching what the `toml`
+/// serializer emits: a basic string when nothing needs escaping (POSIX
+/// temps), a literal string with raw separators when the value contains
+/// backslashes (Windows) — the serializer prefers the literal form, and
+/// temp paths never contain a single quote.
 fn esc(s: &str) -> String {
-    s.replace('\\', "\\\\")
+    if s.contains('\\') {
+        format!("'{s}'")
+    } else {
+        format!("\"{s}\"")
+    }
 }
 
 fn local(tmp: &Path, rel: &str) -> String {
@@ -120,7 +128,7 @@ fn block(
     revision: Option<&str>,
 ) -> String {
     let mut s = format!(
-        "[[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"{filename}\"\nurl = \"{url}\"\nlocal_path = \"{}\"\ntotal_size = {total_size}\ndownloaded_size = {downloaded_size}\nstatus = \"{status}\"\n",
+        "[[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"{filename}\"\nurl = \"{url}\"\nlocal_path = {}\ntotal_size = {total_size}\ndownloaded_size = {downloaded_size}\nstatus = \"{status}\"\n",
         esc(local_path)
     );
     if let Some(sha) = expected_sha256 {
@@ -236,10 +244,10 @@ fn serialization_format_is_pinned_by_a_literal_anchor() {
     let content = write_fixture(&tmp);
 
     let inline = format!(
-        "[[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"complete.gguf\"\nurl = \"{URL_COMPLETE}\"\nlocal_path = \"{}\"\ntotal_size = 1000\ndownloaded_size = 1000\nstatus = \"Complete\"\nexpected_sha256 = \"deadbeefcafe\"\nrevision = \"v2.7-tag\"\n\n\
-         [[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"incomplete.bin\"\nurl = \"{URL_INCOMPLETE}\"\nlocal_path = \"{}\"\ntotal_size = 500\ndownloaded_size = 200\nstatus = \"Incomplete\"\n\n\
-         [[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"legacy-staging.safetensors\"\nurl = \"{URL_STAGING}\"\nlocal_path = \"{}\"\ntotal_size = 7\ndownloaded_size = 3\nstatus = \"HashMismatch\"\nexpected_sha256 = \"aa11\"\n\n\
-         [[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"quant.gguf\"\nurl = \"{URL_QUANT}\"\nlocal_path = \"{}\"\ntotal_size = 42\ndownloaded_size = 42\nstatus = \"Incomplete\"\n",
+        "[[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"complete.gguf\"\nurl = \"{URL_COMPLETE}\"\nlocal_path = {}\ntotal_size = 1000\ndownloaded_size = 1000\nstatus = \"Complete\"\nexpected_sha256 = \"deadbeefcafe\"\nrevision = \"v2.7-tag\"\n\n\
+         [[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"incomplete.bin\"\nurl = \"{URL_INCOMPLETE}\"\nlocal_path = {}\ntotal_size = 500\ndownloaded_size = 200\nstatus = \"Incomplete\"\n\n\
+         [[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"legacy-staging.safetensors\"\nurl = \"{URL_STAGING}\"\nlocal_path = {}\ntotal_size = 7\ndownloaded_size = 3\nstatus = \"HashMismatch\"\nexpected_sha256 = \"aa11\"\n\n\
+         [[downloads]]\nmodel_id = \"{MODEL}\"\nfilename = \"quant.gguf\"\nurl = \"{URL_QUANT}\"\nlocal_path = {}\ntotal_size = 42\ndownloaded_size = 42\nstatus = \"Incomplete\"\n",
         esc(&local(&tmp, "org/model/complete.gguf")),
         esc(&local(&tmp, "org/model/incomplete.bin")),
         esc(&local(&tmp, ".rhd-staging/pub/legacy-staging.safetensors")),

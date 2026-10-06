@@ -689,7 +689,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_single_quant_file_queues_one_part_and_clears_popup() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("app-confirm-quant-single-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -755,7 +757,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_quant_group_queues_all_parts_with_multi_part_status() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("app-confirm-quant-group-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -809,7 +813,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_repository_download_queues_files_only_under_model_root() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("app-confirm-repo-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -881,7 +887,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_tree_directory_download_queues_subtree_only() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("app-confirm-tree-dir-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
@@ -935,7 +943,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_tree_file_download_queues_exact_file_with_singular_status() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("app-confirm-tree-file-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -982,7 +992,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_tree_download_without_matches_cancels_and_queues_nothing() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("app-confirm-tree-miss-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1031,7 +1043,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn resume_incomplete_downloads_requeues_under_model_root_or_recorded_parent() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("app-resume-incomplete-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1100,7 +1114,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn confirm_quant_flow_with_no_file_selected_reports_error_and_queues_nothing() {
-        let _env_lock = crate::paths::ENV_MUTEX.lock().unwrap();
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("app-confirm-quant-empty-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();

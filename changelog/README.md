@@ -22,7 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tests**: 266 → 431 (style-signature, size-matrix, HUD-threshold,
   enqueue-policy, filter/sort oracle, multipart corpus, exit-code
   matrix, registry byte-goldens); the known registry lost-update race
-  is now pinned by a test.
+  is now pinned by a test. Windows CI fixed: the registry TOML
+  byte-goldens now expect the literal-string form the `toml` serializer
+  actually emits for backslash paths, the token-matrix temp dirs no
+  longer embed Debug quotes (invalid Windows filename chars), and
+  `ENV_MUTEX` test locks recover from poisoning so one failure cannot
+  cascade into ~19 unrelated ones.
 
 ## [2.13.1] - 2026-10-05
 
