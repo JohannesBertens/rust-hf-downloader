@@ -5,8 +5,9 @@
 //! channel sends → failed-send rollback) that four TUI flows and two CLI
 //! flows used to inline; every per-site divergence is an explicit,
 //! constructor-sealed [`EnqueuePolicy`] knob, and status/error strings stay
-//! at the call sites (see [`EnqueueOutcome`]). The 8 characterization tests
-//! at the bottom pin each flavor byte-for-byte.
+//! at the call sites (see [`EnqueueOutcome`]). The characterization tests
+//! at the bottom pin each flavor byte-for-byte — the eight W2.1 rows plus
+//! the E4 no-write registry pin.
 
 use super::{EngineState, QueuedDownload};
 use crate::models::{DownloadMetadata, DownloadStatus, QueueItemSummary};
@@ -41,13 +42,15 @@ impl EngineState {
         // --- 1. Registry bookkeeping, before any queue work (the order of
         //         every legacy site) ---------------------------------------
         let (invalid, aborted) = match &policy.registry {
-            // The two no-write flavors share one arm (`on_invalid` =
-            // SkipValidation): neither validates paths at enqueue time
-            // — resume re-queues entries that were validated when first
-            // recorded, hf-cache mirrors the local cache layout, and
-            // `start_download` sanitizes every filename component before
-            // writing regardless.
-            RegistryMode::AlreadyRecorded | RegistryMode::StagingSweep => (Vec::new(), None),
+            // The no-write flavor (E4, M5: the two historical variant
+            // names `AlreadyRecorded` + `StagingSweep` merged — an
+            // equivalence pin proved them observably identical first):
+            // neither validates paths at enqueue time — resume re-queues
+            // entries that were validated when first recorded, hf-cache
+            // mirrors the local cache layout, and `start_download`
+            // sanitizes every filename component before writing
+            // regardless.
+            RegistryMode::NoWrites => (Vec::new(), None),
             RegistryMode::Mirror { base, entry_size } => {
                 // TUI confirm flows: validate each file (an invalid file
                 // is skipped from the registry and reported, but still
@@ -69,16 +72,14 @@ impl EngineState {
                     ) {
                         Ok(path) => Some(path),
                         Err(e) => {
-                            // on_invalid = ReportAndQueue: report the
-                            // file and keep it out of the registry —
-                            // the queue work below still queues it.
-                            // (No constructor pairs a mirror write
-                            // with the other flavors; if one ever
-                            // does, its invalid files stay out of the
-                            // registry too.)
-                            if policy.on_invalid == InvalidPolicy::ReportAndQueue {
-                                skipped.push((file.filename.clone(), e));
-                            }
+                            // Mirror flavors report the invalid file and
+                            // keep it out of the registry — the queue work
+                            // below still queues it. (The former
+                            // `InvalidPolicy::ReportAndQueue` knob; the
+                            // axis was deleted in M5/E4 — this arm was
+                            // its only non-redundant user, so the report
+                            // behavior is now unconditional here.)
+                            skipped.push((file.filename.clone(), e));
                             None
                         }
                     };
@@ -115,10 +116,13 @@ impl EngineState {
                 (skipped, None)
             }
             RegistryMode::Disk { base } => {
-                // CLI download flow (on_invalid = AbortAll): validate
-                // every file first — the first invalid filename aborts
-                // the whole enqueue (nothing is queued or sent) — then
-                // upsert the entries on DISK. This is exactly
+                // CLI download flow: validate every file first — the
+                // first invalid filename aborts the whole enqueue
+                // (nothing is queued or sent) — then upsert the entries
+                // on DISK. (The abort is inherent to
+                // `register_pending`'s validate-first pass — the former
+                // `InvalidPolicy::AbortAll` knob was never read for it.)
+                // This is exactly
                 // `registry::register_pending`, whose byte-level behavior the
                 // registry golden tests pin. A single-model batch is
                 // assumed (the CLI flavor's shape), so the first file's
@@ -239,17 +243,19 @@ impl EngineState {
 /// knob 1 of the W2.1 table; see [`EngineState::enqueue`]).
 #[derive(Debug, Clone)]
 pub enum RegistryMode {
-    /// TUI resume: the entries already exist on disk (recorded when the
-    /// files were first queued) — re-queueing must not touch them.
-    AlreadyRecorded,
-    /// `hf-cache sync`: registers NOTHING pending — the named
+    /// The no-write flavor (M5/E4 merged the two historical variant names
+    /// `AlreadyRecorded` + `StagingSweep` into this one — a pre-merge
+    /// equivalence pin proved them observably identical, so the merge is
+    /// compile-time-only): TUI resume re-queues entries that already
+    /// exist on disk (recorded when the files were first queued), and
+    /// `hf-cache sync` registers NOTHING pending — the named
     /// staging-sweep decision (the download path writes staging-path
     /// entries during the run; the sweeps at publish time and next
     /// bootstrap remove them, keeping the TUI's resume view clean; see
-    /// `cli/hf_cache/sync.rs`). The former `None` variant was split into
-    /// these two names because it conflated both intents (and collided
-    /// with `Option::None` under glob imports).
-    StagingSweep,
+    /// `cli/hf_cache/sync.rs`). Neither historical name carried behavior
+    /// of its own; the constructors that pick this flavor (`tui_resume`,
+    /// `hf_cache_sync`) keep their names and document their intent.
+    NoWrites,
     /// TUI confirm flows: validate every file (invalid files are skipped
     /// from the registry, reported — they are still queued), build an
     /// `Incomplete` entry for each valid one, and upsert the entries on
@@ -310,35 +316,19 @@ pub enum SendDiscipline {
     Batch,
 }
 
-/// What the enqueue transaction does with a file whose path fails
-/// validation (divergence knob 3; the rule used to live in comments
-/// inside the registry arms above).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvalidPolicy {
-    /// Mirror-registry flavors (TUI confirms): the invalid file is
-    /// skipped from the registry and reported via
-    /// [`EnqueueOutcome::invalid`] — but still queued and sent.
-    ReportAndQueue,
-    /// Disk-registry flavor (CLI `download`): the first invalid
-    /// filename aborts the whole enqueue (via
-    /// `registry::register_pending`'s validate-first pass) — nothing is
-    /// queued or sent; the error is
-    /// reported via [`EnqueueOutcome::aborted`].
-    AbortAll,
-    /// The no-registry flavors (TUI resume, `hf-cache sync`): no path
-    /// validation runs at enqueue time today — resume re-queues entries
-    /// that were validated when first recorded, hf-cache mirrors the
-    /// local cache layout, and `start_download` sanitizes every
-    /// filename component before writing regardless.
-    SkipValidation,
-}
-
 /// The full shape of one enqueue transaction: every field is a
 /// documented divergence between the six legacy inline sites (see the
 /// W2.1 divergence table). The fields are private on purpose — the five
 /// named constructors are the only public API (the design-review sealing
 /// decision: the raw knobs were N ways to spell one of five known
-/// flavors, and only their correlated combinations ever occurred).
+/// flavors, and only their correlated combinations ever occurred). The
+/// former third knob `InvalidPolicy` (ReportAndQueue / AbortAll /
+/// SkipValidation) was deleted in M5/E4 (bounded re-open, adjudicated in
+/// plans/architecture-simplification-review.md §4 D-policy): it was read
+/// in exactly one place, where its value was always the same — the
+/// Mirror arm's report-and-queue behavior is now unconditional, the Disk
+/// arm's abort is inherent to `register_pending`, and the no-write arm
+/// never validated.
 #[derive(Debug, Clone)]
 pub struct EnqueuePolicy {
     /// Registry bookkeeping: TUI mirror upsert / CLI disk upsert /
@@ -346,8 +336,6 @@ pub struct EnqueuePolicy {
     registry: RegistryMode,
     /// How the sends interact with queue accounting and the HUD mirror.
     discipline: SendDiscipline,
-    /// What happens to a file whose path fails validation.
-    on_invalid: InvalidPolicy,
 }
 
 impl EnqueuePolicy {
@@ -363,7 +351,6 @@ impl EnqueuePolicy {
                 entry_size: RegistryEntrySize::Zero,
             },
             discipline: SendDiscipline::Interactive,
-            on_invalid: InvalidPolicy::ReportAndQueue,
         }
     }
 
@@ -376,18 +363,17 @@ impl EnqueuePolicy {
                 entry_size: RegistryEntrySize::FromQueued,
             },
             discipline: SendDiscipline::Interactive,
-            on_invalid: InvalidPolicy::ReportAndQueue,
         }
     }
 
-    /// TUI resume: no registry writes (entries already exist), sends
-    /// first with the queue accounted once after them, HUD mirror pushed
+    /// TUI resume: no registry writes (the entries already exist on
+    /// disk — recorded when the files were first queued), sends first
+    /// with the queue accounted once after them, HUD mirror pushed
     /// unconditionally per file, no rollback, no path validation.
     pub fn tui_resume() -> Self {
         Self {
-            registry: RegistryMode::AlreadyRecorded,
+            registry: RegistryMode::NoWrites,
             discipline: SendDiscipline::Resume,
-            on_invalid: InvalidPolicy::SkipValidation,
         }
     }
 
@@ -398,7 +384,6 @@ impl EnqueuePolicy {
         Self {
             registry: RegistryMode::Disk { base: base.into() },
             discipline: SendDiscipline::Batch,
-            on_invalid: InvalidPolicy::AbortAll,
         }
     }
 
@@ -409,9 +394,8 @@ impl EnqueuePolicy {
     /// validation.
     pub fn hf_cache_sync() -> Self {
         Self {
-            registry: RegistryMode::StagingSweep,
+            registry: RegistryMode::NoWrites,
             discipline: SendDiscipline::Batch,
-            on_invalid: InvalidPolicy::SkipValidation,
         }
     }
 }
@@ -894,32 +878,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// E4 validation-first pin (M5 item 2 of
-    /// plans/architecture-simplification-review.md §5 — bounded re-open of
-    /// the sealed EnqueuePolicy): the two
-    /// no-write registry variants are observably IDENTICAL — same disk
-    /// registry BYTES (both leave a seeded file untouched), same engine
-    /// mirror, same queue accounting, same HUD items, same channel
-    /// messages, same EnqueueOutcome — crossed with both disciplines the
-    /// no-write flavors occur in (tui_resume pairs AlreadyRecorded with
-    /// Resume, hf_cache_sync pairs StagingSweep with Batch). This is the
-    /// proof that merging `AlreadyRecorded` + `StagingSweep` into one
-    /// `NoWrites` variant is compile-time-only; it runs green against the
-    /// pre-merge types BEFORE the merge lands.
+    /// E4 post-merge pin (M5 item 2 of
+    /// plans/architecture-simplification-review.md §5 — bounded re-open
+    /// of the sealed EnqueuePolicy; descendant of the pre-merge
+    /// equivalence test that proved `AlreadyRecorded` ≡ `StagingSweep`
+    /// before they were merged): both named constructors that pick the
+    /// no-write flavor — `tui_resume` (the resume intent: entries
+    /// already recorded) and `hf_cache_sync` (the staging-sweep intent:
+    /// register nothing pending) — leave a SEEDED disk registry
+    /// BYTE-identical and never patch the engine mirror. Their
+    /// discipline-divergent queue/HUD/channel shapes are pinned by the
+    /// characterization tests above; this pins the registry axis they
+    /// share post-merge.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn enqueue_no_write_registry_variants_are_observably_identical() {
+    async fn enqueue_no_write_constructors_leave_disk_registry_byte_identical() {
         let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("engine-enq-equiv-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
 
-        let files = vec![queued_file("f.bin", 10), queued_file("g.bin", 20)];
-        // One pre-recorded entry, seeded through the typed op: "no writes"
-        // then means the on-disk registry stays BYTE-identical — a much
-        // stronger claim than an absent file (which no write could alter
-        // either).
-        let preexisting = DownloadMetadata {
+        // One pre-recorded entry, seeded through the typed op: "no
+        // writes" then means the on-disk registry stays BYTE-identical —
+        // a much stronger claim than an absent file (which no write
+        // could alter either).
+        crate::registry::upsert_pending(std::slice::from_ref(&DownloadMetadata {
             model_id: "a/b".to_string(),
             filename: "seed.bin".to_string(),
             url: crate::api::resolve_url("a/b", "seed.bin", crate::api::DEFAULT_REVISION),
@@ -929,60 +912,27 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
-        };
+        }));
+        let baseline = std::fs::read(crate::paths::registry_path()).unwrap();
 
-        for discipline in [SendDiscipline::Resume, SendDiscipline::Batch] {
-            // Identical fresh disk pre-state for both variants of this
-            // discipline's pairing.
-            let _ = std::fs::remove_dir_all(&tmp);
-            std::fs::create_dir_all(&tmp).unwrap();
-            crate::registry::upsert_pending(std::slice::from_ref(&preexisting));
-            let baseline = std::fs::read(crate::paths::registry_path()).unwrap();
+        let files = vec![queued_file("f.bin", 10), queued_file("g.bin", 20)];
+        for policy in [EnqueuePolicy::tui_resume(), EnqueuePolicy::hf_cache_sync()] {
+            let (state, tx) = EngineState::new();
+            let outcome = state.enqueue(&tx, &files, &policy).await;
 
-            let mut observables = Vec::new();
-            for registry in [RegistryMode::AlreadyRecorded, RegistryMode::StagingSweep] {
-                let (state, tx) = EngineState::new();
-                let policy = EnqueuePolicy {
-                    registry,
-                    discipline,
-                    on_invalid: InvalidPolicy::SkipValidation,
-                };
-                let outcome = state.enqueue(&tx, &files, &policy).await;
+            assert_eq!(outcome.sent, 2);
+            assert!(outcome.invalid.is_empty(), "no validation runs");
+            assert!(outcome.aborted.is_none());
 
-                // Neither variant may write: the disk registry is
-                // byte-identical to the seeded baseline.
-                let disk = std::fs::read(crate::paths::registry_path()).unwrap();
-                assert_eq!(
-                    disk, baseline,
-                    "a no-write variant touched the disk registry ({discipline:?})"
-                );
-
-                // The full observable state as one comparable string
-                // (the payload types are Debug, not PartialEq).
-                let queue = state.queue.download_queue_totals.lock().await.clone();
-                let items = state.queue.download_queue_items.lock().await.clone();
-                let mirror = state.download_registry.lock().await.clone();
-                let drained = drain_downloads(&state).await;
-                observables.push(format!(
-                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
-                    outcome, queue, items, mirror, drained, disk
-                ));
-
-                // Shape sanity per discipline, so the equality below can
-                // never pass vacuously on two empty observables: both
-                // files sent, queue fully charged, HUD summaries pushed,
-                // mirror untouched (seeded on disk only).
-                assert_eq!(outcome.sent, 2);
-                assert_eq!((queue.size, queue.bytes), (2, 30));
-                assert_eq!(items.len(), 2);
-                assert_eq!(drained.len(), 2);
-                assert!(mirror.downloads.is_empty(), "the mirror is never patched");
-            }
-
+            // The registry axis: disk bytes untouched, mirror untouched.
+            let disk = std::fs::read(crate::paths::registry_path()).unwrap();
             assert_eq!(
-                observables[0], observables[1],
-                "AlreadyRecorded and StagingSweep diverged under {discipline:?} \
-                 — merging them into NoWrites would NOT be behavior-neutral"
+                disk, baseline,
+                "a no-write constructor touched the disk registry"
+            );
+            assert!(
+                state.download_registry.lock().await.downloads.is_empty(),
+                "the mirror is never patched"
             );
         }
 

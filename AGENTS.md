@@ -119,13 +119,17 @@ transaction (registry bookkeeping per policy →
 knobs — the fields are sealed; the five named constructors
 (`tui_quant`/`tui_repository`/`tui_resume`/`cli_download`/`hf_cache_sync`)
 are the only public API: `RegistryMode` (TUI mirror-registry upsert vs CLI
-`register_pending` disk upsert vs the two no-write flavors
-`AlreadyRecorded`/`StagingSweep`), `SendDiscipline`
+`register_pending` disk upsert vs `NoWrites` — the one no-write flavor
+behind both `tui_resume` and `hf_cache_sync`; M5/E4 merged the two
+historical no-write variants after a pre-merge equivalence pin proved
+them observably identical) and `SendDiscipline`
 (`Interactive`/`Resume`/`Batch` — queue-accounting timing, HUD-mirror
 population, and rollback collapsed into the three correlated combinations
-that actually occur), and `InvalidPolicy` (`ReportAndQueue` for the mirror
-flavors, `AbortAll` for the disk flavor, `SkipValidation` for the no-write
-flavors); user-facing status/error
+that actually occur). A former third knob `InvalidPolicy` was deleted in
+M5/E4: it was read at exactly one site where its value was constant
+(mirror flavors report invalid files and still queue them; the disk
+flavor's validate-first abort is inherent to `register_pending`; no-write
+flavors never validate). User-facing status/error
 strings stay at the call sites (`EnqueueOutcome`). The CLI signals
 completion by dropping `download_tx` (manager join resolves) and then
 waiting for `EngineState::verification_idle()`; per-file results stream over

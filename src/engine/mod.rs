@@ -33,7 +33,7 @@
 //! precedent — every `crate::engine::X` import keeps compiling unchanged):
 //!
 //! - `enqueue` — [`EngineState::enqueue`] plus the sealed [`EnqueuePolicy`]
-//!   knob types (`RegistryMode`, `SendDiscipline`, `InvalidPolicy`,
+//!   knob types (`RegistryMode`, `SendDiscipline`,
 //!   [`EnqueueOutcome`]) and their characterization tests.
 //! - `workers` — [`spawn_manager`], [`spawn_verification_worker`], and the
 //!   [`ManagerHandle`] drain contract.
