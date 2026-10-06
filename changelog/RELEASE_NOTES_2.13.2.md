@@ -83,3 +83,7 @@ tag build caught three Windows-only issues (28 failures, run
   but production builds it one component per join (native separators
   throughout). The expected value is now built the same way
   (`local_parts`); POSIX bytes unchanged.
+- The e2e `normalize()` helper now canonicalizes `\` to `/` after its
+  substitutions: Windows binaries print native separators in the
+  `Destination:`/snapshot paths (`$TMP\models\a\b`), while the
+  snapshots pin POSIX separators. A no-op on POSIX platforms.

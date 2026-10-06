@@ -64,7 +64,11 @@ use std::sync::Arc;
 ///    directly followed by a space or `%` (`48.8 KB`, `1.2 MB/s`,
 ///    `37.5%`) → `$N` (format_size rounding and speed/eta values depend
 ///    on timing). Version strings like `v2.13.1` are deliberately NOT
-///    matched (their decimals are followed by `.` or `)`).
+///    matched (their decimals are followed by `.` or `)`);
+/// 4. `\` → `/` — Windows binaries print native separators in the
+///    destination/snapshot paths; canonicalizing keeps the snapshots
+///    platform-independent (no pinned output contains a legitimate
+///    backslash).
 fn normalize(s: &str) -> String {
     let tmp = regex::Regex::new(r#"[^\s"']*hf-cli-e2e-\d+-\d+"#).unwrap();
     let port = regex::Regex::new(r"127\.0\.0\.1:\d+").unwrap();
@@ -73,7 +77,8 @@ fn normalize(s: &str) -> String {
     let s = port.replace_all(&s, "127.0.0.1:$$PORT");
     // `$$` escapes to a literal `$` (regex crate replacement syntax); the
     // captured separator keeps `48.8 KB` and `37.5%` word-shaped.
-    decimal.replace_all(&s, "$$N$1").into_owned()
+    let s = decimal.replace_all(&s, "$$N$1");
+    s.replace('\\', "/")
 }
 
 // ---------------------------------------------------------------------------
