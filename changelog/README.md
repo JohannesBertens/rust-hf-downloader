@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.2] - 2026-10-05
+
+### Version 2.13.2 (2026-10-05)
+- **Internal**: behavior-preserving readability/maintainability
+  restructuring of the whole crate (PR #43, plan-executed): one shared
+  download-engine facade (`engine/` with a sealed `EnqueuePolicy` — all
+  four TUI flows and both CLI frontends enqueue through the single
+  `EngineState::enqueue` transaction), module splits for every god-file
+  (`models/`, `api/`, `ui/render/`, `download/`, `events/`,
+  `cli/hf_cache/`, shared `cli/run.rs` runner), deduplicated formatting
+  (`fmt.rs`), path sanitization, and typed registry ops. Zero
+  user-facing behavior change: TUI snapshots, `--help` bytes, NDJSON
+  wire format, exit codes, and config/registry TOML are pinned
+  byte-identical by characterization suites.
+- **Tests**: 266 → 431 (style-signature, size-matrix, HUD-threshold,
+  enqueue-policy, filter/sort oracle, multipart corpus, exit-code
+  matrix, registry byte-goldens); the known registry lost-update race
+  is now pinned by a test.
+
 ## [2.13.1] - 2026-10-05
 
 ### Version 2.13.1 (2026-10-05)
