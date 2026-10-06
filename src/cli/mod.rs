@@ -31,8 +31,25 @@ mod run;
 mod search_cmd;
 mod update_cmd;
 
+// Per-subject test modules (M6/T1: the former 1986-line cli/tests.rs
+// grab-bag split by subject; shared fixtures live in testutil). Snapshot
+// goldens stay in src/cli/snapshots/ under each module's prefix.
 #[cfg(test)]
-mod tests;
+mod args_tests;
+#[cfg(test)]
+mod cli_surface_tests;
+#[cfg(test)]
+mod events_tests;
+#[cfg(test)]
+mod help_snapshot_tests;
+#[cfg(test)]
+mod hf_cache_tests;
+#[cfg(test)]
+mod report_tests;
+#[cfg(test)]
+mod resolve_tests;
+#[cfg(test)]
+mod testutil;
 
 use args::{DownloadArgs, HfCacheArgs, SearchArgs, UpdateArgs};
 use download_cmd::run_download;

@@ -58,15 +58,14 @@ not a target itself.
 
 ## Unit-test inventory (inline `#[cfg(test)]` in `src/**`)
 
-Skeleton: module → what it pins → how to run. M6 of
-[plans/architecture-simplification-review.md](plans/architecture-simplification-review.md)
-deepens this into a per-module what-it-pins table with per-subject CLI
-test splits.
+Skeleton: module → what it pins → how to run. The CLI rows are
+per-subject modules (M6/T1: the former `cli/tests.rs` grab-bag was split
+so each subject is discoverable and independently runnable).
 
 | Module | What it pins | Run |
 |---|---|---|
-| `src/config.rs` | config load/save/apply paths | `cargo test config` |
-| `src/paths.rs` | path-resolution precedence + sanitize security | `cargo test paths` |
+| `src/config.rs` | config load/save paths; ENGINE_OPTIONS declarative table (M6/C4) — per-field apply + snapshot round-trip pin | `cargo test config` |
+| `src/paths.rs` | app path-resolution precedence + sanitize security (hub-cache tests moved to cache_layout, M6/C7) | `cargo test paths` |
 | `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, single-writer serialization + all-writers-win concurrency contracts, atomic-save temp-file hygiene | `cargo test registry` |
 | `src/engine/enqueue.rs` | 8 EnqueuePolicy characterization tests (the single enqueue transaction) | `cargo test enqueue` |
 | `src/engine/workers.rs` | manager drain/join contract | `cargo test workers` |
@@ -76,14 +75,22 @@ test splits.
 | `src/patterns.rs` | Python-fnmatch parity + `--for vllm` preset tables | `cargo test patterns` |
 | `src/api/*` | model filter/sort oracles, quant classification, tree building | `cargo test api` |
 | `src/models/*` | AppOptions TOML golden (config schema), engine/cache type invariants | `cargo test models` |
-| `src/cli/run.rs` | Runner helpers, token precedence matrix | `cargo test run` |
-| `src/cli/mod.rs` | dispatch + exit-code constants | `cargo test cli` |
-| `src/cli/tests.rs` | CLI insta goldens (`src/cli/snapshots/`) | `cargo test cli::` |
+| `src/cli/run.rs` | Runner helpers (tally agreement, verify-outcome counters, run-tail order), token precedence matrix via the production resolvers, model-id gate wording + exit code (M6/C1) | `cargo test run` |
+| `src/cli/mod.rs` | dispatch + exit-code constants | `cargo test cli::` |
+| `src/cli/args_tests.rs` | args helpers (`valid_model_id`, `merge_token`, rate-limit overrides incl. the full cross-product, `parse_revision`, `ModelDto`) + clap parsing of `download`/`search` + the 27-cell token-precedence matrix | `cargo test args_tests` |
+| `src/cli/resolve_tests.rs` | `resolve_files` over every Selector flavor, ambiguity/miss error shapes, `parse_selector` conflicts, `FileSpec` sibling mapping (shared with hf-cache selection) | `cargo test resolve_tests` |
+| `src/cli/report_tests.rs` | progress-line formatters, plain-mode heartbeat throttle + skip-on-missed-snapshot through production `poll_once` | `cargo test report_tests` |
+| `src/cli/events_tests.rs` | NDJSON event insta goldens (byte-stable wire schema, `src/cli/snapshots/`) + literal wire-bytes tables for the error/file_complete variants | `cargo test events_tests` |
+| `src/cli/hf_cache_tests.rs` | §2.2 selection precedence, ref/symlink/absolute-path policy helpers, hf-cache clap surface | `cargo test hf_cache_tests` |
+| `src/cli/help_snapshot_tests.rs` | 7 long-help goldens (flag order/grouping/text of every command) | `cargo test help_snapshot` |
+| `src/cli/cli_surface_tests.rs` | root surface: version truth, no-subcommand-means-TUI, clap debug_assert | `cargo test cli_surface_tests` |
+| `src/cli/testutil.rs` | shared fixtures only (no tests): `file_spec`/`metadata_with`, the `snap!` snapshot macro, `SharedStderr`, `VarGuard` | — |
+| `src/cli/hf_cache/sync.rs` | publish gate (M6/C2): every gate arm — Ok / no-verify warning order / mismatch deletes staged bytes / verification error / missing result / failed-download skip / verification-off — with synthetic outcomes, no engine | `cargo test publish_gate` |
 | `src/rate_limiter.rs` | token-bucket refill math | `cargo test rate` |
 | `src/verification.rs` | verify outcomes, result counters | `cargo test verification` |
 | `src/update.rs` | version compare, manifest/asset selection | `cargo test update` |
 | `src/utils.rs` | digest streaming + atomic rename with retry | `cargo test utils` |
-| `src/cache_layout.rs` | hub-cache layout math, blob/refs naming, sync lock | `cargo test cache_layout` |
+| `src/cache_layout.rs` | hub-cache layout math, blob/refs naming, sync lock; hub-cache dir resolution (`hf_hub_cache` env precedence) + CACHEDIR.TAG (M6/C7) | `cargo test cache_layout` |
 | `src/ui/app/*` | filter cycle/step rules, keyboard dispatch/advance contract, download flows, mouse hit-areas | `cargo test app` |
 | `src/ui/render/*_tests.rs` | snapshot / hud / style-size suites (`src/ui/render/snapshots/`) | `cargo test render` |
 | `src/ui/tree.rs` | flatten/toggle navigation model | `cargo test tree` |
@@ -143,7 +150,7 @@ let _env = crate::paths::ENV_MUTEX
 
 Conventions that build on this:
 
-- `VarGuard` (`src/cli/tests.rs`) restores one env var on drop; the
+- `VarGuard` (`src/cli/testutil.rs`) restores one env var on drop; the
   engine submodule tests share `EnvGuard`
   (`src/engine/mod.rs::test_support`) which redirects
   `RUST_HF_DOWNLOADER_DATA_DIR` + `HF_ENDPOINT` and restores both on

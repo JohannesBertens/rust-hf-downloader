@@ -27,11 +27,11 @@ src/
 │   ├── search_cmd.rs # Query-only search (no engine)
 │   ├── hf_cache/     # hf-cache group (private submodules + mod facade re-exporting selection/sync helpers): sync pipeline (selection, sync lock, publish) + path helper
 │   ├── update_cmd.rs # Self-update subcommand (UpdateEvent NDJSON)
-│   └── tests.rs      # cli::tests — insta snapshots in src/cli/snapshots/
+│   └── *_tests.rs + testutil.rs # per-subject cli test modules (M6/T1: args/cli_surface/events/hf_cache/help_snapshot/report/resolve_tests + shared fixtures in testutil); insta snapshots in src/cli/snapshots/
 ├── engine/           # Shared download engine (facade + private submodules, models/ precedent): mod.rs (EngineState + QueuedDownload + auth-status contract), enqueue.rs (EngineState::enqueue + sealed EnqueuePolicy knob types + characterization tests), workers.rs (spawn_manager / spawn_verification_worker + ManagerHandle drain contract), bootstrap.rs (bootstrap + seed_registry_mirror)
 ├── models/           # Shared data types behind a facade (private submodules + pub use, W3.1): api.rs (HF DTOs), ui.rs (TUI enums + FileTreeNode), engine.rs (progress/queue/verification types incl. FileOutcome/VerifyOutcome + QueueState impl), options.rs (AppOptions — the config schema), cache.rs (ApiCache + aliases)
-├── paths.rs          # Cross-platform path resolution (config/registry/downloads; env override > portable mode > dirs defaults > temp). Never hardcode HOME or format! paths — route through this module.
-├── cache_layout.rs   # HuggingFace hub cache layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock (named cache_layout to disambiguate from cli/hf_cache/, the hf-cache command group)
+├── paths.rs          # App-path resolution only (config/registry/downloads; env override > portable mode > dirs defaults > temp) + sanitize. Never hardcode HOME or format! paths — route through this module. Hub-cache dir resolution + CACHEDIR.TAG moved to cache_layout (M6/C7); one-cycle pub-use shims remain
+├── cache_layout.rs   # HuggingFace hub-cache owner (M6/C7): hub-cache dir resolution (hf_hub_cache: HF_HUB_CACHE/HF_HOME, huggingface_hub parity) + CACHEDIR.TAG + layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative symlinks, refs, sync lock (named cache_layout to disambiguate from cli/hf_cache/, the hf-cache command group)
 ├── patterns.rs       # Python-fnmatch parity glob matcher (`--include`/`--exclude`, `--for vllm` preset table)
 ├── update.rs         # Self-update (v2.10.0): latest.json manifest check, SHA256-verified asset download, self_replace swap; RHD_UPDATE_BASE override
 ├── config.rs         # Configuration persistence + apply_options (shared engine tuning)

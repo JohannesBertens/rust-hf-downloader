@@ -9,20 +9,22 @@
 //! ([`crate::cli::run::resolve_run_token`]).
 
 use super::absolute_path;
-use crate::cli::args::{valid_model_id, HfCachePathArgs};
-use crate::cli::run::{effective_revision, resolve_run_token};
-use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_OK, EXIT_USAGE};
+use crate::cli::args::HfCachePathArgs;
+use crate::cli::run::{
+    effective_revision, invalid_model_id_message, require_valid_model_id, resolve_run_token,
+};
+use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_OK};
 
 pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
-    if !valid_model_id(&args.model_id) {
+    if let Err(code) = require_valid_model_id(&args.model_id) {
         eprintln!(
-            "error [usage]: invalid model ID {:?} — expected \"author/model-name\"",
-            args.model_id
+            "error [usage]: {}",
+            invalid_model_id_message(&args.model_id)
         );
-        return EXIT_USAGE;
+        return code;
     }
     let revision = effective_revision(&args.revision);
-    let cache_dir = crate::paths::hf_hub_cache(args.cache_dir.as_deref());
+    let cache_dir = crate::cache_layout::hf_hub_cache(args.cache_dir.as_deref());
     let repo_dir = cache_dir.join(crate::cache_layout::repo_dir_name(&args.model_id));
 
     // refs/<rev> lookup: pure path math, no network (plans/hf-cache-sync.md §2.1).

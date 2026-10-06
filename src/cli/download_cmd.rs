@@ -5,13 +5,14 @@
 
 use std::path::PathBuf;
 
-use super::args::{valid_model_id, DownloadArgs};
+use super::args::DownloadArgs;
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, selection_error_event, Selector};
 use super::run::{
-    effective_revision, emit_client_error, emit_metadata_error, emit_run_failures, load_run_config,
-    monitor, queue_run, RunTally,
+    effective_revision, emit_client_error, emit_metadata_error, emit_run_failures,
+    invalid_model_id_message, load_run_config, monitor, queue_run, require_valid_model_id,
+    RunTally,
 };
 use super::{EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
@@ -38,15 +39,12 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
 
     // --- 2. Validate usage ------------------------------------------------
     let revision = effective_revision(&args.revision);
-    if !valid_model_id(&args.model_id) {
+    if let Err(code) = require_valid_model_id(&args.model_id) {
         reporter.emit(&Event::error(
             ErrorCode::Usage,
-            format!(
-                "invalid model ID {:?} — expected \"author/model-name\"",
-                args.model_id
-            ),
+            invalid_model_id_message(&args.model_id),
         ));
-        return EXIT_USAGE;
+        return code;
     }
     let selector = match parse_selector(&args) {
         Ok(selector) => selector,
