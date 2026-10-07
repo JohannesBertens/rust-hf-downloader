@@ -58,9 +58,10 @@ pub struct App {
     /// (plan M4/B5), built from `options.hf_token` — the token lives in
     /// the client's default `Authorization` header, so no call site
     /// handles it. Rebuilt whenever the token changes
-    /// ([`App::rebuild_api_client`]); a malformed token surfaces as the
-    /// startup error and the client runs unauthenticated — explicitly,
-    /// never as the old silent header drop that later blamed a 401.
+    /// ([`App::rebuild_api_client`]); a malformed token is dropped WITH A
+    /// WARNING on the status line (owner revision 2026-10-07) and the
+    /// client runs unauthenticated — explicitly, never as the old silent
+    /// header drop that later blamed a 401.
     pub api_client: reqwest::Client,
     // Non-GGUF model support
     pub model_metadata: Arc<RwLock<Option<ModelMetadata>>>,
@@ -121,18 +122,23 @@ impl App {
 
         let file_tree_state = ListState::default();
 
-        // One shared API client per session (M4/B5); a malformed token is
-        // surfaced as the startup error while the client falls back to
-        // unauthenticated (public repos stay usable — gated ones fail,
-        // but with the reason already on screen).
-        let (api_client, startup_error) =
-            match crate::http_client::build_client_with_token(options.hf_token.as_deref(), None) {
-                Ok(client) => (client, None),
-                Err(e) => (
-                    reqwest::Client::new(),
-                    Some(format!("Invalid HF token: {e}")),
-                ),
-            };
+        // One shared API client per session (M4/B5; owner revision
+        // 2026-10-07): a malformed token is DROPPED WITH A WARNING — the
+        // status line carries it (not the error popup) while the client
+        // runs unauthenticated; public repos stay usable and the reason
+        // is on screen if a gated one 401s.
+        let (api_client, token_warning) =
+            crate::http_client::build_client_with_token(options.hf_token.as_deref(), None)
+                .unwrap_or_else(|e| {
+                    // TLS backend init failure is the only hard case left —
+                    // fall back to a default client and surface it loudly.
+                    eprintln!("Warning: {}", e);
+                    (reqwest::Client::new(), None)
+                });
+        let startup_status = match token_warning {
+            Some(w) => format!("Warning: Invalid HF token — {}", w.message()),
+            None => "Welcome! Press '/' to search for models".to_string(),
+        };
 
         Self {
             running: false,
@@ -142,10 +148,8 @@ impl App {
             list_state,
             quant_list_state,
             loading: Arc::new(RwLock::new(false)),
-            error: Arc::new(RwLock::new(startup_error)),
-            status: Arc::new(RwLock::new(
-                "Welcome! Press '/' to search for models".to_string(),
-            )),
+            error: Arc::new(RwLock::new(None)),
+            status: Arc::new(RwLock::new(startup_status)),
             selection_info: Arc::new(RwLock::new(String::new())),
             quantizations: Arc::new(RwLock::new(Vec::new())),
             quant_file_list_state,
@@ -183,14 +187,21 @@ impl App {
     }
 
     /// Rebuild [`App::api_client`] after the token changed (options-dialog
-    /// token-commit path — M4/B5). A malformed token surfaces as
-    /// the error popup; the client then runs unauthenticated — explicit,
-    /// never the old silent header drop that later blamed a 401.
+    /// token-commit path — M4/B5; owner revision 2026-10-07). A malformed
+    /// token is dropped WITH A WARNING on the status line; the client then
+    /// runs unauthenticated — explicit, never the old silent header drop
+    /// that later blamed a 401, and never a hard failure either.
     pub fn rebuild_api_client(&mut self) {
         match crate::http_client::build_client_with_token(self.options.hf_token.as_deref(), None) {
-            Ok(client) => self.api_client = client,
+            Ok((client, token_warning)) => {
+                self.api_client = client;
+                if let Some(w) = token_warning {
+                    *self.status.write() = format!("Warning: Invalid HF token — {}", w.message());
+                }
+            }
             Err(e) => {
-                *self.error.write() = Some(format!("Invalid HF token: {e}"));
+                // Only the hard build failure remains an error.
+                *self.error.write() = Some(format!("Failed to rebuild HTTP client: {e}"));
                 self.api_client = reqwest::Client::new();
             }
         }

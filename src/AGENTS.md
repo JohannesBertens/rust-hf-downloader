@@ -34,7 +34,7 @@ Key modules
 - Default AppOptions: persisted config schema only (download/verification and filter settings; the options dialog's transient UI state — cursor row, live-edit flags, text-edit buffers — lives in ui/app/options.rs::OptionsDialogState since M5/U1, resolved in docs/DEFERRED.md#options-dialog-transient-state, pinned by the TOML golden test in options.rs)
 
 2) http_client.rs
-- build_client_with_token(token, timeout) -> reqwest::Client (adds Bearer header only if token is Some(non-empty))
+- build_client_with_token(token, timeout) -> (reqwest::Client, Option<TokenDroppedWarning>) (adds Bearer header only if token is Some(non-empty) AND header-representable; a malformed token is dropped with the warning and the client is unauthenticated)
 - get_with_optional_token(url, token) -> Response (unauthenticated if token empty/None)
 
 3) api/ facade (client/quant/tree submodules)

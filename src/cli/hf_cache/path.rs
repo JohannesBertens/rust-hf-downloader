@@ -13,7 +13,7 @@ use crate::cli::args::HfCachePathArgs;
 use crate::cli::run::{
     effective_revision, invalid_model_id_message, require_valid_model_id, resolve_run_token,
 };
-use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_OK};
+use crate::cli::{EXIT_FAILURE, EXIT_OK};
 
 pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
     if let Err(code) = require_valid_model_id(&args.model_id) {
@@ -50,20 +50,20 @@ pub(super) async fn run_hf_cache_path(args: HfCachePathArgs) -> i32 {
     // Online fallback: resolve the revision to a commit SHA (Runner
     // partial bootstrap: load config, resolve the token by the run
     // precedence — no engine, no apply_options). The shared client is
-    // built here too (M4/B5): a malformed token is an explicit
-    // auth failure, never a silent unauthenticated lookup.
+    // built here too (M4/B5; owner revision 2026-10-07): a malformed
+    // token is dropped WITH A WARNING and the lookup proceeds
+    // unauthenticated — never silent, never run-fatal.
     let token = resolve_run_token(args.token.clone(), &crate::config::load_config());
     let api_client = match crate::http_client::build_client_with_token(token.as_deref(), None) {
-        Ok(client) => client,
+        Ok((client, token_warning)) => {
+            if let Some(w) = token_warning {
+                eprintln!("Warning: {}", w.message());
+            }
+            client
+        }
         Err(e) => {
-            let code = if matches!(e, crate::http_client::ClientBuildError::InvalidToken) {
-                eprintln!("error [auth_required]: {e}");
-                EXIT_AUTH
-            } else {
-                eprintln!("error [network]: {e}");
-                EXIT_FAILURE
-            };
-            return code;
+            eprintln!("error [network]: {e}");
+            return EXIT_FAILURE;
         }
     };
     match crate::api::resolve_revision_sha(&api_client, &args.model_id, &revision).await {

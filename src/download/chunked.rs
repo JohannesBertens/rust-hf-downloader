@@ -194,10 +194,16 @@ async fn probe_file_size(
     let timeout_secs = DOWNLOAD_CONFIG
         .download_timeout_secs
         .load(Ordering::Relaxed);
-    let client = crate::http_client::build_client_with_token(
+    let (client, token_warning) = crate::http_client::build_client_with_token(
         hf_token,
         Some(std::time::Duration::from_secs(timeout_secs)),
     )?;
+    // B5 owner revision 2026-10-07: a malformed token is dropped WITH A
+    // WARNING through the run's status channel; the transport proceeds
+    // unauthenticated (explicit, not the pre-M4 silent drop).
+    if let Some(w) = token_warning {
+        let _ = status_tx.send(format!("Warning: {}", w.message()));
+    }
 
     // Step 1: Get file size using a range request
     // Try the primary URL first, fallback to raw endpoint on 404

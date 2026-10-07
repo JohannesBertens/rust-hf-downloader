@@ -279,6 +279,9 @@ impl Reporter {
                 // (hf CLI parity). JSON consumers read the typed event.
                 self.line_stdout(snapshot_path);
             }
+            Event::Warning { message } => {
+                self.line_stderr(&format!("Warning: {}", message));
+            }
             Event::Error { code, message, .. } => {
                 self.line_stderr(&format!("error [{}]: {}", code, message));
             }

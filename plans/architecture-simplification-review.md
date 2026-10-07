@@ -518,3 +518,9 @@ registry write confinement, module DAG).
 - Docs amended beyond plan letter where gates demanded: TESTING.md clippy gate hardened to
   --all-targets; guard (a) made fail-closed per struct; registry docs state the REGISTRY_WRITE
   terminal-leaf position and the mirror self-deadlock rule.
+- **Post-run owner revision (2026-10-07, after the final gate): B5 semantics softened from
+  hard error to explicit warning.** A malformed HF token no longer fails the run with
+  `auth_required` exit 2 — `build_client_with_token` drops the token, returns
+  `TokenDroppedWarning`, and every frontend surfaces it (CLI: additive `warning` NDJSON
+  event / `Warning:` stderr line; TUI: status line; transport: status channel) while
+  proceeding unauthenticated. Still never the pre-M4 silent drop. e2e pins updated.

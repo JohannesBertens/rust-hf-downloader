@@ -196,6 +196,13 @@ pub enum Event {
         revision: String,
         sha: String,
     },
+    /// A non-fatal warning the run surfaced (e.g. the dropped-malformed-
+    /// HF-token warning from bootstrap: requests proceed unauthenticated).
+    /// Additive (2026-10-07, B5 owner revision); human mode renders it as
+    /// a `Warning: …` stderr line.
+    Warning {
+        message: String,
+    },
     Error {
         code: String,
         message: String,

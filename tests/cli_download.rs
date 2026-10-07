@@ -1233,19 +1233,21 @@ async fn subdir_tree_fetch_failure_surfaces_network_error_and_exits_one() {
 }
 
 // ---------------------------------------------------------------------------
-// Plan M4/B5: a malformed token is an explicit error, never a silent
-// unauthenticated downgrade
+// Plan M4/B5 (owner revision 2026-10-07): a malformed token is an
+// explicit WARNING + unauthenticated fallback, never a silent downgrade
+// and never a run-fatal error
 // ---------------------------------------------------------------------------
 
 /// `--token` with bytes that cannot appear in an Authorization header
-/// (here: a newline) must fail the run at bootstrap with `auth_required`
-/// + exit 2 — BEFORE any request goes out. Pre-B5 the header was
-/// silently dropped: the run went out unauthenticated against this
-/// non-gated mock and succeeded, and against a gated repo it would have
-/// produced a confusing 401 that pointed at `--token` instead of at the
-/// token's own bytes.
+/// (here: a newline) must surface a `warning` event at bootstrap and the
+/// run must PROCEED unauthenticated — against this non-gated mock the
+/// download succeeds (exit 0, file on disk). Pre-B5 the header was
+/// silently dropped (same outcome, no warning — a gated repo then
+/// produced a confusing 401); M4/B5 first made it a hard `auth_required`
+/// exit 2; the owner revision chose the middle ground: loud warning,
+/// unauthenticated fallback.
 #[tokio::test]
-async fn invalid_token_fails_explicitly_at_bootstrap_not_as_a_401() {
+async fn invalid_token_warns_at_bootstrap_and_proceeds_unauthenticated() {
     let content = fixture_bytes(20_000);
     let endpoint = spawn_mock(MockRepo {
         model_id: "a/b".to_string(),
@@ -1281,28 +1283,41 @@ async fn invalid_token_fails_explicitly_at_bootstrap_not_as_a_401() {
         ])
         .await;
 
-    assert_exit_code(code, 2, &stdout, &stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     let events = json_lines(&stdout);
-    assert_eq!(events.len(), 1, "nothing else may run: {stdout}");
-    let error = &events[0];
-    assert_eq!(error["type"], "error");
-    assert_eq!(error["code"], "auth_required");
+    // The bootstrap warning goes out FIRST, before any other event —
+    // a later 401 against a gated repo is diagnosable from the log.
+    let warning = &events[0];
+    assert_eq!(warning["type"], "warning");
     assert!(
-        error["message"]
+        warning["message"]
             .as_str()
             .unwrap_or_default()
             .contains("token"),
-        "error must name the token: {error}"
+        "warning must name the token: {warning}"
     );
-    // No file was touched.
-    assert!(!env.models_dir().join("a/b/model.gguf").exists());
+    assert!(
+        warning["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("WITHOUT authentication"),
+        "warning must state the downgrade: {warning}"
+    );
+    // And the run proceeded: the file landed (unauthenticated, non-gated
+    // mock) — done event present, bytes on disk.
+    assert!(
+        events.iter().any(|e| e["type"] == "done"),
+        "run must complete: {stdout}"
+    );
+    assert!(env.models_dir().join("a/b/model.gguf").exists());
 }
 
-/// The search flavor of the same contract: a malformed `--token` fails
-/// the query with `auth_required` + exit 2 instead of quietly querying
-/// unauthenticated.
+/// The search flavor of the same contract (owner revision 2026-10-07):
+/// a malformed `--token` emits the bootstrap warning and the query
+/// proceeds unauthenticated (exit 0) instead of failing with
+/// `auth_required`.
 #[tokio::test]
-async fn invalid_token_fails_search_explicitly() {
+async fn invalid_token_search_warns_and_proceeds_unauthenticated() {
     let endpoint = spawn_mock(MockRepo {
         model_id: "a/b".to_string(),
         files: Vec::new(),
@@ -1323,8 +1338,20 @@ async fn invalid_token_fails_search_explicitly() {
         .run(&["search", "qwen", "--json", "--token", "hf_bad\rtoken"])
         .await;
 
-    assert_exit_code(code, 2, &stdout, &stderr);
+    assert_exit_code(code, 0, &stdout, &stderr);
     let events = json_lines(&stdout);
-    let error = event_of(&events, "error", &stdout);
-    assert_eq!(error["code"], "auth_required");
+    let warning = event_of(&events, "warning", &stdout);
+    assert!(
+        warning["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("WITHOUT authentication"),
+        "warning must state the downgrade: {warning}"
+    );
+    // The query itself succeeded (empty result set against this mock) —
+    // stdout still carries the search JSON array after the warning line.
+    assert!(
+        stdout.trim_end().ends_with(']'),
+        "search array must still print: {stdout}"
+    );
 }

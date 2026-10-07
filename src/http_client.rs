@@ -14,41 +14,28 @@
 //! (`download_timeout_secs` applies to the byte stream, not to metadata
 //! lookups) built by the same [`build_client_with_token`] — and is
 //! therefore covered by the same invalid-token contract: a token that
-//! cannot be represented in a header value is an explicit
-//! [`ClientBuildError::InvalidToken`], never a silent downgrade to an
-//! unauthenticated request that later surfaces as a confusing 401.
+//! cannot be represented in a header value is DROPPED WITH AN EXPLICIT
+//! [`TokenDroppedWarning`] (owner revision 2026-10-07 of the M4/B5 fix:
+//! warn + proceed unauthenticated — never a silent downgrade, and never
+//! a hard bootstrap failure either), so a later 401 is never mysterious.
 
 use reqwest::{header, Client};
 use std::time::Duration;
 
-/// Why a run's shared [`Client`] could not be built.
-///
-/// `InvalidToken` is the M4/B5 fix: a malformed token used to be silently
-/// dropped from the default headers (`if let Ok(..) = HeaderValue::from_str`),
-/// sending every request of the run unauthenticated — gated repos then
-/// answered a confusing 401/`auth_required` that pointed users at
-/// `--token` instead of at their malformed token. It is now an explicit
-/// error the callers surface.
+/// Why a run's shared [`Client`] could not be built. (The invalid-token
+/// case is NOT an error anymore: the builder drops the token, proceeds
+/// unauthenticated, and returns a [`TokenDroppedWarning`] — see the
+/// module docs.)
 #[derive(Debug)]
 pub enum ClientBuildError {
     /// `Client::builder().build()` itself failed (TLS backend init).
     Build(reqwest::Error),
-    /// The configured token contains bytes that cannot appear in a
-    /// header value (control characters other than horizontal tab, or
-    /// DEL). The token is never echoed — it is a secret.
-    InvalidToken,
 }
 
 impl std::fmt::Display for ClientBuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientBuildError::Build(e) => write!(f, "failed to build HTTP client: {e}"),
-            ClientBuildError::InvalidToken => write!(
-                f,
-                "the configured HF token cannot be used in an Authorization header \
-                 (it contains characters that cannot appear in a header value, e.g. a \
-                 control character)"
-            ),
         }
     }
 }
@@ -57,8 +44,38 @@ impl std::error::Error for ClientBuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             ClientBuildError::Build(e) => Some(e),
-            ClientBuildError::InvalidToken => None,
         }
+    }
+}
+
+/// The configured HF token could not be represented in a header value
+/// (control characters other than horizontal tab, or DEL) and was
+/// dropped: the client runs **unauthenticated**. The token itself is
+/// never echoed — it is a secret.
+///
+/// Owner revision 2026-10-07 (B5 revisited): this is a WARNING the
+/// frontends surface, not a run-fatal error — the pre-M4 behavior was a
+/// *silent* drop that surfaced as a confusing 401 blaming `--token`;
+/// M4/B5 first made it a hard `auth_required` error; the owner chose
+/// the middle ground: loud warning, unauthenticated fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenDroppedWarning;
+
+impl TokenDroppedWarning {
+    /// The user-facing message (surfaces as a `Warning:` line / warning
+    /// event; includes the fix path so a later 401 is diagnosable).
+    pub fn message(&self) -> String {
+        "the configured HF token cannot be used in an Authorization header \
+         (it contains characters that cannot appear in a header value, e.g. a \
+         control character) — requests will be sent WITHOUT authentication; \
+         fix or remove the token (--token, $HF_TOKEN, or the config file)"
+            .to_string()
+    }
+}
+
+impl std::fmt::Display for TokenDroppedWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message())
     }
 }
 
@@ -68,30 +85,39 @@ impl std::error::Error for ClientBuildError {
 ///
 /// Token semantics (unchanged since v0.9.5): `None` or `""` builds an
 /// unauthenticated client — requests carry no `Authorization` header at
-/// all. A non-empty token MUST be representable as a header value;
-/// otherwise [`ClientBuildError::InvalidToken`] is returned (see the
-/// module docs: previously the token was silently dropped).
+/// all. A non-empty token that CANNOT be represented in a header value is
+/// dropped with an explicit [`TokenDroppedWarning`] and the client
+/// proceeds unauthenticated (owner revision 2026-10-07; previously —
+/// pre-M4 — the drop was silent).
 pub fn build_client_with_token(
     token: Option<&str>,
     timeout: Option<Duration>,
-) -> Result<Client, ClientBuildError> {
+) -> Result<(Client, Option<TokenDroppedWarning>), ClientBuildError> {
     let mut builder = Client::builder();
 
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
 
-    // ONLY add authorization header if token is provided and non-empty
+    // ONLY add authorization header if token is provided, non-empty, AND
+    // representable — a malformed token is dropped with the warning above.
+    let mut token_warning = None;
     if let Some(token) = token.filter(|t| !t.is_empty()) {
         let auth_value = format!("Bearer {token}");
-        let header_val = header::HeaderValue::from_str(&auth_value)
-            .map_err(|_| ClientBuildError::InvalidToken)?;
-        let mut headers = header::HeaderMap::new();
-        headers.insert(header::AUTHORIZATION, header_val);
-        builder = builder.default_headers(headers);
+        match header::HeaderValue::from_str(&auth_value) {
+            Ok(header_val) => {
+                let mut headers = header::HeaderMap::new();
+                headers.insert(header::AUTHORIZATION, header_val);
+                builder = builder.default_headers(headers);
+            }
+            Err(_) => token_warning = Some(TokenDroppedWarning),
+        }
     }
 
-    builder.build().map_err(ClientBuildError::Build)
+    Ok((
+        builder.build().map_err(ClientBuildError::Build)?,
+        token_warning,
+    ))
 }
 
 /// GET `url` through the run's shared client — a thin wrapper keeping
@@ -118,11 +144,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_token_is_an_explicit_error_not_a_silent_downgrade() {
+    fn invalid_token_builds_unauthenticated_client_with_warning() {
         // `HeaderValue::from_str` rejects control characters (other than
-        // horizontal tab) and DEL. Pre-B5 these tokens built an
-        // UNAUTHENTICATED client (the header was silently dropped) — the
-        // confusing-401 root cause this pins shut.
+        // horizontal tab) and DEL. Pre-M4 these tokens built an
+        // UNAUTHENTICATED client with the header SILENTLY dropped — the
+        // confusing-401 root cause. M4/B5 first made it a hard error;
+        // owner revision 2026-10-07: explicit warning + unauthenticated
+        // fallback (never silent, never run-fatal).
         for bad in [
             "bad\ntoken",
             "bad\rtoken",
@@ -130,18 +158,47 @@ mod tests {
             "bad\u{7}token",
             "bad\u{7f}token",
         ] {
+            let (client, warning) = build_client_with_token(Some(bad), None)
+                .expect("bad token must not fail the build");
+            let warning =
+                warning.unwrap_or_else(|| panic!("token {bad:?} must carry the drop warning"));
             assert!(
-                matches!(
-                    build_client_with_token(Some(bad), None),
-                    Err(ClientBuildError::InvalidToken)
-                ),
-                "token {bad:?} must fail explicitly"
+                warning.message().contains("WITHOUT authentication"),
+                "warning must state the downgrade: {}",
+                warning.message()
             );
+            assert!(
+                warning.message().contains("--token"),
+                "warning must name the fix path"
+            );
+            // The client is usable (unauthenticated) — the header map has
+            // no default Authorization.
+            assert!(client
+                .get("http://127.0.0.1:1/")
+                .build()
+                .expect("request builds")
+                .headers()
+                .get(header::AUTHORIZATION)
+                .is_none());
         }
         // Whitespace-only padding is representable (HeaderValue allows
         // visible ASCII + tab, and treats high bytes as obs-text) — pinned
-        // so the reject set stays exact.
-        assert!(build_client_with_token(Some(" padded "), None).is_ok());
-        assert!(build_client_with_token(Some("tökén"), None).is_ok());
+        // so the reject set stays exact: no warning for these.
+        assert!(build_client_with_token(Some(" padded "), None)
+            .expect("representable")
+            .1
+            .is_none());
+        assert!(build_client_with_token(Some("tökén"), None)
+            .expect("representable")
+            .1
+            .is_none());
+        assert!(build_client_with_token(None, None)
+            .expect("anon")
+            .1
+            .is_none());
+        assert!(build_client_with_token(Some(""), None)
+            .expect("empty")
+            .1
+            .is_none());
     }
 }

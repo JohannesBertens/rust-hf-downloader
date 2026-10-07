@@ -11,8 +11,8 @@ use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, selection_error_event, Selector};
 use super::run::{
     effective_revision, emit_client_error, emit_metadata_error, emit_run_failures,
-    invalid_model_id_message, load_run_config, monitor, queue_run, require_valid_model_id,
-    RunTally,
+    emit_token_warning, invalid_model_id_message, load_run_config, monitor, queue_run,
+    require_valid_model_id, RunTally,
 };
 use super::{EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
@@ -25,7 +25,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     );
 
     // --- 1. Configuration (Runner fold: run::load_run_config) ------------
-    let (options, token, api_client) = match load_run_config(
+    let (options, token, api_client, token_warning) = match load_run_config(
         args.run_output.token.clone(),
         args.output.as_deref(),
         args.rate_limits.rate_limit,
@@ -36,6 +36,9 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         Ok(bootstrap) => bootstrap,
         Err(e) => return emit_client_error(&mut reporter, &e),
     };
+    if let Some(warning) = &token_warning {
+        emit_token_warning(&mut reporter, warning);
+    }
 
     // --- 2. Validate usage ------------------------------------------------
     let revision = effective_revision(&args.revision);

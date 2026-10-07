@@ -205,9 +205,14 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
   request (TLS handshake per call, no pooling), and an invalid header
   value is silently dropped — the request goes out **unauthenticated**
   instead of failing.
-- **Remedy (landed):** one shared client threaded from the Runner bootstrap; an
-  invalid header becomes an explicit error (`ClientBuildError::InvalidToken`),
-  not a silent downgrade.
+- **Remedy (landed):** one shared client threaded from the Runner bootstrap;
+  an invalid header value is dropped WITH an explicit warning
+  (`TokenDroppedWarning`) and the run proceeds unauthenticated — never
+  the silent downgrade, and (owner revision 2026-10-07 of B5) never a
+  run-fatal error either: the CLI emits a `warning` NDJSON event /
+  `Warning:` stderr line at bootstrap (all four frontends), the TUI shows
+  the warning on the status line, and the download transport sends it
+  through the run's status channel.
 - **Provenance:** readability plan §8 items 7+11; architecture plan §3.4
   B5.
 

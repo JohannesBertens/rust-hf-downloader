@@ -235,7 +235,7 @@ async fn token_matrix_load_run_config_returns_written_back_pair() {
     for (flag, env, config) in token_matrix_cells() {
         let (tmp, _g1, _g2) = install_matrix_cell(env, config, "loadrun");
 
-        let (options, token, _client) = super::run::load_run_config(
+        let (options, token, _client, _token_warning) = super::run::load_run_config(
             flag.map(|s| s.to_string()),
             None, // no --output (neither token- nor engine-relevant here)
             false,
@@ -261,7 +261,7 @@ async fn token_matrix_load_run_config_returns_written_back_pair() {
     // not touch the token pair (the historically documented elision, now
     // actually executed and pinned).
     let (tmp, _g1, _g2) = install_matrix_cell(None, ConfigFile::WithToken, "noverify");
-    let (options, token, _client) =
+    let (options, token, _client, _token_warning) =
         super::run::load_run_config(None, None, false, false, None, true)
             .expect("matrix tokens are all header-representable");
     assert_eq!(token.as_deref(), Some("cfg"));

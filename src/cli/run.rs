@@ -89,7 +89,15 @@ pub(super) fn load_run_config(
     no_rate_limit: bool,
     rate_limit_mbps: Option<f64>,
     no_verify: bool,
-) -> Result<(AppOptions, Option<String>, reqwest::Client), crate::http_client::ClientBuildError> {
+) -> Result<
+    (
+        AppOptions,
+        Option<String>,
+        reqwest::Client,
+        Option<crate::http_client::TokenDroppedWarning>,
+    ),
+    crate::http_client::ClientBuildError,
+> {
     let mut options = crate::config::load_config();
     if let Some(dir) = output {
         options.default_directory = dir.to_string();
@@ -107,36 +115,40 @@ pub(super) fn load_run_config(
             .enable_verification
             .store(false, Ordering::Relaxed);
     }
-    let client = crate::http_client::build_client_with_token(token.as_deref(), None)?;
-    Ok((options, token, client))
+    let (client, token_warning) =
+        crate::http_client::build_client_with_token(token.as_deref(), None)?;
+    Ok((options, token, client, token_warning))
 }
 
-/// Surface a shared-client build failure (the [`load_run_config`] tail,
-/// M4/B5): a malformed token is an explicit `auth_required` +
-/// [`super::EXIT_AUTH`] — the documented home of "bad token" — and a
-/// plain client-build failure is `network` + [`EXIT_FAILURE`]. Either
-/// way the run stops BEFORE any request goes out unauthenticated.
+/// Surface the dropped-malformed-token warning (B5 owner revision
+/// 2026-10-07): the run PROCEEDS unauthenticated — the warning goes out
+/// first (NDJSON `warning` event / human `Warning:` stderr line) so a
+/// later 401 is diagnosable instead of mysterious.
+pub(super) fn emit_token_warning(
+    reporter: &mut Reporter,
+    warning: &crate::http_client::TokenDroppedWarning,
+) {
+    reporter.emit(&Event::Warning {
+        message: warning.message(),
+    });
+}
+
+/// Surface a shared-client build failure (the [`load_run_config`] tail):
+/// a plain client-build failure (TLS backend init) is `network` +
+/// [`EXIT_FAILURE`]. (The invalid-token case is a WARNING now, not an
+/// error — see [`emit_token_warning`].)
 pub(super) fn emit_client_error(
     reporter: &mut Reporter,
     error: &crate::http_client::ClientBuildError,
 ) -> i32 {
-    use crate::http_client::ClientBuildError;
     let code = match error {
-        ClientBuildError::InvalidToken => ErrorCode::AuthRequired,
-        ClientBuildError::Build(_) => ErrorCode::Network,
+        crate::http_client::ClientBuildError::Build(_) => ErrorCode::Network,
     };
     reporter.emit(&Event::error(
         code,
-        format!(
-            "{} — fix or remove the token (--token, $HF_TOKEN, or the config file)",
-            error
-        ),
+        format!("{} — the run cannot proceed without an HTTP client", error),
     ));
-    if matches!(error, ClientBuildError::InvalidToken) {
-        super::EXIT_AUTH
-    } else {
-        EXIT_FAILURE
-    }
+    EXIT_FAILURE
 }
 
 /// The partial bootstrap the query-only subcommands share (`hf-cache

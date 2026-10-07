@@ -24,8 +24,8 @@ use crate::cli::report::Reporter;
 use crate::cli::resolve::{selection_error_event, FileSpec};
 use crate::cli::run::{
     effective_revision, emit_client_error, emit_metadata_error, emit_run_failures,
-    invalid_model_id_message, load_run_config, monitor, queue_run, require_valid_model_id,
-    RunTally,
+    emit_token_warning, invalid_model_id_message, load_run_config, monitor, queue_run,
+    require_valid_model_id, RunTally,
 };
 use crate::cli::{EXIT_AUTH, EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_OK, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
@@ -191,7 +191,7 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
 
     // --- 1. Configuration (Runner fold: run::load_run_config, no output
     //        override — the destination is the hub cache, plans/hf-cache-sync.md §4.1) ------------
-    let (_options, token, api_client) = match load_run_config(
+    let (_options, token, api_client, token_warning) = match load_run_config(
         args.run_output.token.clone(),
         None,
         args.rate_limits.rate_limit,
@@ -202,6 +202,9 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         Ok(bootstrap) => bootstrap,
         Err(e) => return emit_client_error(&mut reporter, &e),
     };
+    if let Some(warning) = &token_warning {
+        emit_token_warning(&mut reporter, warning);
+    }
 
     // --- 2. Validate usage (plans/hf-cache-sync.md §5.2 step 1: revision already parsed by
     //        clap's parse_revision) ----------------------------------------
