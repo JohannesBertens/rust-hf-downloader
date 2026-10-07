@@ -190,7 +190,8 @@ discipline axis provably encodes three different orderings. Merged no-write cons
 their public names as delegates (zero call-site churn).
 
 **D-signoff summary** (owner approves inside the milestone): B3 visible errors instead of silent
-truncation; B4 abort semantics; B5 invalid-token becomes an error; B6 removes an observable
+truncation; B4 abort semantics; B5 invalid-token becomes an error *(later revised by the owner,
+2026-10-07 — warn + unauthenticated; see the §12 addendum)*; B6 removes an observable
 status warning + one HTTP round trip; R4's fix flips two pinned-as-desired tests from
 last-writer-wins to all-writers-win.
 
@@ -484,6 +485,8 @@ verification between waves (wave-reviewer GLM-5.3 · gemini38-reviewer Gemini 3.
 claude-opus-reviewer Claude Opus — the local third model was unavailable mid-run and Opus
 covered the docs lane; every gate verdict was PASS or PASS WITH P1, zero P0s across the run).
 All Gate-0 sign-offs (B3/B4/B5/B6/R4) were granted by the owner on 2026-10-06 before M1.
+B5's signed-off hard-error semantics were later revised by the owner (2026-10-07, post final
+gate — warn + unauthenticated; §12 addendum records the revision).
 
 | Wave | Milestones | Lanes | Gate fixes |
 |---|---|---|---|

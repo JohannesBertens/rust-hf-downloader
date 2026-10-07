@@ -200,7 +200,7 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 ## http-client-per-request-and-silent-header-drop
 
 - **Symbol:** `get_with_optional_token` / `build_client_with_token`
-- **Status:** resolved (M4, finding B5 — Gate-0 sign-off approved 2026-10-06, landed)
+- **Status:** resolved (M4, finding B5 — Gate-0 sign-off approved 2026-10-06, landed; remedy revised by owner 2026-10-07 to warn + unauthenticated — see the plan §12 addendum)
 - **Finding:** `src/http_client.rs` builds a fresh `reqwest::Client` per
   request (TLS handshake per call, no pooling), and an invalid header
   value is silently dropped — the request goes out **unauthenticated**

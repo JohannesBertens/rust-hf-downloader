@@ -274,9 +274,10 @@ impl App {
                     self.options_dialog.editing_token = false;
 
                     // The token rides in the session's shared client
-                    // (M4/B5) — rebuild it so the change takes effect
-                    // for the next search/fetch (a malformed token
-                    // surfaces as the error popup).
+                    // (M4/B5; owner revision 2026-10-07) — rebuild it so
+                    // the change takes effect for the next search/fetch
+                    // (a malformed token surfaces as a status-line
+                    // WARNING while the client runs unauthenticated).
                     self.rebuild_api_client();
 
                     // Save to disk

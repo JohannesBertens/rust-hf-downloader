@@ -77,11 +77,13 @@ impl RunTally {
 /// `apply_options`, which re-enables verification from the config value.
 ///
 /// The tail also builds the run's ONE shared `reqwest::Client` (plan
-/// M4/B5) with the merged token installed as its default auth header;
-/// every API call of the run threads it through. A token that cannot be
-/// represented in a header value fails HERE — [`emit_client_error`]
-/// surfaces it as an auth failure instead of the silent unauthenticated
-/// downgrade that used to appear as a confusing 401 later.
+/// M4/B5; owner revision 2026-10-07) with the merged token installed as
+/// its default auth header; every API call of the run threads it
+/// through. A token that cannot be represented in a header value is
+/// DROPPED WITH A WARNING here — the caller surfaces it via
+/// [`emit_token_warning`] and the run proceeds unauthenticated —
+/// replacing both the pre-M4 silent downgrade and the M4-era hard
+/// auth failure.
 pub(super) fn load_run_config(
     token_flag: Option<String>,
     output: Option<&str>,

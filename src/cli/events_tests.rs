@@ -341,6 +341,21 @@ fn file_complete_status_wire_contract() {
 }
 
 #[test]
+fn warning_event_wire_shape() {
+    // Additive variant of the B5 owner revision (2026-10-07): exactly
+    // {"type":"warning","message":<string>} — no other keys. Pinned
+    // here (house style) so the wire shape is contract-tested like every
+    // other variant, not only end-to-end.
+    let event = Event::Warning {
+        message: "dropped malformed HF token — requests proceed WITHOUT authentication".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_string(&event).unwrap(),
+        r#"{"type":"warning","message":"dropped malformed HF token — requests proceed WITHOUT authentication"}"#
+    );
+}
+
+#[test]
 fn error_with_available_constructor_wire_shape() {
     let event = Event::error_with_available(
         super::events::ErrorCode::Usage,

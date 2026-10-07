@@ -1313,7 +1313,8 @@ async fn invalid_token_warns_at_bootstrap_and_proceeds_unauthenticated() {
 }
 
 /// The search flavor of the same contract (owner revision 2026-10-07):
-/// a malformed `--token` emits the bootstrap warning and the query
+/// a malformed `--token` emits the bootstrap warning — on STDERR, so
+/// search's stdout stays a single JSON document — and the query
 /// proceeds unauthenticated (exit 0) instead of failing with
 /// `auth_required`.
 #[tokio::test]
@@ -1339,17 +1340,21 @@ async fn invalid_token_search_warns_and_proceeds_unauthenticated() {
         .await;
 
     assert_exit_code(code, 0, &stdout, &stderr);
-    let events = json_lines(&stdout);
-    let warning = event_of(&events, "warning", &stdout);
+    // The warning is on STDERR (Opus gate P2: search stdout must remain a
+    // single JSON document — an event line before the array would break
+    // `| jq` consumers; unlike download/sync, search's stdout is not an
+    // NDJSON event stream).
     assert!(
-        warning["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("WITHOUT authentication"),
-        "warning must state the downgrade: {warning}"
+        stderr.contains("Warning:") && stderr.contains("WITHOUT authentication"),
+        "warning must be on stderr and state the downgrade: {stderr}"
+    );
+    let events = json_lines(&stdout);
+    assert!(
+        events.iter().all(|e| e["type"] != "warning"),
+        "no warning event on search stdout: {stdout}"
     );
     // The query itself succeeded (empty result set against this mock) —
-    // stdout still carries the search JSON array after the warning line.
+    // stdout is exactly the search JSON array.
     assert!(
         stdout.trim_end().ends_with(']'),
         "search array must still print: {stdout}"

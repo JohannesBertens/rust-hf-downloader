@@ -5,7 +5,7 @@ use std::io::Write;
 use super::args::{ModelDto, SearchArgs};
 use super::events::{ErrorCode, Event};
 use super::report::{ProgressMode, Reporter};
-use super::run::{emit_client_error, emit_token_warning, resolve_run_token};
+use super::run::{emit_client_error, resolve_run_token};
 use super::{EXIT_FAILURE, EXIT_OK};
 
 /// Effective search parameters: explicit flag → config default (the same
@@ -80,7 +80,11 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
     // run's one shared client carries the token (M4/B5; owner revision
     // 2026-10-07): a malformed token is dropped WITH A WARNING and the
     // query proceeds unauthenticated — explicit, never silent, never
-    // run-fatal.
+    // run-fatal. The warning goes to STDERR in BOTH modes: search's
+    // stdout is a single JSON document (the result array) on success —
+    // an event line before it would break `| jq` consumers, so unlike
+    // the download/sync NDJSON streams, search never puts the warning
+    // on stdout.
     let token = resolve_run_token(args.token.clone(), &options);
     let (api_client, token_warning) =
         match crate::http_client::build_client_with_token(token.as_deref(), None) {
@@ -88,7 +92,7 @@ pub(super) async fn run_search(args: SearchArgs) -> i32 {
             Err(e) => return emit_client_error(&mut reporter, &e),
         };
     if let Some(w) = &token_warning {
-        emit_token_warning(&mut reporter, w);
+        eprintln!("Warning: {}", w.message());
     }
 
     let (sort, direction, min_downloads, min_likes) = effective_search_params(&args, &options);

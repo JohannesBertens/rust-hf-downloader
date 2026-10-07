@@ -481,7 +481,9 @@ the verification drain (`verifying: 2 in flight, 41 verified`);
 
 `--json` emits NDJSON events on **stdout** — `resolved`, `download_start`,
 `progress` (500 ms throttle), `file_complete`, `verification_start`,
-`verification_result`, `done` — and on failure the `error` event is
+`verification_result`, `done`, plus the additive `warning` (e.g. a malformed
+HF token dropped at bootstrap — never on stdout in `search --json`, which
+prints only the result array) — and on failure the `error` event is
 **always the last line**:
 
 ```json

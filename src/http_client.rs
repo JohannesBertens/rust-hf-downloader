@@ -171,15 +171,20 @@ mod tests {
                 warning.message().contains("--token"),
                 "warning must name the fix path"
             );
-            // The client is usable (unauthenticated) — the header map has
-            // no default Authorization.
-            assert!(client
-                .get("http://127.0.0.1:1/")
-                .build()
-                .expect("request builds")
-                .headers()
-                .get(header::AUTHORIZATION)
-                .is_none());
+            // The client is usable (unauthenticated) — NO default
+            // Authorization header. NOTE: checked via the Client's Debug
+            // representation, NOT RequestBuilder::build(): reqwest only
+            // merges default_headers during execute_request, so a
+            // built-but-unsent Request's header map is empty for ANY
+            // client and would make this assertion vacuous (Gemini gate
+            // P1, 2026-10-07). Client's Debug prints default_headers
+            // (verified in reqwest 0.11.27 async_impl/client.rs
+            // fmt_fields), so the substring check is load-bearing —
+            // the control below proves it can fail.
+            assert!(
+                !format!("{client:?}").contains("authorization"),
+                "dropped-token client must have no default Authorization: {client:?}"
+            );
         }
         // Whitespace-only padding is representable (HeaderValue allows
         // visible ASCII + tab, and treats high bytes as obs-text) — pinned
@@ -200,5 +205,16 @@ mod tests {
             .expect("empty")
             .1
             .is_none());
+        // Control for the Debug-substring assertion above: a client built
+        // with a VALID token DOES carry the default Authorization header
+        // in its Debug representation — proving the substring check is
+        // load-bearing (it fails when the header survives).
+        let (tokened, none_warning) =
+            build_client_with_token(Some("hf_ok"), None).expect("valid token builds");
+        assert!(none_warning.is_none());
+        assert!(
+            format!("{tokened:?}").contains("authorization"),
+            "tokened client must carry the default Authorization: {tokened:?}"
+        );
     }
 }

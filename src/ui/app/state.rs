@@ -127,17 +127,20 @@ impl App {
         // status line carries it (not the error popup) while the client
         // runs unauthenticated; public repos stay usable and the reason
         // is on screen if a gated one 401s.
+        let mut startup_error: Option<String> = None;
         let (api_client, token_warning) =
             crate::http_client::build_client_with_token(options.hf_token.as_deref(), None)
                 .unwrap_or_else(|e| {
                     // TLS backend init failure is the only hard case left —
-                    // fall back to a default client and surface it loudly.
-                    eprintln!("Warning: {}", e);
+                    // same treatment as rebuild_api_client's Err arm
+                    // (error field + anonymous default client).
+                    startup_error = Some(format!("Failed to build HTTP client: {e}"));
                     (reqwest::Client::new(), None)
                 });
-        let startup_status = match token_warning {
-            Some(w) => format!("Warning: Invalid HF token — {}", w.message()),
-            None => "Welcome! Press '/' to search for models".to_string(),
+        let startup_status = match (&startup_error, token_warning) {
+            (Some(_), _) => "Welcome! Press '/' to search for models".to_string(),
+            (None, Some(w)) => format!("Warning: Invalid HF token — {}", w.message()),
+            (None, None) => "Welcome! Press '/' to search for models".to_string(),
         };
 
         Self {
@@ -148,7 +151,7 @@ impl App {
             list_state,
             quant_list_state,
             loading: Arc::new(RwLock::new(false)),
-            error: Arc::new(RwLock::new(None)),
+            error: Arc::new(RwLock::new(startup_error)),
             status: Arc::new(RwLock::new(startup_status)),
             selection_info: Arc::new(RwLock::new(String::new())),
             quantizations: Arc::new(RwLock::new(Vec::new())),
@@ -195,8 +198,20 @@ impl App {
         match crate::http_client::build_client_with_token(self.options.hf_token.as_deref(), None) {
             Ok((client, token_warning)) => {
                 self.api_client = client;
-                if let Some(w) = token_warning {
-                    *self.status.write() = format!("Warning: Invalid HF token — {}", w.message());
+                match token_warning {
+                    Some(w) => {
+                        *self.status.write() =
+                            format!("Warning: Invalid HF token — {}", w.message());
+                    }
+                    // A (now) valid token REPLACES any lingering
+                    // malformed-token warning so a repaired token gets
+                    // visible confirmation instead of a stale warning.
+                    None => {
+                        let mut status = self.status.write();
+                        if status.starts_with("Warning: Invalid HF token") {
+                            *status = "Token updated".to_string();
+                        }
+                    }
                 }
             }
             Err(e) => {
