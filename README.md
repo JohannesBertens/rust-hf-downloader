@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.13.2
+# Rust HF Downloader v2.14.0
 
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 

@@ -67,7 +67,7 @@ src/
         └── *_tests.rs     # snapshot_tests / hud_tests / style_size_tests / tests — snaps in render/snapshots/
 ```
 
-### Frontends share one engine (v2.13.2)
+### Frontends share one engine (v2.14.0)
 
 Every registry mutation goes through the typed ops in `registry.rs`
 (W2.4, M1): `register_pending`, `upsert_pending`, `upsert_metadata`,
