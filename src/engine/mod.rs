@@ -33,7 +33,7 @@
 //! precedent — every `crate::engine::X` import keeps compiling unchanged):
 //!
 //! - `enqueue` — [`EngineState::enqueue`] plus the sealed [`EnqueuePolicy`]
-//!   knob types (`RegistryMode`, `SendDiscipline`, `InvalidPolicy`,
+//!   knob types (`RegistryMode`, `SendDiscipline`,
 //!   [`EnqueueOutcome`]) and their characterization tests.
 //! - `workers` — [`spawn_manager`], [`spawn_verification_worker`], and the
 //!   [`ManagerHandle`] drain contract.
@@ -41,7 +41,11 @@
 //!   [`seed_registry_mirror`].
 //!
 //! [`EngineState`] itself (with the [`QueuedDownload`] message type it
-//! routes) lives here in the facade.
+//! routes) lives here in the facade — since M3 grouped into bundles
+//! ([`QueueAccounting`], [`EventBus`], and the verification worker's
+//! [`crate::verification::VerificationHub`], plus the four top-level
+//! fields; see the field→bundle table below), with every member keeping
+//! its own `Arc<Mutex<..>`/channel — no lock was merged or re-scoped.
 
 mod bootstrap;
 mod enqueue;
@@ -53,11 +57,11 @@ pub use workers::{spawn_manager, spawn_verification_worker, ManagerHandle};
 
 use crate::models::{
     CompleteDownloads, DownloadProgress, DownloadRegistry, FileOutcome, QueueItemSummary,
-    QueueState, VerificationProgress, VerificationQueueItem, VerifyOutcome,
+    QueueTotals, VerifyOutcome,
 };
-use crate::verification::VerificationResultCounters;
+use crate::verification::{VerificationHub, VerificationResultCounters};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 
@@ -83,38 +87,142 @@ pub struct QueuedDownload {
 /// Type alias for download receiver to reduce complexity
 pub type DownloadReceiver = Arc<Mutex<mpsc::UnboundedReceiver<QueuedDownload>>>;
 
-/// The bundle of shared handles the engine tasks and frontends communicate
-/// through. Every field is an Arc or a channel endpoint, so cloning is cheap.
+// ---------------------------------------------------------------------------
+// M3 field→bundle ownership table (written BEFORE any code moved; see
+// plans/architecture-simplification-review.md §5 M3 step 0): every one of
+// the 17 flat `EngineState` fields gets exactly one home, so the regroup
+// (plans/architecture-simplification-review.md §5 M3 step 4) is a table
+// lookup, not a judgment call:
+//
+//   flat field (17 of them)        → home after the M3 regroup
+//   ──────────────────────────────────────────────────────────────────────
+//   download_rx                    → EngineState (top level) — the WORK
+//                                    channel's receiver. The sender half is
+//                                    deliberately NOT engine state (the CLI's
+//                                    drop-based completion), so this is not
+//                                    an event-bus channel either.
+//   download_queue                 → QueueAccounting.download_queue_totals
+//                                    (type renamed QueueState→QueueTotals;
+//                                    U6 folded into M3 step 4)
+//   download_queue_items           → QueueAccounting.download_queue_items
+//                                    (the name survives verbatim: it is the
+//                                    live-code anchor of
+//                                    docs/DEFERRED.md#queue-item-filename-only-match)
+//   download_progress              → EngineState (top level)
+//   complete_downloads             → EngineState (top level)
+//   status_tx / status_rx          → EventBus (the status channel pair)
+//   verify_tx / verify_rx          → EventBus (the verify channel pair)
+//   outcome_tx / outcome_rx        → EventBus (the outcome channel pair)
+//   verification_queue             → VerificationHub.queue
+//   verification_queue_size        → VerificationHub.size
+//   verification_in_flight         → VerificationHub.in_flight
+//   verification_progress          → VerificationHub.progress
+//   verification_results           → VerificationHub.results
+//   download_registry              → EngineState.download_registry (top
+//                                    level); VerificationHub.registry_mirror
+//                                    is the SAME Arc shared into the hub —
+//                                    ONE mutex with two names (the engine's
+//                                    registry mirror vs. the verification
+//                                    worker's view of it), not two homes.
+//
+// No field has two plausible homes: EventBus owns exactly the three event
+// channel pairs (tx+rx); VerificationHub owns exactly the queues/counters/
+// progress/mirror the verification worker consumes; QueueAccounting owns
+// exactly the two queue-accounting locks; the work-channel receiver and
+// the three scalar mirrors stay top level. Bundles keep SEPARATE
+// Arc<Mutex> fields inside — no lock is merged or added by the grouping.
+// ---------------------------------------------------------------------------
+
+/// Download-queue accounting (M3 bundle): the totals counters and the HUD
+/// item mirror — the two locks the flat `download_queue` /
+/// `download_queue_items` fields used to hold, still SEPARATE
+/// `Arc<Mutex<..>>` fields (no lock merging), with their never-nested
+/// rule stated once as a method ([`QueueAccounting::remove_started`]).
 #[derive(Clone, Debug)]
-pub struct EngineState {
-    pub download_rx: DownloadReceiver,
-    pub download_queue: Arc<Mutex<QueueState>>,
+pub struct QueueAccounting {
+    /// Counters (files + bytes) of queued-but-not-yet-started downloads —
+    /// a pair of totals, not a queue: `QueueTotals`, renamed from
+    /// `QueueTotals` (U6, folded into M3 step 4).
+    pub download_queue_totals: Arc<Mutex<QueueTotals>>,
+    /// Summary rows for the HUD (one per queued file). The manager removes
+    /// by FIRST filename match — pinned open in
+    /// docs/DEFERRED.md#queue-item-filename-only-match.
     pub download_queue_items: Arc<Mutex<Vec<QueueItemSummary>>>,
-    pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
-    pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
+}
+
+impl Default for QueueAccounting {
+    fn default() -> Self {
+        Self {
+            download_queue_totals: Arc::new(Mutex::new(QueueTotals::new(0, 0))),
+            download_queue_items: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl QueueAccounting {
+    /// Account one started file out of the totals and remove its HUD row
+    /// (first match by filename). The two locks are acquired separately,
+    /// never nested with each other — the invariant that used to be prose
+    /// in the AGENTS.md lock hierarchy, now one method. (The
+    /// filename-only match is the deferred behavior, unchanged.)
+    pub async fn remove_started(&self, filename: &str, total_size: u64) {
+        {
+            let mut totals = self.download_queue_totals.lock().await;
+            totals.remove(1, total_size);
+        }
+        let mut items = self.download_queue_items.lock().await;
+        if let Some(pos) = items.iter().position(|it| it.filename == filename) {
+            items.remove(pos);
+        }
+    }
+}
+
+/// The three event channel pairs (M3 bundle): free-text status lines,
+/// typed verification results, and per-file download outcomes. Senders
+/// are plain channel endpoints (no lock); receivers live behind their own
+/// `Arc<Mutex<..>>` (the receiver tier of the lock hierarchy — drained
+/// one lock per scope under `try_lock`).
+#[derive(Clone, Debug)]
+pub struct EventBus {
     pub status_tx: mpsc::UnboundedSender<String>,
     pub status_rx: Arc<Mutex<mpsc::UnboundedReceiver<String>>>,
-    pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<AtomicUsize>,
-    /// Number of verification tasks spawned but not yet finished. Incremented
-    /// while the queue lock is held (before the item is removed), so
-    /// `queue_size == 0 && in_flight == 0` can never observe a false idle
-    /// between the queue removal and the task start.
-    pub verification_in_flight: Arc<AtomicUsize>,
-    pub verification_progress: Arc<Mutex<Vec<VerificationProgress>>>,
-    pub download_registry: Arc<Mutex<DownloadRegistry>>,
     /// Typed verification results. The TUI ignores this channel (it renders
-    /// from `verification_progress` and status strings); the CLI consumes it
-    /// for JSON events and exit codes.
+    /// from the verification hub's progress list and status strings); the
+    /// CLI consumes it for JSON events and exit codes. This is the
+    /// CANONICAL sender half — the verification hub's `verify_tx` is a
+    /// clone of it — so the channel's lifetime is owned here, by the bus,
+    /// not by the worker. Read by the engine shape test; production
+    /// senders all go through the hub's clone.
+    #[allow(dead_code)]
     pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
     pub verify_rx: Arc<Mutex<mpsc::UnboundedReceiver<VerifyOutcome>>>,
     /// Per-file download outcomes, streamed by the manager as each file
-    /// finishes (the join handle additionally returns the full list). The TUI
-    /// ignores this channel; the CLI consumes it for live events.
+    /// finishes (the join handle additionally returns the full list). The
+    /// TUI ignores this channel; the CLI consumes it for live events.
     pub outcome_tx: mpsc::UnboundedSender<FileOutcome>,
     pub outcome_rx: Arc<Mutex<mpsc::UnboundedReceiver<FileOutcome>>>,
-    /// Session-lifetime verification counters (HUD footer / CLI summary)
-    pub verification_results: VerificationResultCounters,
+}
+
+/// The bundle of shared handles the engine tasks and frontends communicate
+/// through (M3 regroup: the former 17 flat fields live in three bundles —
+/// [`QueueAccounting`], [`EventBus`], and the verification worker's
+/// [`crate::verification::VerificationHub`] — plus the four fields whose
+/// single home is right here; see the field→bundle table above). Every
+/// field is an Arc or a channel endpoint, so cloning is cheap.
+#[derive(Clone, Debug)]
+pub struct EngineState {
+    /// The WORK channel's receiver (the sender half is deliberately NOT
+    /// engine state — the CLI's drop-based completion).
+    pub download_rx: DownloadReceiver,
+    pub queue: QueueAccounting,
+    pub events: EventBus,
+    pub verification: VerificationHub,
+    pub download_progress: Arc<Mutex<Option<DownloadProgress>>>,
+    pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
+    /// The engine's in-memory registry mirror. The verification hub's
+    /// `registry_mirror` is the SAME Arc (one mutex, two names — see the
+    /// field→bundle table).
+    pub download_registry: Arc<Mutex<DownloadRegistry>>,
 }
 
 impl EngineState {
@@ -127,25 +235,39 @@ impl EngineState {
         let (verify_tx, verify_rx) = mpsc::unbounded_channel();
         let (outcome_tx, outcome_rx) = mpsc::unbounded_channel();
 
+        // One registry mutex, two names: the engine's top-level mirror and
+        // the verification hub's `registry_mirror` share the Arc.
+        let download_registry = Arc::new(Mutex::new(DownloadRegistry::default()));
+
+        let verification = VerificationHub {
+            queue: Arc::new(Mutex::new(Vec::new())),
+            size: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            progress: Arc::new(Mutex::new(Vec::new())),
+            results: VerificationResultCounters::default(),
+            // Sender clones into the SAME channels the EventBus owns (an
+            // mpsc sender clone is another handle to one channel).
+            status_tx: status_tx.clone(),
+            verify_tx: verify_tx.clone(),
+            registry_mirror: download_registry.clone(),
+        };
+
         (
             Self {
                 download_rx: Arc::new(Mutex::new(download_rx)),
-                download_queue: Arc::new(Mutex::new(QueueState::new(0, 0))),
-                download_queue_items: Arc::new(Mutex::new(Vec::new())),
+                queue: QueueAccounting::default(),
+                events: EventBus {
+                    status_tx,
+                    status_rx: Arc::new(Mutex::new(status_rx)),
+                    verify_tx,
+                    verify_rx: Arc::new(Mutex::new(verify_rx)),
+                    outcome_tx,
+                    outcome_rx: Arc::new(Mutex::new(outcome_rx)),
+                },
+                verification,
                 download_progress: Arc::new(Mutex::new(None)),
                 complete_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                status_tx,
-                status_rx: Arc::new(Mutex::new(status_rx)),
-                verification_queue: Arc::new(Mutex::new(Vec::new())),
-                verification_queue_size: Arc::new(AtomicUsize::new(0)),
-                verification_in_flight: Arc::new(AtomicUsize::new(0)),
-                verification_progress: Arc::new(Mutex::new(Vec::new())),
-                download_registry: Arc::new(Mutex::new(DownloadRegistry::default())),
-                verify_tx,
-                verify_rx: Arc::new(Mutex::new(verify_rx)),
-                outcome_tx,
-                outcome_rx: Arc::new(Mutex::new(outcome_rx)),
-                verification_results: VerificationResultCounters::default(),
+                download_registry,
             },
             download_tx,
         )
@@ -157,36 +279,11 @@ impl EngineState {
     /// `queue_verification` call happens inside `start_download`, which the
     /// manager awaits, so once the manager join handle has resolved, all
     /// queue pushes have happened and this condition is stable.
+    /// Delegates to the hub: one implementation of the race-free
+    /// two-counter check.
     pub fn verification_idle(&self) -> bool {
-        self.verification_queue_size.load(Ordering::Relaxed) == 0
-            && self.verification_in_flight.load(Ordering::Relaxed) == 0
+        self.verification.idle()
     }
-}
-
-/// Auth-status channel contract (W2.6). When a download hits HTTP 401, the
-/// engine sends `AUTH_ERROR:<model_id>` on the free-text status channel;
-/// both frontends detect that line through [`parse_auth_status`] (the TUI
-/// opens the AuthError popup from it, the human CLI prints its auth hint).
-/// The typed signal lives in the outcome stream
-/// (`FileOutcome::AuthRequired`), which the CLI maps to
-/// `error [auth_required]` / `EXIT_AUTH`. Defining the string in exactly
-/// one place (builder + parser here, one producer in `download.rs`, two
-/// consumers calling this parser) removes the duplicated string contract
-/// without changing a byte on the wire; a future typed-event migration
-/// swaps this one function instead of N call sites.
-pub const AUTH_STATUS_PREFIX: &str = "AUTH_ERROR:";
-
-/// Build the auth-status line for `model_id` — byte-identical to the
-/// previous inline `format!("AUTH_ERROR:{}", model_id)` producer.
-pub fn auth_status_message(model_id: &str) -> String {
-    format!("{AUTH_STATUS_PREFIX}{model_id}")
-}
-
-/// Parse a status line back into its auth model id; `None` for any other
-/// status line. `Some("")` for the bare prefix pins the
-/// `format!`/`strip_prefix` round-trip behavior.
-pub fn parse_auth_status(status: &str) -> Option<&str> {
-    status.strip_prefix(AUTH_STATUS_PREFIX)
 }
 
 /// Env plumbing shared by the engine submodule tests (`enqueue`, `workers`,
@@ -239,6 +336,132 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    // M3 step 1: the SHAPE test — `EngineState::new()` returns a fully
+    // connected, fresh-valued state. This is the migration checklist for
+    // the bundle regroup (plans/architecture-simplification-review.md §5
+    // M3 step 4): it CHANGES within M3 by design (field paths gain their
+    // bundle prefix), which is why the behavioral pins named in the plan behavioral pins named in the
+    // plan (the 8 enqueue characterization tests, the manager
+    // the RenderCache defaults test, and the full e2e in
+    // tests/cli_download.rs) are the real no-regression gate.
+    #[tokio::test]
+    async fn engine_state_new_shape_is_fresh() {
+        let (state, download_tx) = EngineState::new();
+
+        // Work channel: the returned sender is connected to the receiver.
+        download_tx
+            .send(QueuedDownload {
+                model_id: "a/b".to_string(),
+                revision: "main".to_string(),
+                filename: "f.bin".to_string(),
+                base_path: PathBuf::from("/tmp"),
+                expected_sha256: None,
+                hf_token: None,
+                total_size: 1,
+            })
+            .unwrap();
+        let msg = { state.download_rx.lock().await.recv().await };
+        assert!(msg.is_some(), "download_tx → download_rx are connected");
+
+        // Queue accounting: zeroed counters, empty HUD mirror.
+        {
+            let queue = state.queue.download_queue_totals.lock().await;
+            assert_eq!((queue.size, queue.bytes), (0, 0));
+        }
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
+
+        // Scalar mirrors.
+        assert!(state.download_progress.lock().await.is_none());
+        assert!(state.complete_downloads.lock().await.is_empty());
+        assert!(state.download_registry.lock().await.downloads.is_empty());
+
+        // Event channels: every tx → rx pair is connected (send on the
+        // sender half, receive on the mutexed receiver half).
+        state.events.status_tx.send("ping".to_string()).unwrap();
+        assert_eq!(
+            state.events.status_rx.lock().await.try_recv().ok(),
+            Some("ping".to_string())
+        );
+        let outcome_probe = FileOutcome::Complete {
+            filename: "f.bin".to_string(),
+            bytes: 1,
+        };
+        state.events.outcome_tx.send(outcome_probe.clone()).unwrap();
+        assert_eq!(
+            state.events.outcome_rx.lock().await.try_recv().ok(),
+            Some(outcome_probe)
+        );
+        let verify_probe = VerifyOutcome::Ok {
+            filename: "f.bin".to_string(),
+        };
+        state.events.verify_tx.send(verify_probe.clone()).unwrap();
+        assert_eq!(
+            state.events.verify_rx.lock().await.try_recv().ok(),
+            Some(verify_probe)
+        );
+
+        // Verification worker state: empty queue/progress, zeroed
+        // counters, and the idle signal true on a fresh engine.
+        assert!(state.verification.queue.lock().await.is_empty());
+        assert_eq!(state.verification.size.load(Ordering::Relaxed), 0);
+        assert_eq!(state.verification.in_flight.load(Ordering::Relaxed), 0);
+        assert!(state.verification.progress.lock().await.is_empty());
+        assert_eq!(state.verification.results.ok.load(Ordering::Relaxed), 0);
+        assert_eq!(state.verification.results.failed.load(Ordering::Relaxed), 0);
+        assert!(state.verification_idle());
+
+        // Bundle sharing, pinned structurally: the registry mirror is ONE
+        // mutex with two names (engine top level + hub registry_mirror) —
+        // same Arc, so verification's mismatch patches are visible through
+        // the engine field and vice versa.
+        assert!(Arc::ptr_eq(
+            &state.download_registry,
+            &state.verification.registry_mirror
+        ));
+
+        // The hub's senders are handles into the SAME channels the EventBus
+        // owns: a status line sent through the hub arrives on the bus's
+        // status receiver (same for typed verify outcomes).
+        state
+            .verification
+            .status_tx
+            .send("via-hub".to_string())
+            .unwrap();
+        assert_eq!(
+            state.events.status_rx.lock().await.try_recv().ok(),
+            Some("via-hub".to_string())
+        );
+        let hub_verify_probe = VerifyOutcome::Missing {
+            filename: "f.bin".to_string(),
+        };
+        state
+            .verification
+            .verify_tx
+            .send(hub_verify_probe.clone())
+            .unwrap();
+        assert_eq!(
+            state.events.verify_rx.lock().await.try_recv().ok(),
+            Some(hub_verify_probe)
+        );
+
+        // Cloning the state shares every Arc (the frontends' clones observe
+        // the same locks and channels — the property the flat fields had).
+        let clone = state.clone();
+        assert!(Arc::ptr_eq(
+            &clone.download_registry,
+            &state.download_registry
+        ));
+        assert!(Arc::ptr_eq(
+            &clone.queue.download_queue_totals,
+            &state.queue.download_queue_totals
+        ));
+        assert!(Arc::ptr_eq(
+            &clone.verification.queue,
+            &state.verification.queue
+        ));
+    }
 
     #[tokio::test]
     async fn verification_idle_tracks_queue_and_in_flight() {
@@ -246,47 +469,14 @@ mod tests {
 
         assert!(state.verification_idle(), "fresh engine is idle");
 
-        state
-            .verification_queue_size
-            .fetch_add(1, Ordering::Relaxed);
+        state.verification.size.fetch_add(1, Ordering::Relaxed);
         assert!(!state.verification_idle(), "queued work is not idle");
-        state
-            .verification_queue_size
-            .fetch_sub(1, Ordering::Relaxed);
+        state.verification.size.fetch_sub(1, Ordering::Relaxed);
 
-        state.verification_in_flight.fetch_add(1, Ordering::Relaxed);
+        state.verification.in_flight.fetch_add(1, Ordering::Relaxed);
         assert!(!state.verification_idle(), "in-flight work is not idle");
-        state.verification_in_flight.fetch_sub(1, Ordering::Relaxed);
+        state.verification.in_flight.fetch_sub(1, Ordering::Relaxed);
 
         assert!(state.verification_idle(), "idle again after drain");
-    }
-
-    /// W2.6: the auth-status line's exact bytes and both parse outcomes are
-    /// the pinned contract shared by the download-task producer and the TUI
-    /// and human-CLI consumers (the typed signal is `FileOutcome::AuthRequired`).
-    #[test]
-    fn auth_status_string_contract_is_pinned() {
-        // Producer: byte-identical to the legacy inline format!.
-        assert_eq!(
-            auth_status_message("meta-llama/Llama-3-8B-Instruct"),
-            "AUTH_ERROR:meta-llama/Llama-3-8B-Instruct"
-        );
-        // Consumers: the same model id both frontends extracted via
-        // strip_prefix before the parser was centralized.
-        assert_eq!(
-            parse_auth_status("AUTH_ERROR:meta-llama/Llama-3-8B-Instruct"),
-            Some("meta-llama/Llama-3-8B-Instruct")
-        );
-        // Non-auth status lines must not match (they reach the status
-        // handlers verbatim).
-        assert_eq!(
-            parse_auth_status("Error: Download failed after retries: boom"),
-            None
-        );
-        assert_eq!(parse_auth_status(""), None);
-        // Bare prefix pins the format!/strip_prefix round-trip (empty id).
-        assert_eq!(parse_auth_status(AUTH_STATUS_PREFIX), Some(""));
-        // Builder/parser round-trip.
-        assert_eq!(parse_auth_status(&auth_status_message("a/b")), Some("a/b"));
     }
 }

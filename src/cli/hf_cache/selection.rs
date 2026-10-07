@@ -1,4 +1,4 @@
-//! Pure file-selection logic for `hf-cache sync` (§2.2 precedence, §2.3
+//! Pure file-selection logic for `hf-cache sync` (plans/hf-cache-sync.md §2.2 precedence, §2.3
 //! preset tables): no I/O, no network, no cache access — the whole
 //! selector is unit-testable through [`select_sync_files`].
 //!
@@ -10,7 +10,7 @@ use crate::cli::events::FileDto;
 use crate::cli::resolve::{FileSpec, SelectionError};
 use crate::models::ModelMetadata;
 
-/// How a sync's file selection was derived (§2.2) — `WholeRepo` triggers
+/// How a sync's file selection was derived (plans/hf-cache-sync.md §2.2) — `WholeRepo` triggers
 /// the `--for vllm` tip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionMode {
@@ -18,13 +18,13 @@ pub enum SelectionMode {
     Files,
     /// `--include`/`--exclude` globs over the full tree.
     Patterns,
-    /// A `--for <PRESET>` allow/ignore table (§2.3).
+    /// A `--for <PRESET>` allow/ignore table (plans/hf-cache-sync.md §2.3).
     Preset,
     /// No selector: the whole repository (hf `download` parity).
     WholeRepo,
 }
 
-/// Selection failures (§2.2): all map to [`EXIT_USAGE`] with the full
+/// Selection failures (plans/hf-cache-sync.md §2.2): all map to [`EXIT_USAGE`] with the full
 /// structured file list attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncSelectionError {
@@ -68,18 +68,18 @@ impl SelectionError for SyncSelectionError {
     }
 }
 
-/// Resolve the files a sync targets, per the §2.2 precedence:
+/// Resolve the files a sync targets, per the plans/hf-cache-sync.md §2.2 precedence:
 ///
 /// 1. positional `FILE…` → exactly those files (each must exist in the
 ///    tree; duplicates collapse, order preserved),
 /// 2. else `--include`/`--exclude` → Python-fnmatch globs over the full
-///    tree (`*` crosses `/`, §7),
-/// 3. else `--for vllm` → the preset allow/ignore table from §2.3
+///    tree (`*` crosses `/`, plans/hf-cache-sync.md §7),
+/// 3. else `--for vllm` → the preset allow/ignore table from plans/hf-cache-sync.md §2.3
 ///    ([`crate::patterns::VLLM_ALLOW`]/[`crate::patterns::VLLM_IGNORE`]),
 /// 4. else the whole repository ([`SelectionMode::WholeRepo`] — the
 ///    caller prints the `--for vllm` tip).
 ///
-/// `--exclude` applies on top of every mode (§2.2). An empty selection
+/// `--exclude` applies on top of every mode (plans/hf-cache-sync.md §2.2). An empty selection
 /// after all filtering is an error carrying the available file list.
 pub fn select_sync_files(
     tree: &[&str],
@@ -122,7 +122,7 @@ pub fn select_sync_files(
                     .collect();
                 // The preset's own ignore table filters here; a user
                 // --exclude is additionally applied by the universal
-                // post-filter below (§2.2: exclude applies on top of every
+                // post-filter below (plans/hf-cache-sync.md §2.2: exclude applies on top of every
                 // mode).
                 let ignore: Vec<String> = crate::patterns::VLLM_IGNORE
                     .iter()
@@ -144,7 +144,7 @@ pub fn select_sync_files(
         (available(), SelectionMode::WholeRepo)
     };
 
-    // §2.2: --exclude applies on top of every mode (filter_paths already
+    // plans/hf-cache-sync.md §2.2: --exclude applies on top of every mode (filter_paths already
     // applied it for the Patterns/Preset paths; re-applying is idempotent).
     if !exclude.is_empty() {
         selected.retain(|path| {

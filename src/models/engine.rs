@@ -2,6 +2,7 @@
 //! engine (download manager and verification worker).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -72,6 +73,20 @@ pub struct DownloadRegistry {
     pub downloads: Vec<DownloadMetadata>,
 }
 
+/// Completed-download mirror: bare FILENAME → the entry's metadata.
+/// Lives next to `DownloadMetadata` since M5/U6 (moved from
+/// `models/cache.rs` — it is an engine-side completion mirror keyed by
+/// the metadata type, not an API cache container).
+///
+/// Key contract: the key is the BARE filename — no model, revision, or
+/// path component — so two models (or revisions) downloading a file
+/// with the same name overwrite each other's completion/HUD entry. The
+/// collision is a known deferred defect: the fix (keying by
+/// model/revision/path) changes registry-adjacent bytes and needs its
+/// own sign-off — see
+/// docs/DEFERRED.md#complete-downloads-filename-key-collision.
+pub type CompleteDownloads = HashMap<String, DownloadMetadata>;
+
 /// Typed per-file result of a download attempt, collected by the engine's
 /// download manager. The TUI ignores these (it renders from status strings);
 /// the CLI maps them to events and exit codes.
@@ -104,9 +119,11 @@ pub enum VerifyOutcome {
     },
 }
 
-/// Combined download queue state to reduce lock complexity
+/// Download-queue totals (files + bytes) — a counter pair, not a
+/// queue (renamed from `QueueState` in M3/U6: the old name made a
+/// counter pair sound like the queue itself).
 #[derive(Debug, Default, Clone)]
-pub struct QueueState {
+pub struct QueueTotals {
     /// Number of downloads currently in queue
     pub size: usize,
     /// Total bytes of downloads in queue
@@ -122,7 +139,7 @@ pub struct QueueItemSummary {
     pub total_size: u64,
 }
 
-impl QueueState {
+impl QueueTotals {
     pub fn new(size: usize, bytes: u64) -> Self {
         Self { size, bytes }
     }
@@ -167,13 +184,46 @@ pub struct VerificationQueueItem {
     pub is_manual: bool, // True if triggered by 'v' key, false if automatic
 }
 
+// ---------------------------------------------------------------------------
+// Auth-status channel contract (W2.6; moved from `engine/mod.rs` to this
+// data-only module in M3, plans/architecture-simplification-review.md §5
+// M3 step 2 — so `download/` can produce the line and both frontends can
+// parse it without importing the engine).
+// ---------------------------------------------------------------------------
+
+/// When a download hits HTTP 401, the engine sends
+/// `AUTH_ERROR:<model_id>` on the free-text status channel; both frontends
+/// detect that line through [`parse_auth_status`] (the TUI opens the
+/// AuthError popup from it, the human CLI prints its auth hint). The typed
+/// signal lives in the outcome stream (`FileOutcome::AuthRequired`), which
+/// the CLI maps to `error [auth_required]` / `EXIT_AUTH`. Defining the
+/// string in exactly one place (builder + parser here, one producer in
+/// `download.rs`, two consumers calling this parser) removes the
+/// duplicated string contract without changing a byte on the wire; a
+/// future typed-event migration swaps this one function instead of N call
+/// sites.
+pub const AUTH_STATUS_PREFIX: &str = "AUTH_ERROR:";
+
+/// Build the auth-status line for `model_id` — byte-identical to the
+/// previous inline `format!("AUTH_ERROR:{}", model_id)` producer.
+pub fn auth_status_message(model_id: &str) -> String {
+    format!("{AUTH_STATUS_PREFIX}{model_id}")
+}
+
+/// Parse a status line back into its auth model id; `None` for any other
+/// status line. `Some("")` for the bare prefix pins the
+/// `format!`/`strip_prefix` round-trip behavior.
+pub fn parse_auth_status(status: &str) -> Option<&str> {
+    status.strip_prefix(AUTH_STATUS_PREFIX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn queue_state_new_initializes_counts() {
-        let state = QueueState::new(3, 1000);
+        let state = QueueTotals::new(3, 1000);
         assert_eq!(state.size, 3);
         assert_eq!(state.bytes, 1000);
         assert!(!state.is_empty());
@@ -181,7 +231,7 @@ mod tests {
 
     #[test]
     fn queue_state_add_accumulates() {
-        let mut state = QueueState::new(3, 1000);
+        let mut state = QueueTotals::new(3, 1000);
         state.add(2, 500);
         assert_eq!(state.size, 5);
         assert_eq!(state.bytes, 1500);
@@ -189,7 +239,7 @@ mod tests {
 
     #[test]
     fn queue_state_remove_subtracts() {
-        let mut state = QueueState::new(3, 1000);
+        let mut state = QueueTotals::new(3, 1000);
         state.remove(1, 400);
         assert_eq!(state.size, 2);
         assert_eq!(state.bytes, 600);
@@ -199,7 +249,7 @@ mod tests {
     fn queue_state_remove_saturates_at_zero() {
         // Documents actual behavior: removing more than was added saturates
         // both size and bytes at zero (no underflow panic).
-        let mut state = QueueState::new(1, 100);
+        let mut state = QueueTotals::new(1, 100);
         state.remove(5, 999);
         assert_eq!(state.size, 0);
         assert_eq!(state.bytes, 0);
@@ -208,7 +258,7 @@ mod tests {
 
     #[test]
     fn queue_state_default_is_empty() {
-        let state = QueueState::default();
+        let state = QueueTotals::default();
         assert_eq!(state.size, 0);
         assert_eq!(state.bytes, 0);
         assert!(state.is_empty());
@@ -218,7 +268,38 @@ mod tests {
     fn queue_state_is_empty_tracks_size_only() {
         // Documents actual behavior: emptiness is defined by `size` only,
         // even when `bytes` is non-zero.
-        let state = QueueState::new(0, 100);
+        let state = QueueTotals::new(0, 100);
         assert!(state.is_empty());
+    }
+
+    /// W2.6: the auth-status line's exact bytes and both parse outcomes are
+    /// the pinned contract shared by the download-task producer and the TUI
+    /// and human-CLI consumers (the typed signal is
+    /// `FileOutcome::AuthRequired`). Moved verbatim from `engine/mod.rs`
+    /// with the contract itself (M3 step 2).
+    #[test]
+    fn auth_status_string_contract_is_pinned() {
+        // Producer: byte-identical to the legacy inline format!.
+        assert_eq!(
+            auth_status_message("meta-llama/Llama-3-8B-Instruct"),
+            "AUTH_ERROR:meta-llama/Llama-3-8B-Instruct"
+        );
+        // Consumers: the same model id both frontends extracted via
+        // strip_prefix before the parser was centralized.
+        assert_eq!(
+            parse_auth_status("AUTH_ERROR:meta-llama/Llama-3-8B-Instruct"),
+            Some("meta-llama/Llama-3-8B-Instruct")
+        );
+        // Non-auth status lines must not match (they reach the status
+        // handlers verbatim).
+        assert_eq!(
+            parse_auth_status("Error: Download failed after retries: boom"),
+            None
+        );
+        assert_eq!(parse_auth_status(""), None);
+        // Bare prefix pins the format!/strip_prefix round-trip (empty id).
+        assert_eq!(parse_auth_status(AUTH_STATUS_PREFIX), Some(""));
+        // Builder/parser round-trip.
+        assert_eq!(parse_auth_status(&auth_status_message("a/b")), Some("a/b"));
     }
 }

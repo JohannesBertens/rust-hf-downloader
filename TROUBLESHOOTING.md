@@ -36,15 +36,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 **Error**: Various linker or dependency errors
 
-**Solution**: Install development dependencies:
+**Solution**: Install development dependencies (the crate is rustls-only —
+no OpenSSL needed):
 
 ```bash
 # Ubuntu/Debian
 sudo apt-get update
-sudo apt-get install build-essential pkg-config libssl-dev
+sudo apt-get install build-essential pkg-config
 
 # Fedora/RHEL
-sudo dnf install gcc openssl-devel
+sudo dnf install gcc
 ```
 
 ### Crates.io Installation Fails
@@ -118,11 +119,12 @@ cargo install --path .
 1. Increase concurrent threads:
    - Press `o` → Options
    - Navigate to "Concurrent Threads"
-   - Increase from default (4) to 8
+   - Increase (default is 8) if you lowered it
 
 2. Increase chunk size:
-   - Navigate to "Chunk Size (MB)"
-   - Increase from default (10) to 50
+   - Navigate to "Max Chunk Size" (default 100 MiB) and/or "Min Chunk
+     Size" (default 5 MiB); "Target Number of Chunks" (default 20)
+     controls how files are split
 
 3. Disable rate limiting if enabled
 
@@ -316,9 +318,9 @@ If missing, the application will regenerate defaults on next start.
 
 **Symptom**: "Windows protected your PC" when running the downloaded exe
 
-**Solution**: The CI artifacts are unsigned. Click *More info* → *Run
-anyway*, or build from source. Verify the SHA256 against the artifact
-digest on the Actions run page if in doubt.
+**Solution**: The release binaries are unsigned. Click *More info* → *Run
+anyway*, or build from source. Verify the SHA256 against the release's
+`SHA256SUMS` asset on the GitHub Release page if in doubt.
 
 ### Windows: no colors / garbled UI
 

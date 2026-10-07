@@ -1,15 +1,28 @@
-//! SHA256 verification worker: drains the engine's verification queue,
+//! SHA256 verification worker: drains the verification queue,
 //! hashes files (bounded by a semaphore), reports typed
 //! [`VerifyOutcome`]s over the engine's outcome channel, and signals
 //! idle when the queue is exhausted.
+//!
+//! # The hub seam (M3)
+//!
+//! [`VerificationHub`] is the verification worker's ENTIRE shared state:
+//! the queue it drains, the counters that make [`VerificationHub::idle`]
+//! race-free, the progress list the UI snapshots, the session result
+//! counters, the two channels it reports through, and the registry mirror
+//! it patches on mismatch. The engine constructs the hub from
+//! `EngineState` (in `engine/workers.rs`) and hands it to
+//! [`verification_worker`]; this module therefore imports models +
+//! registry ONLY — never the engine module — which turns the old
+//! engine↔verification cycle into a DAG edge (engine → verification).
+//! The textual side of that invariant is pinned by
+//! `tests/docs_guards.rs::module_dependency_dag`.
 
-use crate::engine::EngineState;
-use crate::models::{VerificationProgress, VerificationQueueItem, VerifyOutcome};
+use crate::models::{DownloadRegistry, VerificationProgress, VerificationQueueItem, VerifyOutcome};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{mpsc, Mutex, Semaphore};
 
 /// Global verification configuration (thread-safe, runtime-modifiable)
 pub struct VerificationConfig {
@@ -36,9 +49,63 @@ impl VerificationConfig {
 
 pub static VERIFICATION_CONFIG: VerificationConfig = VerificationConfig::new();
 
+/// The verification worker's entire shared state (M3): the 8 handles the
+/// worker consumes, grouped so the worker signature is
+/// `verification_worker(hub)` and `verify_file(item, &hub)` — no
+/// `EngineState` in this module. Constructed by the engine
+/// (`engine/workers.rs`) from the engine's own channels and Arcs; every
+/// field is an Arc or a channel endpoint, so cloning the hub is cheap and
+/// shares the same underlying state.
+///
+/// `registry_mirror` is the SAME `Arc<Mutex<DownloadRegistry>>` the engine
+/// holds as its registry mirror — one mutex, shared into the hub (see the
+/// field→bundle table in `engine/mod.rs`).
+#[derive(Clone, Debug)]
+pub struct VerificationHub {
+    /// Pending work: items waiting to be hashed.
+    pub queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
+    /// Number of items in `queue` (lock-free read for HUD/`idle`).
+    pub size: Arc<AtomicUsize>,
+    /// Number of verification tasks spawned but not yet finished.
+    /// Incremented while the queue lock is held (before an item is
+    /// removed), so `idle()` can never observe a false idle between the
+    /// queue removal and the task start.
+    pub in_flight: Arc<AtomicUsize>,
+    /// Active verifications (the list the UI snapshots for its HUD rows).
+    pub progress: Arc<Mutex<Vec<VerificationProgress>>>,
+    /// Session-lifetime ok/failed counters (HUD footer / CLI summary).
+    pub results: VerificationResultCounters,
+    /// Free-text status channel (the engine's `EventBus` status sender).
+    pub status_tx: mpsc::UnboundedSender<String>,
+    /// Typed verification results (the engine's `EventBus` verify sender).
+    pub verify_tx: mpsc::UnboundedSender<VerifyOutcome>,
+    /// The engine's in-memory registry mirror (shared Arc), patched on
+    /// hash mismatch after the on-disk op.
+    pub registry_mirror: Arc<Mutex<DownloadRegistry>>,
+}
+
+impl VerificationHub {
+    /// True when no verification work is queued or running (the two
+    /// lock-free counters read together; race-free because `in_flight` is
+    /// incremented under the queue lock before an item leaves `queue`).
+    pub fn idle(&self) -> bool {
+        self.size.load(Ordering::Relaxed) == 0 && self.in_flight.load(Ordering::Relaxed) == 0
+    }
+
+    /// Queue a file for verification: push under the queue lock, then
+    /// bump the size counter — exactly the two steps the former free
+    /// function performed (same lock scope, same ordering).
+    pub async fn queue_verification(&self, item: VerificationQueueItem) {
+        let mut queue = self.queue.lock().await;
+        queue.push(item);
+
+        self.size.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Main verification worker that processes the verification queue
 /// Runs continuously in the background, processing items as they arrive
-pub async fn verification_worker(state: EngineState) {
+pub async fn verification_worker(hub: VerificationHub) {
     let max_concurrent = VERIFICATION_CONFIG
         .concurrent_verifications
         .load(Ordering::Relaxed);
@@ -48,30 +115,28 @@ pub async fn verification_worker(state: EngineState) {
         // Check if there's work to do - remove item and decrement size
         // atomically while holding the lock. The in-flight counter is
         // incremented *before* the item leaves the queue (still under the
-        // lock), so `EngineState::verification_idle()` can never observe a
-        // false idle in the gap between the removal and the task start.
+        // lock), so `VerificationHub::idle()` can never observe a false
+        // idle in the gap between the removal and the task start.
         let item = {
-            let mut queue = state.verification_queue.lock().await;
+            let mut queue = hub.queue.lock().await;
             if queue.is_empty() {
                 None
             } else {
-                state.verification_in_flight.fetch_add(1, Ordering::Relaxed);
+                hub.in_flight.fetch_add(1, Ordering::Relaxed);
                 let item = queue.remove(0);
-                state
-                    .verification_queue_size
-                    .fetch_sub(1, Ordering::Relaxed);
+                hub.size.fetch_sub(1, Ordering::Relaxed);
                 Some(item)
             }
         };
 
         if let Some(item) = item {
             let permit = semaphore.clone().acquire_owned().await.unwrap();
-            let state = state.clone();
+            let hub = hub.clone();
 
             tokio::spawn(async move {
                 // Decrements in_flight on any exit path, including panics
-                let _in_flight = InFlightGuard(state.verification_in_flight.clone());
-                verify_file(item, state).await;
+                let _in_flight = InFlightGuard(hub.in_flight.clone());
+                verify_file(item, &hub).await;
                 drop(permit);
             });
         } else {
@@ -98,17 +163,17 @@ pub struct VerificationResultCounters {
 }
 
 /// Verify a single file's SHA256 hash and report a typed
-/// [`VerifyOutcome`] through the engine's verify channel.
-async fn verify_file(item: VerificationQueueItem, state: EngineState) {
+/// [`VerifyOutcome`] through the hub's verify channel.
+async fn verify_file(item: VerificationQueueItem, hub: &VerificationHub) {
     let local_path = PathBuf::from(&item.local_path);
 
     // Check if file exists
     if !local_path.exists() {
-        let _ = state.status_tx.send(format!(
+        let _ = hub.status_tx.send(format!(
             "Error: Cannot verify {}, file not found",
             item.filename
         ));
-        let _ = state.verify_tx.send(VerifyOutcome::Missing {
+        let _ = hub.verify_tx.send(VerifyOutcome::Missing {
             filename: item.filename.clone(),
         });
         return;
@@ -117,7 +182,7 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
     // Add to active verifications
     let verified_bytes = Arc::new(AtomicU64::new(0));
     {
-        let mut progress = state.verification_progress.lock().await;
+        let mut progress = hub.progress.lock().await;
         progress.push(VerificationProgress {
             filename: item.filename.clone(),
             verified_bytes: verified_bytes.clone(),
@@ -126,14 +191,14 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
         });
     }
 
-    let _ = state
+    let _ = hub
         .status_tx
         .send(format!("Verifying integrity of {}...", item.filename));
 
     // Calculate hash with progress tracking (use filename as identifier)
     match calculate_sha256_with_progress(
         &local_path,
-        &state.verification_progress,
+        &hub.progress,
         &item.filename,
         item.total_size,
     )
@@ -141,28 +206,26 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
     {
         Ok(calculated_hash) => {
             if calculated_hash == item.expected_sha256 {
-                state
-                    .verification_results
-                    .ok
-                    .fetch_add(1, Ordering::Relaxed);
-                let _ = state
+                hub.results.ok.fetch_add(1, Ordering::Relaxed);
+                let _ = hub
                     .status_tx
                     .send(format!("✓ Hash verified for {}", item.filename));
-                let _ = state.verify_tx.send(VerifyOutcome::Ok {
+                let _ = hub.verify_tx.send(VerifyOutcome::Ok {
                     filename: item.filename.clone(),
                 });
             } else {
-                state
-                    .verification_results
-                    .failed
-                    .fetch_add(1, Ordering::Relaxed);
-                let _ = state.status_tx.send(format!(
-                    "✗ Hash mismatch for {}: expected {}..., got {}...",
+                hub.results.failed.fetch_add(1, Ordering::Relaxed);
+                let expected_chars: Vec<char> = item.expected_sha256.chars().collect();
+                let expected_trunc: String = expected_chars.iter().take(16).collect();
+                let expected_ell = if expected_chars.len() > 16 { "..." } else { "" };
+                let _ = hub.status_tx.send(format!(
+                    "✗ Hash mismatch for {}: expected {}{}, got {}...",
                     item.filename,
-                    &item.expected_sha256[..16],
+                    expected_trunc,
+                    expected_ell,
                     &calculated_hash[..16]
                 ));
-                let _ = state.verify_tx.send(VerifyOutcome::Mismatch {
+                let _ = hub.verify_tx.send(VerifyOutcome::Mismatch {
                     filename: item.filename.clone(),
                     expected_sha256: item.expected_sha256.clone(),
                     actual_sha256: calculated_hash,
@@ -177,15 +240,15 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
                 // immediately after the disk save, regardless of its
                 // outcome.
                 crate::registry::mark_mismatch(&local_path);
-                mark_mismatch_mirror(&state.download_registry, &local_path).await;
+                mark_mismatch_mirror(&hub.registry_mirror, &local_path).await;
             }
         }
         Err(e) => {
-            let _ = state.status_tx.send(format!(
+            let _ = hub.status_tx.send(format!(
                 "Warning: Failed to verify {}: {}",
                 item.filename, e
             ));
-            let _ = state.verify_tx.send(VerifyOutcome::Error {
+            let _ = hub.verify_tx.send(VerifyOutcome::Error {
                 filename: item.filename.clone(),
                 reason: e.to_string(),
             });
@@ -194,7 +257,7 @@ async fn verify_file(item: VerificationQueueItem, state: EngineState) {
 
     // Remove from active verifications
     {
-        let mut progress = state.verification_progress.lock().await;
+        let mut progress = hub.progress.lock().await;
         progress.retain(|p| p.filename != item.filename);
     }
 }
@@ -318,22 +381,31 @@ async fn calculate_sha256_with_progress(
     Ok(digest)
 }
 
-/// Queue a file for verification
-pub async fn queue_verification(
-    verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    verification_queue_size: Arc<AtomicUsize>,
-    item: VerificationQueueItem,
-) {
-    let mut queue = verification_queue.lock().await;
-    queue.push(item);
-
-    verification_queue_size.fetch_add(1, Ordering::Relaxed);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A standalone hub with its own channels (the engine wiring — shared
+    /// channels, shared registry Arc — is pinned by the engine-side shape
+    /// test; these tests only need the worker's own behavior).
+    fn fresh_hub() -> (VerificationHub, mpsc::UnboundedReceiver<String>) {
+        let (status_tx, status_rx) = mpsc::unbounded_channel();
+        let (verify_tx, _verify_rx) = mpsc::unbounded_channel();
+        (
+            VerificationHub {
+                queue: Arc::new(Mutex::new(Vec::new())),
+                size: Arc::new(AtomicUsize::new(0)),
+                in_flight: Arc::new(AtomicUsize::new(0)),
+                progress: Arc::new(Mutex::new(Vec::new())),
+                results: VerificationResultCounters::default(),
+                status_tx,
+                verify_tx,
+                registry_mirror: Arc::new(Mutex::new(crate::models::DownloadRegistry::default())),
+            },
+            status_rx,
+        )
+    }
 
     fn temp_file(name: &str, size_bytes: usize, fill: u8) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -531,5 +603,83 @@ mod tests {
             other.lock().await.downloads[0].status,
             crate::models::DownloadStatus::Incomplete
         );
+    }
+
+    #[tokio::test]
+    async fn short_expected_sha256_does_not_panic_on_mismatch() {
+        let tmp = std::env::temp_dir().join(format!("test-b2-short-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file_path = tmp.join("test.bin");
+        std::fs::write(&file_path, b"test payload").unwrap();
+
+        let (hub, status_rx) = fresh_hub();
+        let item = VerificationQueueItem {
+            filename: "test.bin".to_string(),
+            local_path: file_path.to_string_lossy().to_string(),
+            expected_sha256: "short".to_string(),
+            total_size: 12,
+            is_manual: true,
+        };
+
+        verify_file(item, &hub).await;
+
+        assert_eq!(hub.results.failed.load(Ordering::Relaxed), 1);
+        let status_msg = {
+            let mut rx = status_rx;
+            let mut msgs = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                msgs.push(msg);
+            }
+            msgs
+        };
+        assert!(
+            status_msg.iter().any(|m| m.contains("expected short, got")),
+            "status should contain char-safe fallback without a misleading \
+             ellipsis on a non-truncated short hash: {:?}",
+            status_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn long_expected_sha256_still_truncates_with_ellipsis() {
+        // Pins the OTHER branch of the conditional ellipsis: a full
+        // 64-char expected hash is truncated to 16 chars and keeps "...".
+        let tmp = std::env::temp_dir().join(format!("test-b2-long-sha-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file_path = tmp.join("test.bin");
+        std::fs::write(&file_path, b"test payload").unwrap();
+
+        let (hub, status_rx) = fresh_hub();
+        let expected = "a".repeat(64);
+        let item = VerificationQueueItem {
+            filename: "test.bin".to_string(),
+            local_path: file_path.to_string_lossy().to_string(),
+            expected_sha256: expected.clone(),
+            total_size: 12,
+            is_manual: true,
+        };
+
+        verify_file(item, &hub).await;
+
+        let status_msg = {
+            let mut rx = status_rx;
+            let mut msgs = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                msgs.push(msg);
+            }
+            msgs
+        };
+        let truncated = format!("expected {}..., got", "a".repeat(16));
+        assert!(
+            status_msg.iter().any(|m| m.contains(&truncated)),
+            "status should truncate a 64-char expected hash to 16 chars with \
+             an ellipsis (contained {:?}): {:?}",
+            truncated,
+            status_msg
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

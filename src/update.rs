@@ -182,47 +182,6 @@ impl std::fmt::Display for UpdateError {
 
 impl std::error::Error for UpdateError {}
 
-// ---------------------------------------------------------------------------
-// Check
-// ---------------------------------------------------------------------------
-
-/// Convenience wrapper for callers that only want the verdict (the TUI's
-/// startup check, phase 2 of plans/self-update.md). The CLI's `run_update`
-/// composes `fetch_manifest` + `manifest_asset` directly because `--force`
-/// needs the asset even when current.
-#[allow(dead_code)] // 2026-10 (R4): constructed by check(); consumed once an interactive 'update available?' prompt lands
-pub enum CheckOutcome {
-    Current {
-        current: VersionTriple,
-    },
-    Available {
-        current: VersionTriple,
-        latest: VersionTriple,
-        asset: AssetSpec,
-        notes_url: Option<String>,
-    },
-}
-
-#[allow(dead_code)] // 2026-10 (R4): exposed for the future `update --check` prompt path; run_update inlines its own fetch today
-pub async fn check(client: &reqwest::Client, base: &str) -> Result<CheckOutcome, UpdateError> {
-    let (manifest, latest) = fetch_manifest(client, base).await?;
-
-    let current = VersionTriple::current();
-    let triple = target_triple().ok_or(UpdateError::UnsupportedPlatform)?;
-    let asset = manifest_asset(&manifest, triple)?.clone();
-
-    if latest <= current {
-        Ok(CheckOutcome::Current { current })
-    } else {
-        Ok(CheckOutcome::Available {
-            current,
-            latest,
-            asset,
-            notes_url: manifest.notes_url,
-        })
-    }
-}
-
 /// Fetches and validates the manifest; returns it with its parsed version.
 pub async fn fetch_manifest(
     client: &reqwest::Client,
@@ -457,11 +416,13 @@ fn extract_zip(
 // Swap
 // ---------------------------------------------------------------------------
 
-/// Atomically replaces the current executable with `new_binary`
-/// (self_replace: Unix rename; Windows rename-aside). The caller's
-/// `current_exe` is resolved by the crate itself. Best-effort cleanup of
-/// the temp tree stays with the caller.
-pub fn swap(_current_exe: &Path, new_binary: &Path) -> Result<(), UpdateError> {
+/// Atomically replaces the running executable with `new_binary`
+/// (self_replace: Unix rename; Windows rename-aside). The running
+/// executable is resolved by `self_replace` itself — callers pass only
+/// the staged binary (the former `current_exe` parameter was never
+/// read; dropped in plan M4/C5). Best-effort cleanup of the temp tree
+/// stays with the caller.
+pub fn swap(new_binary: &Path) -> Result<(), UpdateError> {
     self_replace::self_replace(new_binary).map_err(|e| UpdateError::Swap(e.to_string()))
 }
 

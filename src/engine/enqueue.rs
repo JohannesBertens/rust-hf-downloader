@@ -5,20 +5,23 @@
 //! channel sends → failed-send rollback) that four TUI flows and two CLI
 //! flows used to inline; every per-site divergence is an explicit,
 //! constructor-sealed [`EnqueuePolicy`] knob, and status/error strings stay
-//! at the call sites (see [`EnqueueOutcome`]). The 8 characterization tests
-//! at the bottom pin each flavor byte-for-byte.
+//! at the call sites (see [`EnqueueOutcome`]). The characterization tests
+//! at the bottom pin each flavor byte-for-byte — the eight W2.1 rows plus
+//! the E4 no-write registry pin.
 
 use super::{EngineState, QueuedDownload};
 use crate::models::{DownloadMetadata, DownloadStatus, QueueItemSummary};
 use tokio::sync::mpsc;
 
 impl EngineState {
-    /// The enqueue transaction (W2.1): registry bookkeeping per policy →
-    /// `download_queue.add` → `download_queue_items` push + `download_tx`
-    /// sends → failed-send rollback. One home for the six sequences that
-    /// used to be inline (four TUI flows + two CLI flows); every divergence
-    /// between them is an explicit [`EnqueuePolicy`] knob, and status/error
-    /// strings stay at the call sites (see [`EnqueueOutcome`]).
+    /// The enqueue transaction (W2.1): registry bookkeeping per policy,
+    /// then `queue.download_queue_totals.add`, the
+    /// `queue.download_queue_items` mirror push, and the `download_tx`
+    /// sends, with failed-send rollback. One home for the six
+    /// sequences that used to be inline (four TUI flows + two CLI flows);
+    /// every divergence between them is an explicit [`EnqueuePolicy`]
+    /// knob, and status/error strings stay at the call sites (see
+    /// [`EnqueueOutcome`]).
     ///
     /// Lock order (AGENTS.md hierarchy): every lock is acquired in its own
     /// scope, never nested — mirror/queue/items acquisitions only ever
@@ -39,24 +42,28 @@ impl EngineState {
         // --- 1. Registry bookkeeping, before any queue work (the order of
         //         every legacy site) ---------------------------------------
         let (invalid, aborted) = match &policy.registry {
-            // The two no-write flavors share one arm (`on_invalid` =
-            // SkipValidation): neither validates paths at enqueue time
-            // — resume re-queues entries that were validated when first
-            // recorded, hf-cache mirrors the local cache layout, and
-            // `start_download` sanitizes every filename component before
-            // writing regardless.
-            RegistryMode::AlreadyRecorded | RegistryMode::StagingSweep => (Vec::new(), None),
+            // The no-write flavor (E4, M5: the two historical variant
+            // names `AlreadyRecorded` + `StagingSweep` merged — an
+            // equivalence pin proved them observably identical first):
+            // neither validates paths at enqueue time — resume re-queues
+            // entries that were validated when first recorded, hf-cache
+            // mirrors the local cache layout, and `start_download`
+            // sanitizes every filename component before writing
+            // regardless.
+            RegistryMode::NoWrites => (Vec::new(), None),
             RegistryMode::Mirror { base, entry_size } => {
-                // TUI confirm flows: mirror clone → per-file validate (an
-                // invalid file is skipped from the registry and reported,
-                // but still queued) → append entries whose url is not
-                // recorded yet → save the whole registry → re-assign the
-                // mirror. Deliberately writes from the MIRROR, not from
-                // disk — today's TUI behavior, kept byte-for-byte (the
-                // disk-source-of-truth ops in `registry.rs` are the
-                // engine/CLI flavor).
-                let mut registry = self.download_registry.lock().await.clone();
+                // TUI confirm flows: validate each file (an invalid file
+                // is skipped from the registry and reported, but still
+                // queued) and build its entry; the registry write is the
+                // shared `registry::upsert_pending` op under the single
+                // writer (M1 — this arm used to clone the MIRROR, append,
+                // and save the clone, the R2 bypass site). The url-dedup
+                // predicate therefore runs against the on-DISK registry —
+                // the source of truth — and the mirror is replaced from
+                // the op's post-write snapshot after the writer released
+                // (no hand-patching under the lock).
                 let mut skipped = Vec::new();
+                let mut entries = Vec::with_capacity(files.len());
                 for file in files {
                     let validated = match crate::paths::sanitize::validate_and_sanitize_path(
                         base,
@@ -65,58 +72,57 @@ impl EngineState {
                     ) {
                         Ok(path) => Some(path),
                         Err(e) => {
-                            // on_invalid = ReportAndQueue: report the
-                            // file and keep it out of the registry —
-                            // the queue work below still queues it.
-                            // (No constructor pairs a mirror write
-                            // with the other flavors; if one ever
-                            // does, its invalid files stay out of the
-                            // registry too.)
-                            if policy.on_invalid == InvalidPolicy::ReportAndQueue {
-                                skipped.push((file.filename.clone(), e));
-                            }
+                            // Mirror flavors report the invalid file and
+                            // keep it out of the registry — the queue work
+                            // below still queues it. (The former
+                            // `InvalidPolicy::ReportAndQueue` knob; the
+                            // axis was deleted in M5/E4 — this arm was
+                            // its only non-redundant user, so the report
+                            // behavior is now unconditional here.)
+                            skipped.push((file.filename.clone(), e));
                             None
                         }
                     };
                     if let Some(validated) = validated {
                         let url =
                             crate::api::resolve_url(&file.model_id, &file.filename, &file.revision);
-                        if !registry.downloads.iter().any(|d| d.url == url) {
-                            registry.downloads.push(DownloadMetadata {
-                                model_id: file.model_id.clone(),
-                                filename: file.filename.clone(),
-                                url,
-                                local_path: validated.to_string_lossy().to_string(),
-                                total_size: match entry_size {
-                                    RegistryEntrySize::Zero => 0,
-                                    RegistryEntrySize::FromQueued => file.total_size,
-                                },
-                                downloaded_size: 0,
-                                status: DownloadStatus::Incomplete,
-                                expected_sha256: file.expected_sha256.clone(),
-                                // One rule reproduces both legacy flavors: the
-                                // TUI always queues the default revision (→
-                                // `None`, as its inline code hardcoded) and the
-                                // CLI records the revision only when it differs
-                                // from the default.
-                                revision: if file.revision == crate::api::DEFAULT_REVISION {
-                                    None
-                                } else {
-                                    Some(file.revision.clone())
-                                },
-                            });
-                        }
+                        entries.push(DownloadMetadata {
+                            model_id: file.model_id.clone(),
+                            filename: file.filename.clone(),
+                            url,
+                            local_path: validated.to_string_lossy().to_string(),
+                            total_size: match entry_size {
+                                RegistryEntrySize::Zero => 0,
+                                RegistryEntrySize::FromQueued => file.total_size,
+                            },
+                            downloaded_size: 0,
+                            status: DownloadStatus::Incomplete,
+                            expected_sha256: file.expected_sha256.clone(),
+                            // One rule reproduces both legacy flavors: the
+                            // TUI always queues the default revision (→
+                            // `None`, as its inline code hardcoded) and the
+                            // CLI records the revision only when it differs
+                            // from the default.
+                            revision: if file.revision == crate::api::DEFAULT_REVISION {
+                                None
+                            } else {
+                                Some(file.revision.clone())
+                            },
+                        });
                     }
                 }
-                crate::registry::save_registry(&registry);
-                *self.download_registry.lock().await = registry;
+                let snapshot = crate::registry::upsert_pending(&entries);
+                *self.download_registry.lock().await = snapshot;
                 (skipped, None)
             }
             RegistryMode::Disk { base } => {
-                // CLI download flow (on_invalid = AbortAll): validate
-                // every file first — the first invalid filename aborts
-                // the whole enqueue (nothing is queued or sent) — then
-                // upsert the entries on DISK. This is exactly
+                // CLI download flow: validate every file first — the
+                // first invalid filename aborts the whole enqueue
+                // (nothing is queued or sent) — then upsert the entries
+                // on DISK. (The abort is inherent to
+                // `register_pending`'s validate-first pass — the former
+                // `InvalidPolicy::AbortAll` knob was never read for it.)
+                // This is exactly
                 // `registry::register_pending`, whose byte-level behavior the
                 // registry golden tests pin. A single-model batch is
                 // assumed (the CLI flavor's shape), so the first file's
@@ -152,7 +158,8 @@ impl EngineState {
         // --- 2. Queue accounting, before the sends for every discipline
         //         but resume --------------------------------------------------
         if policy.discipline != SendDiscipline::Resume {
-            self.download_queue
+            self.queue
+                .download_queue_totals
                 .lock()
                 .await
                 .add(files.len(), total_bytes);
@@ -167,7 +174,7 @@ impl EngineState {
                 for file in files {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
-                        let mut items = self.download_queue_items.lock().await;
+                        let mut items = self.queue.download_queue_items.lock().await;
                         items.push(queue_item_summary(file));
                     }
                 }
@@ -178,14 +185,14 @@ impl EngineState {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
                     }
-                    let mut items = self.download_queue_items.lock().await;
+                    let mut items = self.queue.download_queue_items.lock().await;
                     items.push(queue_item_summary(file));
                 }
             }
             SendDiscipline::Batch => {
                 // CLI flavors: every summary first (one lock), then sends.
                 {
-                    let mut items = self.download_queue_items.lock().await;
+                    let mut items = self.queue.download_queue_items.lock().await;
                     for file in files {
                         items.push(queue_item_summary(file));
                     }
@@ -201,7 +208,8 @@ impl EngineState {
         // --- 4. Resume discipline accounts the queue once, after the
         //         sends -------------------------------------------------------
         if policy.discipline == SendDiscipline::Resume {
-            self.download_queue
+            self.queue
+                .download_queue_totals
                 .lock()
                 .await
                 .add(files.len(), total_bytes);
@@ -216,7 +224,8 @@ impl EngineState {
         //         pushed for successful sends.
         if policy.discipline == SendDiscipline::Interactive && sent < files.len() {
             let failed_bytes: u64 = files.iter().skip(sent).map(|f| f.total_size).sum();
-            self.download_queue
+            self.queue
+                .download_queue_totals
                 .lock()
                 .await
                 .remove(files.len() - sent, failed_bytes);
@@ -234,22 +243,26 @@ impl EngineState {
 /// knob 1 of the W2.1 table; see [`EngineState::enqueue`]).
 #[derive(Debug, Clone)]
 pub enum RegistryMode {
-    /// TUI resume: the entries already exist on disk (recorded when the
-    /// files were first queued) — re-queueing must not touch them.
-    AlreadyRecorded,
-    /// `hf-cache sync`: registers NOTHING pending — the named
+    /// The no-write flavor (M5/E4 merged the two historical variant names
+    /// `AlreadyRecorded` + `StagingSweep` into this one — a pre-merge
+    /// equivalence pin proved them observably identical, so the merge is
+    /// compile-time-only): TUI resume re-queues entries that already
+    /// exist on disk (recorded when the files were first queued), and
+    /// `hf-cache sync` registers NOTHING pending — the named
     /// staging-sweep decision (the download path writes staging-path
     /// entries during the run; the sweeps at publish time and next
     /// bootstrap remove them, keeping the TUI's resume view clean; see
-    /// `cli/hf_cache/sync.rs`). The former `None` variant was split into
-    /// these two names because it conflated both intents (and collided
-    /// with `Option::None` under glob imports).
-    StagingSweep,
-    /// TUI confirm flows: read the engine's registry MIRROR, append an
-    /// `Incomplete` entry for every file whose path validates and whose
-    /// url is not recorded yet (invalid files are skipped and reported —
-    /// they are still queued), save the whole registry to disk, then
-    /// re-assign the mirror.
+    /// `cli/hf_cache/sync.rs`). Neither historical name carried behavior
+    /// of its own; the constructors that pick this flavor (`tui_resume`,
+    /// `hf_cache_sync`) keep their names and document their intent.
+    NoWrites,
+    /// TUI confirm flows: validate every file (invalid files are skipped
+    /// from the registry, reported — they are still queued), build an
+    /// `Incomplete` entry for each valid one, and upsert the entries on
+    /// DISK through the `registry::upsert_pending` single-writer op (the
+    /// url-dedup predicate runs against the on-disk registry — the source
+    /// of truth, M1), then replace the mirror from the op's post-write
+    /// snapshot.
     Mirror {
         /// Raw user base directory used to validate each file and derive
         /// its `local_path` — NOT the queued `base_path`, which already
@@ -303,35 +316,19 @@ pub enum SendDiscipline {
     Batch,
 }
 
-/// What the enqueue transaction does with a file whose path fails
-/// validation (divergence knob 3; the rule used to live in comments
-/// inside the registry arms above).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InvalidPolicy {
-    /// Mirror-registry flavors (TUI confirms): the invalid file is
-    /// skipped from the registry and reported via
-    /// [`EnqueueOutcome::invalid`] — but still queued and sent.
-    ReportAndQueue,
-    /// Disk-registry flavor (CLI `download`): the first invalid
-    /// filename aborts the whole enqueue (via
-    /// `registry::register_pending`'s validate-first pass) — nothing is
-    /// queued or sent; the error is
-    /// reported via [`EnqueueOutcome::aborted`].
-    AbortAll,
-    /// The no-registry flavors (TUI resume, `hf-cache sync`): no path
-    /// validation runs at enqueue time today — resume re-queues entries
-    /// that were validated when first recorded, hf-cache mirrors the
-    /// local cache layout, and `start_download` sanitizes every
-    /// filename component before writing regardless.
-    SkipValidation,
-}
-
 /// The full shape of one enqueue transaction: every field is a
 /// documented divergence between the six legacy inline sites (see the
 /// W2.1 divergence table). The fields are private on purpose — the five
 /// named constructors are the only public API (the design-review sealing
 /// decision: the raw knobs were N ways to spell one of five known
-/// flavors, and only their correlated combinations ever occurred).
+/// flavors, and only their correlated combinations ever occurred). The
+/// former third knob `InvalidPolicy` (ReportAndQueue / AbortAll /
+/// SkipValidation) was deleted in M5/E4 (bounded re-open, adjudicated in
+/// plans/architecture-simplification-review.md §4 D-policy): it was read
+/// in exactly one place, where its value was always the same — the
+/// Mirror arm's report-and-queue behavior is now unconditional, the Disk
+/// arm's abort is inherent to `register_pending`, and the no-write arm
+/// never validated.
 #[derive(Debug, Clone)]
 pub struct EnqueuePolicy {
     /// Registry bookkeeping: TUI mirror upsert / CLI disk upsert /
@@ -339,8 +336,6 @@ pub struct EnqueuePolicy {
     registry: RegistryMode,
     /// How the sends interact with queue accounting and the HUD mirror.
     discipline: SendDiscipline,
-    /// What happens to a file whose path fails validation.
-    on_invalid: InvalidPolicy,
 }
 
 impl EnqueuePolicy {
@@ -356,7 +351,6 @@ impl EnqueuePolicy {
                 entry_size: RegistryEntrySize::Zero,
             },
             discipline: SendDiscipline::Interactive,
-            on_invalid: InvalidPolicy::ReportAndQueue,
         }
     }
 
@@ -369,18 +363,17 @@ impl EnqueuePolicy {
                 entry_size: RegistryEntrySize::FromQueued,
             },
             discipline: SendDiscipline::Interactive,
-            on_invalid: InvalidPolicy::ReportAndQueue,
         }
     }
 
-    /// TUI resume: no registry writes (entries already exist), sends
-    /// first with the queue accounted once after them, HUD mirror pushed
+    /// TUI resume: no registry writes (the entries already exist on
+    /// disk — recorded when the files were first queued), sends first
+    /// with the queue accounted once after them, HUD mirror pushed
     /// unconditionally per file, no rollback, no path validation.
     pub fn tui_resume() -> Self {
         Self {
-            registry: RegistryMode::AlreadyRecorded,
+            registry: RegistryMode::NoWrites,
             discipline: SendDiscipline::Resume,
-            on_invalid: InvalidPolicy::SkipValidation,
         }
     }
 
@@ -391,7 +384,6 @@ impl EnqueuePolicy {
         Self {
             registry: RegistryMode::Disk { base: base.into() },
             discipline: SendDiscipline::Batch,
-            on_invalid: InvalidPolicy::AbortAll,
         }
     }
 
@@ -402,9 +394,8 @@ impl EnqueuePolicy {
     /// validation.
     pub fn hf_cache_sync() -> Self {
         Self {
-            registry: RegistryMode::StagingSweep,
+            registry: RegistryMode::NoWrites,
             discipline: SendDiscipline::Batch,
-            on_invalid: InvalidPolicy::SkipValidation,
         }
     }
 }
@@ -482,11 +473,11 @@ mod tests {
     /// Queue accounting + HUD summaries + channel contents for a
     /// successful enqueue — identical for every confirm flavor.
     async fn assert_queued(state: &EngineState, files: &[QueuedDownload]) {
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!(queue.size, files.len());
         assert_eq!(queue.bytes, files.iter().map(|f| f.total_size).sum::<u64>());
         drop(queue);
-        let items = state.download_queue_items.lock().await;
+        let items = state.queue.download_queue_items.lock().await;
         let want: Vec<(&str, u64)> = files
             .iter()
             .map(|f| (f.filename.as_str(), f.total_size))
@@ -535,7 +526,8 @@ mod tests {
 
         // GGUF quant flavor records ZERO total_size (today's quirk) and no
         // revision, with the expected sha passed through; the disk file and
-        // the mirror agree (the mirror clone was saved whole).
+        // the mirror agree (the mirror was replaced from the op's post-write
+        // snapshot, which was saved whole).
         let mirror = state.download_registry.lock().await;
         assert_eq!(mirror.downloads.len(), 2);
         for (entry, file) in mirror.downloads.iter().zip(&files) {
@@ -550,9 +542,9 @@ mod tests {
         }
         drop(mirror);
         assert_eq!(
-            crate::registry::load_registry().downloads.len(),
+            crate::registry::read_registry().downloads.len(),
             2,
-            "mirror clone was saved to disk"
+            "the typed upsert saved both entries to disk"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -605,7 +597,12 @@ mod tests {
 
         let (state, tx) = EngineState::new();
 
-        // The mirror already records f.bin's url (a previous confirm).
+        // The registry already records f.bin's url (a previous confirm).
+        // M1: the fixture seeds BOTH the disk registry (through the typed
+        // op — the registry module owns every disk write) and the engine
+        // mirror, matching the production invariant the TUI startup scan
+        // establishes (mirror seeded from disk). The dedup predicate runs
+        // against DISK since the enqueue arm converted to the typed op.
         let preexisting = DownloadMetadata {
             model_id: "a/b".to_string(),
             filename: "f.bin".to_string(),
@@ -617,6 +614,7 @@ mod tests {
             expected_sha256: None,
             revision: None,
         };
+        crate::registry::upsert_pending(std::slice::from_ref(&preexisting));
         *state.download_registry.lock().await = DownloadRegistry {
             downloads: vec![preexisting.clone()],
         };
@@ -695,12 +693,12 @@ mod tests {
 
         // Abort-first: no queue work, no HUD summaries, no sends, and the
         // disk registry was never written (validate-before-write).
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!((queue.size, queue.bytes), (0, 0));
         drop(queue);
-        assert!(state.download_queue_items.lock().await.is_empty());
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
         assert!(drain_downloads(&state).await.is_empty());
-        assert!(crate::registry::load_registry().downloads.is_empty());
+        assert!(crate::registry::read_registry().downloads.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -714,19 +712,19 @@ mod tests {
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
 
         // Disk already records f.bin's url → the upsert must not duplicate it.
-        crate::registry::save_registry(&DownloadRegistry {
-            downloads: vec![DownloadMetadata {
-                model_id: "a/b".to_string(),
-                filename: "f.bin".to_string(),
-                url: crate::api::resolve_url("a/b", "f.bin", "deadbeef"),
-                local_path: "/elsewhere/f.bin".to_string(),
-                total_size: 999,
-                downloaded_size: 0,
-                status: DownloadStatus::Incomplete,
-                expected_sha256: None,
-                revision: None,
-            }],
-        });
+        // (M1: fixture seeded through the typed op — the registry module
+        // owns every disk write to its file.)
+        crate::registry::upsert_pending(&[DownloadMetadata {
+            model_id: "a/b".to_string(),
+            filename: "f.bin".to_string(),
+            url: crate::api::resolve_url("a/b", "f.bin", "deadbeef"),
+            local_path: "/elsewhere/f.bin".to_string(),
+            total_size: 999,
+            downloaded_size: 0,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: None,
+        }]);
 
         let (state, tx) = EngineState::new();
         let mut files = vec![queued_file("f.bin", 10), queued_file("g.bin", 20)];
@@ -748,7 +746,7 @@ mod tests {
 
         // Disk: only the missing url was appended; the new entry records
         // the non-default revision (and the url was resolved against it).
-        let disk = crate::registry::load_registry();
+        let disk = crate::registry::read_registry();
         assert_eq!(disk.downloads.len(), 2);
         assert_eq!(disk.downloads[1].filename, "g.bin");
         assert_eq!(disk.downloads[1].revision.as_deref(), Some("deadbeef"));
@@ -797,10 +795,10 @@ mod tests {
         // rollback — while the registry bookkeeping STAYS (it ran first and
         // was never rolled back).
         assert_eq!(outcome.sent, 0);
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!((queue.size, queue.bytes), (0, 0));
         drop(queue);
-        assert!(state.download_queue_items.lock().await.is_empty());
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
         assert_eq!(state.download_registry.lock().await.downloads.len(), 2);
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -827,13 +825,13 @@ mod tests {
         // accounted AFTER the loop and never rolled back, and no registry
         // write happened at all (entries already exist on disk).
         assert_eq!(outcome.sent, 0);
-        let queue = state.download_queue.lock().await;
+        let queue = state.queue.download_queue_totals.lock().await;
         assert_eq!(queue.size, 2);
         assert_eq!(queue.bytes, 30);
         drop(queue);
-        assert_eq!(state.download_queue_items.lock().await.len(), 2);
+        assert_eq!(state.queue.download_queue_items.lock().await.len(), 2);
         assert!(state.download_registry.lock().await.downloads.is_empty());
-        assert!(crate::registry::load_registry().downloads.is_empty());
+        assert!(crate::registry::read_registry().downloads.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -862,11 +860,11 @@ mod tests {
 
             assert_eq!(outcome.sent, 0, "channel closed");
             assert!(outcome.aborted.is_none(), "valid files");
-            let queue = state.download_queue.lock().await;
+            let queue = state.queue.download_queue_totals.lock().await;
             assert_eq!(queue.size, 2, "CLI flavors never roll back");
             assert_eq!(queue.bytes, 30);
             drop(queue);
-            assert_eq!(state.download_queue_items.lock().await.len(), 2);
+            assert_eq!(state.queue.download_queue_items.lock().await.len(), 2);
             assert!(
                 state.download_registry.lock().await.downloads.is_empty(),
                 "hf-cache registers nothing; cli_download writes disk, not the mirror"
@@ -875,7 +873,68 @@ mod tests {
 
         // The cli_download flavor DID write its pending entries to disk
         // (hf-cache's pass leaves the registry file untouched).
-        assert_eq!(crate::registry::load_registry().downloads.len(), 2);
+        assert_eq!(crate::registry::read_registry().downloads.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// E4 post-merge pin (M5 item 2 of
+    /// plans/architecture-simplification-review.md §5 — bounded re-open
+    /// of the sealed EnqueuePolicy; descendant of the pre-merge
+    /// equivalence test that proved `AlreadyRecorded` ≡ `StagingSweep`
+    /// before they were merged): both named constructors that pick the
+    /// no-write flavor — `tui_resume` (the resume intent: entries
+    /// already recorded) and `hf_cache_sync` (the staging-sweep intent:
+    /// register nothing pending) — leave a SEEDED disk registry
+    /// BYTE-identical and never patch the engine mirror. Their
+    /// discipline-divergent queue/HUD/channel shapes are pinned by the
+    /// characterization tests above; this pins the registry axis they
+    /// share post-merge.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn enqueue_no_write_constructors_leave_disk_registry_byte_identical() {
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("engine-enq-equiv-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        // One pre-recorded entry, seeded through the typed op: "no
+        // writes" then means the on-disk registry stays BYTE-identical —
+        // a much stronger claim than an absent file (which no write
+        // could alter either).
+        crate::registry::upsert_pending(std::slice::from_ref(&DownloadMetadata {
+            model_id: "a/b".to_string(),
+            filename: "seed.bin".to_string(),
+            url: crate::api::resolve_url("a/b", "seed.bin", crate::api::DEFAULT_REVISION),
+            local_path: "/elsewhere/seed.bin".to_string(),
+            total_size: 999,
+            downloaded_size: 0,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: None,
+        }));
+        let baseline = std::fs::read(crate::paths::registry_path()).unwrap();
+
+        let files = vec![queued_file("f.bin", 10), queued_file("g.bin", 20)];
+        for policy in [EnqueuePolicy::tui_resume(), EnqueuePolicy::hf_cache_sync()] {
+            let (state, tx) = EngineState::new();
+            let outcome = state.enqueue(&tx, &files, &policy).await;
+
+            assert_eq!(outcome.sent, 2);
+            assert!(outcome.invalid.is_empty(), "no validation runs");
+            assert!(outcome.aborted.is_none());
+
+            // The registry axis: disk bytes untouched, mirror untouched.
+            let disk = std::fs::read(crate::paths::registry_path()).unwrap();
+            assert_eq!(
+                disk, baseline,
+                "a no-write constructor touched the disk registry"
+            );
+            assert!(
+                state.download_registry.lock().await.downloads.is_empty(),
+                "the mirror is never patched"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

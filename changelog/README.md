@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.14.0] - 2026-10-07
+
+### Version 2.14.0 (2026-10-07)
+- **Invalid `HF_TOKEN` warns + proceeds unauthenticated** (owner
+  revision of the never-shipped M4 hard error): new additive `warning`
+  NDJSON event, emitted once before any request; `search --json`/
+  `hf-cache path` keep stdout clean (stderr warning); TUI status line.
+  Exit 0 unchanged; exit 2/`auth_required` = genuine server 401 only.
+- **Behavior fixes (Gate-0 signed off)**: subdirectory tree-fetch
+  failures surface as `network` errors instead of silently truncating
+  the tree (B3); failed chunk tasks are aborted on retry — no more
+  detached zombies beneath the new file (B4); multi-part manual
+  verification verifies the selected shard, not always `files[0]` (B1);
+  short `expected_sha256` no longer panics the verifier (B2); dead
+  multipart-SHA256 fetch removed (B6).
+- **Registry**: single-writer serialization + atomic same-dir
+  temp+fsync+rename saves; the in-process lost-update race is closed
+  (R4, all-writers-win). Cross-process window remains (documented).
+- **Internal**: engine cycle broken into a DAG (`VerificationHub`
+  bundles, source-derived lock-hierarchy guard), options-dialog
+  inversion (`ui/app/options.rs`), `EnqueuePolicy` collapse
+  (`InvalidPolicy` deleted), docs truth floor (`docs/DEFERRED.md`
+  register + 5 self-enforcing guard tests), `cli/tests.rs` split into
+  7 per-subject files, one shared `reqwest::Client` per run.
+- **Tests**: 431 → 464; every implementation wave verified by three
+  independent models (GLM-5.3, Gemini 3.8, Claude Opus), zero P0
+  findings; final closure gate SHIP; deps/features/MSRV untouched.
+
 ## [2.13.2] - 2026-10-05
 
 ### Version 2.13.2 (2026-10-05)

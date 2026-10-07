@@ -21,7 +21,7 @@ Thank you for your interest in contributing! This document outlines the process 
 
 3. **Set up development environment**:
    ```bash
-   cargo build --dev
+   cargo build
    ```
 
 4. **Create a feature branch**:
@@ -139,9 +139,12 @@ Fixes: #123
 
 ### Configuration Changes
 
-- Update `src/config.rs` for persisted options
-- Update `src/models/options.rs` AppOptions struct
-- Update TUI options screen: field handling in `src/ui/app/events/` (`modify_option`, `handle_options_popup_input`) and rendering in `src/ui/render/options_popup.rs`
+- Update `src/models/options.rs` `AppOptions` struct and `src/config.rs` for
+  persisted options
+- Add the field to `OPTIONS_FIELDS` in `src/ui/render/options_popup.rs`
+  FIRST — it is the single source for the options dialog shape (16 entries,
+  pinned by tests); field handling follows in `src/ui/app/events/` and
+  rendering in `src/ui/render/options_popup.rs`
 
 ### Documentation
 
@@ -174,9 +177,11 @@ Include:
 2. Add `changelog/RELEASE_NOTES_X.Y.Z.md` and a summary entry in `changelog/README.md`
 3. Commit and merge the release PR into `main`
 4. Tag the release commit: `git tag vX.Y.Z && git push origin vX.Y.Z`
-5. The tag push triggers `.github/workflows/release.yml`, which builds
-   release binaries on Linux, macOS (arm64), and Windows runners and uploads
-   them as artifacts on the workflow run page
+5. The tag push triggers `.github/workflows/release.yml`, which builds +
+   tests every supported target and publishes the GitHub Release with the
+   binaries (stable asset names `rust-hf-downloader-<target-triple>.tar.gz`/
+   `.zip`), `SHA256SUMS`, `latest.json`, and the one-liner installers
+   (`install.sh`, `install.ps1`) via `softprops/action-gh-release@v2`
 6. Publish to crates.io: `cargo publish` (verify first with
    `cargo publish --dry-run`; publishing is permanent and cannot be undone)
    and verify the new version at <https://crates.io/crates/rust-hf-downloader>

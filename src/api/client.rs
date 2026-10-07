@@ -3,13 +3,18 @@
 //!
 //! Moved verbatim from `src/api.rs` (plan W3.2b): search with its client-side
 //! filtering/sorting pass, metadata enrichment with the complete recursive
-//! tree, revision-to-SHA resolution, and the multipart SHA256 lookup. Bodies,
+//! tree, revision-to-SHA resolution. Bodies,
 //! doc comments and request shapes are byte-identical to the originals; only
 //! `api_base` is now imported instead of being a sibling item.
+//!
+//! Client threading (plan M4/B5): every function takes the run's ONE
+//! shared `&reqwest::Client` (built by the frontend bootstrap with the
+//! token already installed as its default `Authorization` header) —
+//! no function here constructs a client, so the token lives in exactly
+//! one place and one TLS pool serves the whole run.
 
 use crate::api::api_base;
 use crate::models::{ModelFile, ModelInfo, ModelMetadata, RepoFile};
-use std::collections::HashMap;
 
 /// Fetch models with sorting and filtering parameters.
 ///
@@ -17,13 +22,13 @@ use std::collections::HashMap;
 /// safety bound); `--min-downloads`/`--min-likes` filtering happens client-side
 /// because the API does not support those filters.
 pub async fn fetch_models_filtered(
+    client: &reqwest::Client,
     query: &str,
     sort_field: crate::models::SortField,
     sort_direction: crate::models::SortDirection,
     min_downloads: u64,
     min_likes: u64,
     limit: usize,
-    token: Option<&String>,
 ) -> Result<Vec<ModelInfo>, reqwest::Error> {
     use crate::models::SortField;
 
@@ -50,8 +55,7 @@ pub async fn fetch_models_filtered(
         direction
     );
 
-    let response =
-        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
+    let response = crate::http_client::get_with_optional_token(client, &url).await?;
     let mut models: Vec<ModelInfo> = response.json().await?;
 
     // Client-side filtering (API doesn't support these filters)
@@ -124,21 +128,20 @@ pub(crate) fn sort_models(
 
 /// Fetch detailed model metadata from /api/models/{model_id}
 pub async fn fetch_model_metadata(
+    client: &reqwest::Client,
     model_id: &str,
     revision: &str,
-    token: Option<&String>,
 ) -> Result<ModelMetadata, reqwest::Error> {
     let url = format!("{}/api/models/{}", api_base(), model_id);
 
-    let response =
-        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
+    let response = crate::http_client::get_with_optional_token(client, &url).await?;
     // Surface HTTP errors (unknown repo, auth) as status errors so callers
     // can distinguish not_found/auth from decode failures.
     let response = response.error_for_status()?;
     let mut metadata: ModelMetadata = response.json().await?;
 
     // Fetch the complete file tree recursively
-    let all_files = fetch_recursive_tree(model_id, "", revision, token).await?;
+    let all_files = fetch_recursive_tree(client, model_id, "", revision).await?;
 
     // Convert ModelFile to RepoFile with proper size information
     metadata.siblings = all_files
@@ -181,13 +184,12 @@ fn revision_url(model_id: &str, revision: &str) -> String {
 /// Unknown repos or revisions surface as HTTP 404 status errors so callers
 /// can distinguish not_found/auth from decode failures (issue #28).
 pub async fn resolve_revision_sha(
+    client: &reqwest::Client,
     model_id: &str,
     revision: &str,
-    token: Option<&String>,
 ) -> Result<String, reqwest::Error> {
     let url = revision_url(model_id, revision);
-    let response =
-        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
+    let response = crate::http_client::get_with_optional_token(client, &url).await?;
     // Unknown revision → 404 → not_found for the caller (issue #28).
     let response = response.error_for_status()?;
     let info: RevisionInfo = response.json().await?;
@@ -196,10 +198,10 @@ pub async fn resolve_revision_sha(
 
 /// Recursively fetch all files from a repository, including subdirectories
 fn fetch_recursive_tree<'a>(
+    client: &'a reqwest::Client,
     model_id: &'a str,
     path: &'a str,
     revision: &'a str,
-    token: Option<&'a String>,
 ) -> std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Vec<ModelFile>, reqwest::Error>> + Send + 'a>,
 > {
@@ -216,9 +218,7 @@ fn fetch_recursive_tree<'a>(
             )
         };
 
-        let response =
-            crate::http_client::get_with_optional_token(&tree_url, token.map(String::as_str))
-                .await?;
+        let response = crate::http_client::get_with_optional_token(client, &tree_url).await?;
         // Unknown revision → 404 → not_found for the caller (issue #28).
         let response = response.error_for_status()?;
         let items: Vec<ModelFile> = response.json().await?;
@@ -227,12 +227,14 @@ fn fetch_recursive_tree<'a>(
 
         for item in items {
             if item.file_type == "directory" {
-                // Recursively fetch contents of this directory
-                if let Ok(subdir_files) =
-                    fetch_recursive_tree(model_id, &item.path, revision, token).await
-                {
-                    all_files.extend(subdir_files);
-                }
+                // Recursively fetch contents of this directory. A failed
+                // subdirectory fetch fails the WHOLE tree fetch (plan
+                // M4/B3): swallowing it here produced silently truncated
+                // trees that later died as misleading selection errors —
+                // the caller must see the underlying transport error.
+                let subdir_files =
+                    fetch_recursive_tree(client, model_id, &item.path, revision).await?;
+                all_files.extend(subdir_files);
             } else {
                 // It's a file, add it to the list
                 all_files.push(item);
@@ -241,37 +243,6 @@ fn fetch_recursive_tree<'a>(
 
         Ok(all_files)
     })
-}
-
-/// Fetch SHA256 hashes for multiple files in a single API call
-/// Returns a HashMap mapping filename to its SHA256 hash (if available)
-pub async fn fetch_multipart_sha256s(
-    model_id: &str,
-    revision: &str,
-    filenames: &[String],
-    token: Option<&String>,
-) -> Result<HashMap<String, Option<String>>, reqwest::Error> {
-    // Single API call to get all files
-    let url = format!("{}/api/models/{}/tree/{}", api_base(), model_id, revision);
-
-    let response =
-        crate::http_client::get_with_optional_token(&url, token.map(String::as_str)).await?;
-    let files: Vec<ModelFile> = response.json().await?;
-
-    // Create lookup map for fast matching
-    let mut sha256_map = HashMap::new();
-
-    for filename in filenames {
-        let sha256 = files
-            .iter()
-            .find(|f| &f.path == filename && f.file_type == "file")
-            .and_then(|f| f.lfs.as_ref())
-            .map(|lfs| lfs.oid.clone());
-
-        sha256_map.insert(filename.clone(), sha256);
-    }
-
-    Ok(sha256_map)
 }
 
 #[cfg(test)]

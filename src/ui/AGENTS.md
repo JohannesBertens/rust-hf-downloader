@@ -11,7 +11,7 @@ UI is split into:
 - app/ (mod.rs, W3.9 — no app.rs indirection): runtime loop; spawns background
   workers and manages frame redraw cadence; owns the crossterm event loop and
   the mouse click/scroll/hover handlers
-- app/ submodule: state container, event dispatch, search/download flows; ui/app/filters.rs single-homes the filter/sort values and their cycle/step mutation rules; ui/app/events/ is the keyboard layer (mod.rs dispatch + shared navigation, keys.rs normal-mode/popup key handlers); App groups mouse state (state.rs::MouseState: areas/hovered_panel/last_move) and options-dialog transient state (options_dialog: OptionsDialogState, §8.9 — AppOptions is pure config schema)
+- app/ submodule: state container, event dispatch, search/download flows; ui/app/filters.rs single-homes the filter/sort values and their cycle/step mutation rules; ui/app/events/ is the keyboard layer (mod.rs dispatch + shared navigation, keys.rs normal-mode/popup key handlers); ui/app/options.rs owns the options dialog (M5/U1: OptionsDialogState — cursor row, live-edit flags, the two text-edit buffers — plus the OPTIONS_FIELDS table; the renderer is a pure consumer); App groups mouse state (state.rs::MouseState: areas/hovered_panel/last_move) and options-dialog transient state (options_dialog: OptionsDialogState, docs/DEFERRED.md#options-dialog-transient-state — AppOptions is pure config schema)
 - tree.rs: file-tree navigation model (not drawing) — see Tree operations
 
 Terminal stack: ratatui for rendering, crossterm for input, tui-input for text fields.
@@ -37,6 +37,7 @@ render/ (mod.rs is the facade)
 - RenderParams is grouped per consumer (W5.2): FocusCtx (input_mode/focused_pane/hovered_panel), ListCtx (input/models/list_state/loading), GgufPanelContext + StandardPanelContext (bottom-panel data; the inactive mode's group is supplied but unread), FilterCtx (toolbar), StatusCtx (status bar) + display_mode + hud_height
 - MouseAreas registration order is behavior (first-match hit-tests): filter fields 0,1,2 in display order; Models, then bottom panels left-to-right (GGUF: QuantizationGroups, QuantizationFiles; Standard: ModelMetadata, FileTree) — pinned by mouse_areas_register_in_lookup_order in render/tests.rs
 - mod.rs also keeps the cfg(test) snap_ui helper: insta derives the snapshot name from the module path *and* stores the file next to the macro call site, so the test modules are direct children (render/snapshot_tests.rs, hud_tests.rs, style_size_tests.rs, tests.rs) and the .snap files live in render/snapshots/
+- render/test_utils.rs (cfg(test), M5/U5) is the shared fixture harness (UiFixture + the one draw_ui_with_overlay RenderParams builder with the common defaults — formerly triplicated across the three suites) AND the snapshot-name manifest: snap_ui/snap_style refuse unregistered names, and snapshot_name_manifest_matches_committed_goldens checks the manifest against render/snapshots/ in BOTH directions, so a dropped test (orphan golden) or an unregistered new golden fails plain cargo test
 - Toolbar shows and highlights current sort and filters; indicates active preset
 - GGUF path: render_gguf_panels → left groups (size, type, [downloaded]), right files with downloaded mark
 - Standard path: render_standard_panels → left metadata summary, right file tree (flattened with expansion)
@@ -53,8 +54,8 @@ Design notes
 Where to add UI features
 - New pane/section → add a pure renderer in the owning render/<panel>.rs (new panel = new submodule) and pass data via the matching RenderParams group (extend that panel's context struct; register its hit-rect left-to-right after the Results list)
 - New status or badges → augment spans in list or right panels
-- New popup → add render_* in render/popups.rs (options dialog: render/options_popup.rs) and the key handler in events/keys.rs, popup state in models/ui.rs (enums) + render/options_popup.rs (OptionsDialogState), and mouse dispatch (if any) in app/mod.rs
-- New options field → append an OptionsFieldSpec to OPTIONS_FIELDS (render/options_popup.rs) plus a modify_option arm keyed by its OptionsFieldId; the cursor bound and rendering follow the table automatically
+- New popup → add render_* in render/popups.rs (options dialog: render/options_popup.rs) and the key handler in events/keys.rs, popup state in models/ui.rs (enums) + ui/app/options.rs (OptionsDialogState + OPTIONS_FIELDS, M5/U1), and mouse dispatch (if any) in app/mod.rs
+- New options field → append an OptionsFieldSpec to OPTIONS_FIELDS (ui/app/options.rs, M5/U1) plus a modify_option arm keyed by its OptionsFieldId; the cursor bound and rendering follow the table automatically
 
 Quality
 - Keep draws quick; long ops go to spawned tasks with progress tracked in shared state

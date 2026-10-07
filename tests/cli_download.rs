@@ -46,6 +46,7 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -99,6 +100,7 @@ async fn human_mode_summary_on_stdout() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -144,6 +146,7 @@ async fn already_exists_skips_download_and_verifies() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -187,6 +190,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -230,6 +234,7 @@ async fn gated_repo_exits_two() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -271,6 +276,7 @@ async fn ambiguous_selector_exits_64_with_available_list() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -316,6 +322,7 @@ async fn quant_selector_downloads_only_that_quantization() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -361,6 +368,7 @@ async fn all_selector_downloads_every_file() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -397,6 +405,7 @@ async fn transient_timeout_is_retried() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -431,6 +440,7 @@ async fn no_verify_skips_verification_events() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -479,6 +489,7 @@ async fn raw_endpoint_fallback_after_resolve_404() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -519,6 +530,7 @@ async fn revision_flag_downloads_from_branch() {
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -579,6 +591,7 @@ async fn revision_default_main_empty_exits_64() {
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -605,6 +618,7 @@ async fn revision_unknown_branch_exits_64() {
         search_results: Vec::new(),
         branches: vec!["2.0bpw".to_string()],
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -637,6 +651,7 @@ async fn usage_errors_exit_64() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
     let env = TestEnv::new(&endpoint);
@@ -696,6 +711,7 @@ fn search_repo() -> MockRepo {
         ],
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     }
 }
 
@@ -869,6 +885,7 @@ async fn nested_subdirectory_files_download_and_verify() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -977,6 +994,7 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -1058,6 +1076,7 @@ async fn download_progress_plain_prints_lines_without_tty() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -1129,6 +1148,7 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
         search_results: Vec::new(),
         branches: Vec::new(),
         range_scripts: Vec::new(),
+        fail_subdir: None,
     })
     .await;
 
@@ -1148,4 +1168,195 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
         "plain mode must not use \\r rewrites"
     );
     assert_file_content(&env.models_dir().join("a/b/one.gguf"), &one);
+}
+
+// ---------------------------------------------------------------------------
+// Plan M4/B3: subdirectory fetch failures must surface, not truncate
+// ---------------------------------------------------------------------------
+
+/// A failing subdirectory tree listing (`fail_subdir` knob) must fail the
+/// whole metadata fetch with the underlying error (`network` + exit 1),
+/// never produce a silently truncated tree. Pre-B3 the subdir error was
+/// swallowed: the tree came back without `Dynamic/` and the run died with
+/// a misleading `not_found`-ish selection error instead of the real cause.
+#[tokio::test]
+async fn subdir_tree_fetch_failure_surfaces_network_error_and_exits_one() {
+    let weights = fixture_bytes(20_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![
+            FileEntry {
+                path: "README.md".to_string(),
+                advertised_sha256: None,
+                advertised_size: None,
+                content: b"# readme".to_vec(),
+            },
+            FileEntry {
+                path: "Dynamic/model.gguf".to_string(),
+                advertised_sha256: Some(sha256_hex(&weights)),
+                advertised_size: None,
+                content: weights.clone(),
+            },
+        ],
+        gated: false,
+        fail_status_after_first_range: None,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+        branches: Vec::new(),
+        range_scripts: Vec::new(),
+        fail_subdir: Some("Dynamic".to_string()),
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let (code, stdout, stderr) = env
+        .run(&["download", "a/b", "--file", "Dynamic/model.gguf", "--json"])
+        .await;
+
+    // The run fails with the UNDERLYING transport error (the subdir 500),
+    // mapped by the metadata-error path: not a 404 → `network` + exit 1.
+    // JSON mode puts the error event on stdout (NDJSON contract).
+    assert_exit_code(code, 1, &stdout, &stderr);
+    assert!(
+        stdout.contains("\"code\":\"network\""),
+        "error event must be the subdir failure: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("Dynamic"),
+        "the failing subtree must be named: {stdout:?}"
+    );
+    let events = json_lines(&stdout);
+    assert_eq!(events.len(), 1, "nothing was resolved: {stdout}");
+    assert_eq!(events[0]["type"], "error");
+}
+
+// ---------------------------------------------------------------------------
+// Plan M4/B5 (owner revision 2026-10-07): a malformed token is an
+// explicit WARNING + unauthenticated fallback, never a silent downgrade
+// and never a run-fatal error
+// ---------------------------------------------------------------------------
+
+/// `--token` with bytes that cannot appear in an Authorization header
+/// (here: a newline) must surface a `warning` event at bootstrap and the
+/// run must PROCEED unauthenticated — against this non-gated mock the
+/// download succeeds (exit 0, file on disk). Pre-B5 the header was
+/// silently dropped (same outcome, no warning — a gated repo then
+/// produced a confusing 401); M4/B5 first made it a hard `auth_required`
+/// exit 2; the owner revision chose the middle ground: loud warning,
+/// unauthenticated fallback.
+#[tokio::test]
+async fn invalid_token_warns_at_bootstrap_and_proceeds_unauthenticated() {
+    let content = fixture_bytes(20_000);
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: vec![FileEntry {
+            path: "model.gguf".to_string(),
+            advertised_sha256: Some(sha256_hex(&content)),
+            advertised_size: None,
+            content: content.clone(),
+        }],
+        gated: false,
+        fail_status_after_first_range: None,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+        branches: Vec::new(),
+        range_scripts: Vec::new(),
+        fail_subdir: None,
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let bad_token = "hf_bad\ntoken";
+    let (code, stdout, stderr) = env
+        .run(&[
+            "download",
+            "a/b",
+            "--file",
+            "model.gguf",
+            "--json",
+            "--token",
+            bad_token,
+        ])
+        .await;
+
+    assert_exit_code(code, 0, &stdout, &stderr);
+    let events = json_lines(&stdout);
+    // The bootstrap warning goes out FIRST, before any other event —
+    // a later 401 against a gated repo is diagnosable from the log.
+    let warning = &events[0];
+    assert_eq!(warning["type"], "warning");
+    assert!(
+        warning["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("token"),
+        "warning must name the token: {warning}"
+    );
+    assert!(
+        warning["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("WITHOUT authentication"),
+        "warning must state the downgrade: {warning}"
+    );
+    // And the run proceeded: the file landed (unauthenticated, non-gated
+    // mock) — done event present, bytes on disk.
+    assert!(
+        events.iter().any(|e| e["type"] == "done"),
+        "run must complete: {stdout}"
+    );
+    assert!(env.models_dir().join("a/b/model.gguf").exists());
+}
+
+/// The search flavor of the same contract (owner revision 2026-10-07):
+/// a malformed `--token` emits the bootstrap warning — on STDERR, so
+/// search's stdout stays a single JSON document — and the query
+/// proceeds unauthenticated (exit 0) instead of failing with
+/// `auth_required`.
+#[tokio::test]
+async fn invalid_token_search_warns_and_proceeds_unauthenticated() {
+    let endpoint = spawn_mock(MockRepo {
+        model_id: "a/b".to_string(),
+        files: Vec::new(),
+        gated: false,
+        fail_status_after_first_range: None,
+        resolve_404: false,
+        sleep_once: None,
+        per_request_delay: Duration::ZERO,
+        search_results: Vec::new(),
+        branches: Vec::new(),
+        range_scripts: Vec::new(),
+        fail_subdir: None,
+    })
+    .await;
+
+    let env = TestEnv::new(&endpoint);
+    let (code, stdout, stderr) = env
+        .run(&["search", "qwen", "--json", "--token", "hf_bad\rtoken"])
+        .await;
+
+    assert_exit_code(code, 0, &stdout, &stderr);
+    // The warning is on STDERR (Opus gate P2: search stdout must remain a
+    // single JSON document — an event line before the array would break
+    // `| jq` consumers; unlike download/sync, search's stdout is not an
+    // NDJSON event stream).
+    assert!(
+        stderr.contains("Warning:") && stderr.contains("WITHOUT authentication"),
+        "warning must be on stderr and state the downgrade: {stderr}"
+    );
+    let events = json_lines(&stdout);
+    assert!(
+        events.iter().all(|e| e["type"] != "warning"),
+        "no warning event on search stdout: {stdout}"
+    );
+    // The query itself succeeded (empty result set against this mock) —
+    // stdout is exactly the search JSON array.
+    assert!(
+        stdout.trim_end().ends_with(']'),
+        "search array must still print: {stdout}"
+    );
 }

@@ -7,9 +7,14 @@ title: Agents Guide — src/ui/app
 This submodule holds application state, event handling, and async orchestration for search, selection, download, and verification.
 
 Files and roles
+- options.rs (M5/U1: moved out of ui/render/options_popup.rs so the app layer owns the dialog and render is a pure consumer)
+  • OptionsDialogState — the dialog's transient state bundle: cursor row (selected_field), the two live-edit flags, and the two text-edit buffers (directory_input/token_input, formerly loose App fields options_directory_input/options_token_input); never serialized (AppOptions is the pure config schema, docs/DEFERRED.md#options-dialog-transient-state)
+  • OptionsFieldId/OptionsFieldKind + the OPTIONS_FIELDS 16-row table (single source, W4.7): display order, labels, kinds, and value-string accessors; the popup cursor bound (len-1) and the Enter-edit text-row check derive from the table (compile-time invariants pin 16 rows with Text rows exactly 0-1)
+  • render/options_popup.rs imports everything it draws from here
+
 - state.rs
   • struct App: central state with Arc<RwLock>/Arc<Mutex> fields for lists, caches, queues, progress
-  • RenderCache (W2.5): one struct field grouping the last-known-good snapshots of the engine's tokio::Mutex state; draw() refreshes each field via the `snapshot(m, cache)` helper when the lock is free and falls back to the cached value when held (verification_queue_bytes stays a derived variant — summed under the guard, never cloning the queue Vec per frame)
+  • RenderCache (W2.5): one struct field grouping the last-known-good snapshots of the engine's tokio::Mutex state; draw() refreshes each field via the `snapshot_in_place(m, cache)` helper when the lock is free and falls back to the cached value when held (verification_queue_bytes stays a derived variant — summed under the guard, never cloning the queue Vec per frame)
   • App::new is headless-safe (no EventStream field — the terminal event stream is constructed once at the top of App::run, after the caller's ratatui::init, and passed into handle_crossterm_events; crossterm's source eagerly opens a tty fd, so eager construction made App::new panic in test environments)
   • `engine: EngineState` owns the engine-side shared state (download/status/verify/outcome channels, queue/registry/progress Arcs, verification counters); App::new constructs it once via `EngineState::new()`; every TUI access goes through explicit `self.engine.<field>` reads (no Deref, no flattened mirrors)
   • `download_tx` is the only channel endpoint kept on App: the frontend-owned sender half of the engine's download queue (dropping it ends the manager loop once drained)
@@ -21,11 +26,11 @@ Files and roles
   • File tree state for Standard mode; display_mode is shared to switch GGUF vs Standard
 
 - events/ (W3.9 split: mod.rs facade + private keys.rs)
-  • App::on_key_event (mod.rs) → dispatch by PopupMode and InputMode; routes to keys.rs handlers
+  • App::on_key_event (mod.rs) → dispatch by PopupMode; routes to keys.rs handlers
   • keys.rs owns the per-context key maps: Normal mode ('/'-search, 'o'-options, 'd'-download, 'v'-verify, 'q'-quit, 's'/'S' sort, 'f'/'+/-'/'r' filters, presets 1/2/3/4, Tab/Left/Right focus, j/k/arrows navigation, Enter details) and the five popup handlers: Search, Options (with inline editing for directory/token), ResumeDownload, DownloadPath, AuthError; would_change_settings lives here too (preset-key helper)
   • mod.rs keeps the shared, non-keyboard-specific surface: navigation (models next/previous; quantization-group, quantization-file and file-tree cursors sharing one free fn advance(state, len, forward) (W4.6) — wrap-around both ends, unselected lists pick index 0 in both directions, len 0 no-op; the len×selection×direction tables in mod tests pin the contract), focus_pane/toggle_focus/toggle_quant_subfocus, file-tree expansion, modify_focused_filter/apply_filter_preset/save_filter_settings, and modify_option
   • 'd'/'v' key guards use FocusedPane::accepts_download()/accepts_verify() (defined next to the enum in models/ui.rs; pane sets pinned by unit test there)
-  • Options dialog dispatch is id-keyed (W4.7): the cursor bound derives from the OPTIONS_FIELDS table length (16 rows → last index 15), Enter-edit matches OptionsFieldId::DefaultDirectory/HfToken, and modify_option matches the field ids with the per-field step/clamp/toggle bodies kept arm-by-arm (they differ per field); selected_field is serde-skipped so it can never exceed the table via stale config
+  • Options dialog dispatch is id-keyed (W4.7): the cursor bound derives from the OPTIONS_FIELDS table length (16 rows → last index 15), Enter-edit matches OptionsFieldId::DefaultDirectory/HfToken, and modify_option matches the field ids with the per-field step/clamp/toggle bodies kept arm-by-arm (they differ per field); selected_field is serde-skipped so it can never exceed the table via stale config. The table + dialog state live in ui/app/options.rs (M5/U1)
   • Filter preset application and persistence (Ctrl+S saves as defaults)
   • Filter VALUE mutations only route through App.filters (ui/app/filters.rs); events/ owns key dispatch, status wording, and write order
   • Mouse handling is NOT in events/ — handle_mouse_*/hover live in ui/app/mod.rs next to the crossterm loop
@@ -57,8 +62,8 @@ Files and roles
 
 Important queues and channels (all on `app.engine` except download_tx)
 - download_tx (on App): sends QueuedDownload { model_id, revision, filename, base_path, expected_sha256, hf_token, total_size } into the engine queue
-- engine.status_tx/rx: strings consumed by run loop to update status and popups; the auth line AUTH_ERROR:<model_id> is built and parsed only through engine::{auth_status_message, parse_auth_status} (W2.6) — one string contract shared with the human CLI's status_line
-- engine.verification_queue(+size) and engine.verification_progress: shared with verification worker
+- engine.events.status_tx/rx: strings consumed by run loop to update status and popups; the auth line AUTH_ERROR:<model_id> is built and parsed only through models::{auth_status_message, parse_auth_status} (W2.6 contract, moved to models in M3) — one string contract shared with the human CLI's status_line
+- engine.verification.queue (+ size, in_flight) and engine.verification.progress (the VerificationHub, M3): shared with the verification worker
 
 Caching strategy
 - ApiCache: metadata, quantizations, file trees, and search results by SearchKey (includes all filters)

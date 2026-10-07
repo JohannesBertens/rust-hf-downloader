@@ -174,7 +174,7 @@ pub enum Event {
     Done {
         summary: Summary,
     },
-    /// `hf-cache sync`: the plan against the current cache (§2.4) — files
+    /// `hf-cache sync`: the plan against the current cache (plans/hf-cache-sync.md §2.4) — files
     /// to fetch, how many were already up to date, and the fetch total.
     SyncPlanned {
         model: String,
@@ -190,11 +190,18 @@ pub enum Event {
         blob: String,
     },
     /// `hf-cache sync`: terminal success event; in human mode the snapshot
-    /// path is printed as the last output line (hf CLI parity, §2.4).
+    /// path is printed as the last output line (hf CLI parity, plans/hf-cache-sync.md §2.4).
     SyncComplete {
         snapshot_path: String,
         revision: String,
         sha: String,
+    },
+    /// A non-fatal warning the run surfaced (e.g. the dropped-malformed-
+    /// HF-token warning from bootstrap: requests proceed unauthenticated).
+    /// Additive (2026-10-07, B5 owner revision); human mode renders it as
+    /// a `Warning: …` stderr line.
+    Warning {
+        message: String,
     },
     Error {
         code: String,

@@ -84,7 +84,8 @@ impl Default for AppOptions {
 mod tests {
     use super::*;
 
-    /// Config TOML golden (§8.9): pins the exact persisted schema — every
+    /// Config TOML golden (docs/DEFERRED.md#options-dialog-transient-state
+    /// — resolved: AppOptions is the pure config schema): pins the exact persisted schema — every
     /// config key, its type/format, and the field order — so removing the
     /// serde-skipped transient UI state (selected_field / editing_* —
     /// never serialized) and any future schema change are both reviewable

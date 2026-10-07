@@ -45,18 +45,10 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 total_size,
             } = download;
 
-            // Decrement queue size and bytes when we start processing
-            {
-                let mut queue = state.download_queue.lock().await;
-                queue.remove(1, total_size);
-            }
-            // Remove the mirrored queue item (first match by filename)
-            {
-                let mut items = state.download_queue_items.lock().await;
-                if let Some(pos) = items.iter().position(|it| it.filename == filename) {
-                    items.remove(pos);
-                }
-            }
+            // Decrement the totals and drop the mirrored queue item (first
+            // match by filename) — one method; the two locks are acquired
+            // separately, never nested (AGENTS.md per-bundle invariants).
+            state.queue.remove_started(&filename, total_size).await;
 
             let outcome = start_download(DownloadParams {
                 model_id,
@@ -64,18 +56,17 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 filename,
                 base_path,
                 progress: state.download_progress.clone(),
-                status_tx: state.status_tx.clone(),
+                status_tx: state.events.status_tx.clone(),
                 complete_downloads: state.complete_downloads.clone(),
                 expected_sha256,
-                verification_queue: state.verification_queue.clone(),
-                verification_queue_size: state.verification_queue_size.clone(),
+                verification: state.verification.clone(),
                 hf_token,
             })
             .await;
 
             // Stream per-file outcomes to live consumers (the join handle
             // still returns the complete list for drain-based callers).
-            let _ = state.outcome_tx.send(outcome.clone());
+            let _ = state.events.outcome_tx.send(outcome.clone());
 
             outcomes.push(outcome);
         }
@@ -88,7 +79,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
 
 /// Spawn the background verification worker (runs until the process exits).
 pub fn spawn_verification_worker(state: EngineState) -> JoinHandle<()> {
-    tokio::spawn(crate::verification::verification_worker(state))
+    tokio::spawn(crate::verification::verification_worker(state.verification))
 }
 
 #[cfg(test)]
@@ -148,7 +139,7 @@ mod tests {
         );
 
         // Queue accounting drained back to zero
-        assert_eq!(state.download_queue.lock().await.size, 0);
+        assert_eq!(state.queue.download_queue_totals.lock().await.size, 0);
 
         crate::download::DOWNLOAD_CONFIG
             .max_retries

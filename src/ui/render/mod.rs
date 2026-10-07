@@ -11,7 +11,9 @@
 //! - `hud` — [`ActivityHudData`], [`activity_hud_height`],
 //!   `render_activity_hud` and the HUD row/column builders
 //! - `popups` — resume / search / download-path / auth-error overlays
-//! - `options_popup` — the 16-field options dialog
+//! - `options_popup` — the 16-field options dialog renderer (a pure
+//!   consumer since M5/U1: the dialog state + [`crate::ui::app::options::OPTIONS_FIELDS`]
+//!   table live in `ui/app/options.rs`, imported from there)
 //! - `toolbar` — the filter & sort toolbar with its click areas
 //!   ([`FilterCtx`] is its input group)
 //!
@@ -32,7 +34,7 @@
 //! the macro call, i.e. `src/ui/render/snapshots/`. That is why the test
 //! modules are declared here as direct children instead of nesting deeper.
 
-use crate::models::{FocusedPane, InputMode, ModelDisplayMode, ModelInfo};
+use crate::models::{FocusedPane, ModelDisplayMode, ModelInfo, PopupMode};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -70,6 +72,8 @@ mod snapshot_tests;
 #[cfg(test)]
 mod style_size_tests;
 #[cfg(test)]
+mod test_utils;
+#[cfg(test)]
 mod tests;
 
 /// Focus & hover state shared by every panel border (W5.2 group): the
@@ -77,7 +81,7 @@ mod tests;
 /// precedence. One struct so the panel renderers no longer thread the
 /// three values separately.
 pub struct FocusCtx {
-    pub input_mode: InputMode,
+    pub popup_mode: PopupMode,
     pub focused_pane: FocusedPane,
     pub hovered_panel: Option<FocusedPane>,
 }
@@ -312,12 +316,12 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
 }
 
 /// Border style of a panel: yellow while the pane holds keyboard focus
-/// (Normal mode only), cyan while the mouse hovers it, default otherwise.
+/// (no popup open), cyan while the mouse hovers it, default otherwise.
 /// Single home for the guard the four panel renderers repeated verbatim
 /// (W3.4c); the H5 style-signature snapshots pin the precedence
 /// focus > hover > plain.
 pub(super) fn border_style(pane: FocusedPane, focus: &FocusCtx) -> Style {
-    if focus.input_mode == InputMode::Normal && focus.focused_pane == pane {
+    if focus.popup_mode == PopupMode::None && focus.focused_pane == pane {
         Style::default().fg(Color::Yellow)
     } else if focus.hovered_panel == Some(pane) {
         Style::default().fg(Color::Cyan)
@@ -400,6 +404,10 @@ pub(super) fn popup_shell(frame: &mut Frame, area: Rect, title: &str, style: Sty
 /// (Regex filter — dots in the version are escaped.)
 #[cfg(test)]
 fn snap_ui(name: &str, terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) {
+    // Manifest gate (M5/U5): the exact name set these suites produce is
+    // registered in test_utils (which also checks it against the
+    // committed goldens) — an unregistered name fails here, loudly.
+    test_utils::require_snapshot_name(&format!("rust_hf_downloader__ui__render__{name}"));
     let pattern = format!("v{}", env!("CARGO_PKG_VERSION")).replace('.', r"\.");
     let mut settings = insta::Settings::new();
     settings.add_filter(&pattern, "v<VERSION>");

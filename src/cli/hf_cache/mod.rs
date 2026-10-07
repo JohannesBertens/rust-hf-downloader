@@ -8,9 +8,9 @@
 //! `cli::hf_cache::X` keeps resolving for `cli/tests.rs` while the module
 //! itself stays private to `cli`:
 //!
-//! - `selection` — the pure §2.2 selector: [`SelectionMode`],
+//! - `selection` — the pure plans/hf-cache-sync.md §2.2 selector: [`SelectionMode`],
 //!   [`SyncSelectionError`], [`select_sync_files`]
-//! - `sync` — the §5.2 sync pipeline (config/engine bootstrap through
+//! - `sync` — the plans/hf-cache-sync.md §5.2 sync pipeline (config/engine bootstrap through
 //!   `cli::run`, cache plan, drain, publish gate, refs, run-tail) plus the
 //!   symlink/ref policy helpers
 //! - `path` — `hf-cache path`: snapshot-path math with a `refs/` lookup
@@ -18,7 +18,7 @@
 //!
 //! Helpers used by two or more submodules stay right here; today that is
 //! [`absolute_path`], needed by both the sync run-tail (the "last line: the
-//! snapshot path" contract, §2.4) and `hf-cache path`.
+//! snapshot path" contract, plans/hf-cache-sync.md §2.4) and `hf-cache path`.
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ pub(super) async fn run_hf_cache(args: HfCacheArgs) -> i32 {
 
 /// Absolute form of `path` without canonicalization's symlink resolution:
 /// already-absolute paths pass through verbatim, relative paths anchor at
-/// the current directory. §2.4's "last line: the snapshot path" wants a
+/// the current directory. plans/hf-cache-sync.md §2.4's "last line: the snapshot path" wants a
 /// stable, predictable absolute path (containers mount caches elsewhere).
 pub(super) fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() {

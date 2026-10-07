@@ -46,8 +46,11 @@ pub struct DownloadParams {
     pub status_tx: mpsc::UnboundedSender<String>,
     pub complete_downloads: Arc<Mutex<CompleteDownloads>>,
     pub expected_sha256: Option<String>,
-    pub verification_queue: Arc<Mutex<Vec<VerificationQueueItem>>>,
-    pub verification_queue_size: Arc<AtomicUsize>,
+    /// The engine's verification hub (queue + counters): a clone sharing
+    /// every Arc, so `start_download` queues verification work without
+    /// touching the engine module (M3 — the DAG edge is download →
+    /// verification, never download → engine).
+    pub verification: crate::verification::VerificationHub,
     pub hf_token: Option<String>,
 }
 
@@ -61,8 +64,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
         status_tx,
         complete_downloads,
         expected_sha256,
-        verification_queue,
-        verification_queue_size,
+        verification,
         hf_token,
     } = params;
 
@@ -77,8 +79,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
         status_tx: &status_tx,
         complete_downloads: &complete_downloads,
         expected_sha256: &expected_sha256,
-        verification_queue: &verification_queue,
-        verification_queue_size: &verification_queue_size,
+        verification: &verification,
         hf_token: &hf_token,
     };
 
@@ -125,8 +126,7 @@ struct DownloadCtx<'a> {
     status_tx: &'a mpsc::UnboundedSender<String>,
     complete_downloads: &'a Arc<Mutex<CompleteDownloads>>,
     expected_sha256: &'a Option<String>,
-    verification_queue: &'a Arc<Mutex<Vec<VerificationQueueItem>>>,
-    verification_queue_size: &'a Arc<AtomicUsize>,
+    verification: &'a crate::verification::VerificationHub,
     hf_token: &'a Option<String>,
 }
 
@@ -326,12 +326,7 @@ async fn handle_existing_file(
                 is_manual: false,
             };
 
-            crate::verification::queue_verification(
-                ctx.verification_queue.clone(),
-                ctx.verification_queue_size.clone(),
-                item,
-            )
-            .await;
+            ctx.verification.queue_verification(item).await;
 
             let _ = status_tx.send(format!("Queued {} for verification", filename));
         } else {
@@ -415,12 +410,7 @@ async fn execute_download_with_retry(
                         DOWNLOAD_CONFIG.enable_verification.load(Ordering::Relaxed);
                     if verification_enabled {
                         if let Some(item) = verification_item {
-                            crate::verification::queue_verification(
-                                ctx.verification_queue.clone(),
-                                ctx.verification_queue_size.clone(),
-                                item,
-                            )
-                            .await;
+                            ctx.verification.queue_verification(item).await;
                             let _ = status_tx.send(format!(
                                 "Download complete, queued for verification: {}",
                                 filename
@@ -472,7 +462,7 @@ async fn execute_download_with_retry(
                 // Check for 401 Unauthorized errors
                 if let Some(reqwest_err) = e.downcast_ref::<reqwest::Error>() {
                     if reqwest_err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                        let _ = status_tx.send(crate::engine::auth_status_message(model_id));
+                        let _ = status_tx.send(crate::models::auth_status_message(model_id));
 
                         // Delete incomplete file
                         if incomplete_path.exists() {

@@ -1,6 +1,6 @@
 # Architecture Simplification & Refactor Plan — post-v2.13.2
 
-**Status:** proposed · **Branch:** `refactor/architecture-simplification-review` · **Date:** 2026-10-06
+**Status:** implemented 2026-10-07 on `impl/architecture-m0-m6` (base `f2635d7` == plan-review HEAD `a756371`'s tree; see §12 for the implementation record and deviation log) · planned on `refactor/architecture-simplification-review` · **Date:** 2026-10-06
 **Provenance:** four-lane parallel fresh-context review (independent models, distinct seams), findings
 spot-verified by the orchestrator against HEAD `a756371`. Review evidence: §10.
 
@@ -190,7 +190,8 @@ discipline axis provably encodes three different orderings. Merged no-write cons
 their public names as delegates (zero call-site churn).
 
 **D-signoff summary** (owner approves inside the milestone): B3 visible errors instead of silent
-truncation; B4 abort semantics; B5 invalid-token becomes an error; B6 removes an observable
+truncation; B4 abort semantics; B5 invalid-token becomes an error *(later revised by the owner,
+2026-10-07 — warn + unauthenticated; see the §12 addendum)*; B6 removes an observable
 status warning + one HTTP round trip; R4's fix flips two pinned-as-desired tests from
 last-writer-wins to all-writers-win.
 
@@ -476,3 +477,53 @@ bounded re-open of the sealed policy); TESTING.md target-existence guard; plan c
 stamped to `a756371`. Rejected/adjusted: per-PR CI was *not* found to exist (only the tag-only
 release workflow — the premise stands, now stated precisely); path-keyed registry lock rejected
 as complexity (global lock, documented test-serialization tradeoff).
+
+## 12. Implementation record (2026-10-07)
+
+Executed on `impl/architecture-m0-m6` by four parallel-agent waves with three-model gate
+verification between waves (wave-reviewer GLM-5.3 · gemini38-reviewer Gemini 3.8 ·
+claude-opus-reviewer Claude Opus — the local third model was unavailable mid-run and Opus
+covered the docs lane; every gate verdict was PASS or PASS WITH P1, zero P0s across the run).
+All Gate-0 sign-offs (B3/B4/B5/B6/R4) were granted by the owner on 2026-10-06 before M1.
+B5's signed-off hard-error semantics were later revised by the owner (2026-10-07, post final
+gate — warn + unauthenticated; §12 addendum records the revision).
+
+| Wave | Milestones | Lanes | Gate fixes |
+|---|---|---|---|
+| 1 | M0, M2, M4 | glm53-worker ×2 + gemini37-coder | `bf3822d`, `4b13219` |
+| 2 | M1, M6 | glm53-worker ×2 | `631224e` |
+| 3 | M3 | glm53-worker | `25a1322` |
+| 4 | M5 | glm53-worker | this closure commit |
+
+Final state: 463/463 tests (baseline 431), all 64 insta goldens byte-identical to base by
+sha256, clippy --all-targets clean, 5 documentation guards green (lock hierarchy from
+bundle derivation, §-anchor/DEFERRED bidirectional hygiene, TESTING target existence,
+registry write confinement, module DAG).
+
+**Deviations & dispositions (additions to §11):**
+- **E4 bounded re-open executed as adjudicated** — pre-authorized in §4 D-policy (this
+  document) before implementation, not a mid-run decision: `InvalidPolicy` deleted, the two
+  no-write variants merged to `NoWrites`, five constructors kept as delegates; pin-before-
+  collapse discipline held (`eff9c29` pin → `eaf31ab` collapse).
+- **Non-register fixes landed without DEFERRED entries** (correctly, as they were fixes,
+  not deferrals): B1 (verify-selected-shard), B6 (dead multipart fetch), U2/U3 (render +
+  tree allocation wins). No register entries were owed.
+- **Sequencing deviation from §7**: executed as M0→(M1∥M2 development)→… in wave batches
+  (M0∥M2∥M4 → M1∥M6 → M3 → M5) with worktree isolation + serial integration; the plan's
+  banned overlap (M3∥M4) never occurred. M4 preceded M3 (plan's alternate ordering), which
+  is why the §5 M4 warning about never running concurrent with M3 held trivially.
+- **Register hand-off**: 8 resolved / 8 open-deferred carried forward unchanged;
+  `complete-downloads-filename-key-collision` is moved + documented (M5/U6) with the fix
+  still deferred; cross-process registry locking remains the only known data-loss window.
+- **Deviation accepted at Gate 3**: `QueueAccounting` field names kept
+  `download_queue_totals`/`download_queue_items` instead of the plan-literal `{state, items}`
+  (honors the U6 rename and keeps the DEFERRED `download_queue_items` anchor live).
+- Docs amended beyond plan letter where gates demanded: TESTING.md clippy gate hardened to
+  --all-targets; guard (a) made fail-closed per struct; registry docs state the REGISTRY_WRITE
+  terminal-leaf position and the mirror self-deadlock rule.
+- **Post-run owner revision (2026-10-07, after the final gate): B5 semantics softened from
+  hard error to explicit warning.** A malformed HF token no longer fails the run with
+  `auth_required` exit 2 — `build_client_with_token` drops the token, returns
+  `TokenDroppedWarning`, and every frontend surfaces it (CLI: additive `warning` NDJSON
+  event / `Warning:` stderr line; TUI: status line; transport: status channel) while
+  proceeding unauthenticated. Still never the pre-M4 silent drop. e2e pins updated.

@@ -1,28 +1,36 @@
 //! W2.4a golden fixtures: byte-exact pins of every inline load-modify-save
 //! registry mutation the engine performs today (download.rs x5,
 //! verification.rs x1, the CLI-pending seeder `register_pending`), plus
-//! the concurrency and failure contracts the W2.4b typed ops must
-//! reproduce unchanged:
+//! the concurrency and failure contracts the typed ops must reproduce.
+//! Since M1 every op runs inside `registry::with_registry` — the
+//! process-global single writer with an atomic (temp + `sync_all` +
+//! rename-with-retry) save:
 //!
 //! - **Disk is the source of truth.** Every op loads the on-DISK registry,
-//!   mutates, saves (non-atomic `fs::File::create`, errors silently
-//!   swallowed — deliberately, see plan §8.5) — never the reverse.
+//!   mutates, saves — never the reverse. The save is ATOMIC and errors are
+//!   silently swallowed (the historical op behavior; a crash can no longer
+//!   truncate the file — docs/DEFERRED.md#registry-atomic-save, resolved).
 //! - **`mark_complete` updates its mirror regardless of whether the save
-//!   succeeded** (today's silent-failure behavior). `mark_mismatch` no
-//!   longer touches a mirror (final layering pass): the engine-mirror
-//!   patch lives at the caller — `verification::mark_mismatch_mirror` —
-//!   and is pinned by the tests there; the barrier test below still pins
-//!   the full caller-sequence shape (disk op + mirror patch) by
-//!   replication.
-//! - **No lock is held across load-modify-save.** The lost-update race
-//!   between concurrent writers is a known deferred defect (plan §8) that
-//!   these tests PIN, not fix.
+//!   succeeded** (the historical silent-failure behavior, pinned below;
+//!   the mirror lock is taken after the writer released). `mark_mismatch`
+//!   touches no mirror: the engine-mirror patch lives at the caller —
+//!   `verification::mark_mismatch_mirror` — pinned by the tests there.
+//! - **One writer at a time, every writer wins.** The load-modify-save runs
+//!   under `REGISTRY_WRITE`, so the former lost-update race between the
+//!   manager and the verification worker is FIXED (R4 owner sign-off,
+//!   Gate-0 2026-10-06): the two-writer tests below assert all-writers-win
+//!   — both writers' updates survive on disk — and a barrier-scheduled
+//!   interleaving proves the serialization (a second writer cannot commit
+//!   while the first holds the writer; each snapshot reflects every prior
+//!   committed write). Only the CROSS-process race remains deferred
+//!   (docs/DEFERRED.md#registry-cross-process-lock).
 //!
 //! The golden tests drive the real typed ops (`super::mark_complete`,
 //! `mark_failed`, `upsert_metadata`, `mark_mismatch`, and the real
 //! `register_pending`). In W2.4a the very same assertions pinned
 //! byte-for-byte identical replicas of the pre-refactor inline sequences —
-//! passing unchanged through the W2.4b swap is the migration's
+//! passing unchanged through the W2.4b swap (inline → ops) and again
+//! through the M1 swap (ops → single-writer ops) is each migration's
 //! behavior-preservation proof.
 
 use super::*;
@@ -762,28 +770,23 @@ async fn save_failure_complete_map_insert_requires_disk_entry() {
 }
 
 // -------------------------------------------------------------------------
-// Two-writer interleaving (plan H7)
+// Two-writer interleaving (plan H7 → M1 flip)
 //
-// Both writers replicate the verification-site sequence against the same
-// registry file, with a rendezvous BETWEEN load and save that forces the
-// un-serialized load-modify-save race deterministically: both writers load
-// the pre-state, then overwrite each other's save. The typed op exposes
-// no such rendezvous seam, so this test pins the SHAPE the ops must keep
-// (no cross-op lock); `two_writers_through_the_real_ops_stay_safe` below
-// drives the real `mark_mismatch` op concurrently. The pins:
-//
-// - both ops complete (no panic, no deadlock),
-// - the final file parses,
-// - the last completed write wins on disk (exactly one entry updated —
-//   the lost-update race of plan §8, pinned, not fixed),
-// - the mirror reflects every writer's patch (it is updated per write,
-//   regardless of the disk outcome — so after a race the mirror can hold
-//   MORE than the disk: today's divergence, pinned).
+// M1 serialized the load-modify-save under `REGISTRY_WRITE`, so the pins
+// flip from "the race is pinned, not fixed" to **all-writers-win** (R4
+// owner sign-off, Gate-0 2026-10-06): both writers' updates must survive
+// on disk. The first test runs the full caller sequence (typed op +
+// surgical mirror patch, exactly what `verification::verify_file` does)
+// from two threads released together by a barrier — the strongest
+// in-flight overlap the caller shape allows. The second drives the real
+// `mark_mismatch` op concurrently. The third (`with_registry_…`) is the
+// deterministic serialization proof: a writer parked INSIDE the critical
+// section blocks a second writer, and each writer's returned snapshot
+// reflects every prior committed write.
 // -------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes env-mutating tests
-async fn two_writers_complete_ops_final_file_parses_mirror_matches_last_write() {
+#[test]
+fn two_writers_complete_ops_final_file_parses_all_updates_survive() {
     let _env = crate::paths::ENV_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -814,64 +817,56 @@ async fn two_writers_complete_ops_final_file_parses_mirror_matches_last_write() 
         ),
     ]);
     std::fs::write(crate::paths::registry_path(), &content).expect("write fixture");
-    let mirror = Arc::new(Mutex::new(load_registry()));
+    let mirror = Arc::new(std::sync::Mutex::new(load_registry()));
     let barrier = Arc::new(std::sync::Barrier::new(2));
 
-    let writer = |mirror: Arc<Mutex<DownloadRegistry>>,
+    // The caller sequence of the mismatch site (verification::verify_file):
+    // the typed op (disk, under the single writer) followed by the surgical
+    // mirror patch — run by both writers, released together so both are in
+    // flight before either commits.
+    let writer = |mirror: Arc<std::sync::Mutex<DownloadRegistry>>,
                   barrier: Arc<std::sync::Barrier>,
-                  local_path: String| async move {
-        // Exact load-modify-save of the mismatch site, with the rendezvous
-        // placed between load and save.
-        let mut registry = load_registry();
+                  local_path: String| {
         barrier.wait();
-        if let Some(entry) = registry
-            .downloads
-            .iter_mut()
-            .find(|d| d.local_path == local_path)
-        {
-            entry.status = DownloadStatus::HashMismatch;
-        }
-        save_registry(&registry);
-
-        let mut m = mirror.lock().await;
+        mark_mismatch(Path::new(&local_path));
+        let mut m = mirror.lock().unwrap();
         if let Some(entry) = m.downloads.iter_mut().find(|d| d.local_path == local_path) {
             entry.status = DownloadStatus::HashMismatch;
         }
     };
 
-    let a = tokio::spawn(writer(
-        mirror.clone(),
-        barrier.clone(),
-        local(&tmp, "a.bin"),
-    ));
-    let b = tokio::spawn(writer(
-        mirror.clone(),
-        barrier.clone(),
-        local(&tmp, "b.bin"),
-    ));
-    a.await.expect("writer A completed without panic");
-    b.await.expect("writer B completed without panic");
+    let a = {
+        let (mirror, barrier, path) = (mirror.clone(), barrier.clone(), local(&tmp, "a.bin"));
+        std::thread::spawn(move || writer(mirror, barrier, path))
+    };
+    let b = {
+        let (mirror, barrier, path) = (mirror.clone(), barrier.clone(), local(&tmp, "b.bin"));
+        std::thread::spawn(move || writer(mirror, barrier, path))
+    };
+    a.join().expect("writer A completed without panic");
+    b.join().expect("writer B completed without panic");
 
     // Final file parses.
     let disk: DownloadRegistry =
         toml::from_str(&read_registry_file()).expect("final registry parses");
 
-    // Lost-update race pinned: both writers loaded the two-Incomplete
-    // pre-state, so the LAST completed write's view is on disk — exactly
-    // one of the two entries survived as HashMismatch.
+    // All-writers-win (M1/R4): the single writer serialized the two
+    // load-modify-save sequences, so BOTH entries survived as
+    // HashMismatch — no lost update.
     let mismatches = disk
         .downloads
         .iter()
         .filter(|d| d.status == DownloadStatus::HashMismatch)
         .count();
     assert_eq!(
-        mismatches, 1,
-        "last completed write must win (lost-update race of plan §8, pinned)"
+        mismatches, 2,
+        "every writer's update must survive (M1 single writer, R4 sign-off)"
     );
 
-    // Mirror reflects BOTH writers' patches — each writer updated it after
-    // its own save, regardless of the disk outcome.
-    let m = mirror.lock().await;
+    // Mirror reflects BOTH writers' patches — each writer patched it after
+    // its own op returned; with no lost disk update there is no longer a
+    // mirror-holds-more-than-disk divergence either.
+    let m = mirror.lock().unwrap();
     assert_eq!(m.downloads[0].status, DownloadStatus::HashMismatch);
     assert_eq!(m.downloads[1].status, DownloadStatus::HashMismatch);
 
@@ -922,17 +917,12 @@ fn path_matches_resolves_symlinked_aliases() {
 }
 
 // -------------------------------------------------------------------------
-// Two-writer interleaving through the REAL ops (plan H7)
+// Two-writer interleaving through the REAL ops (plan H7 → M1 flip)
 //
-// Unlike the barrier-forced test above (which drives the load-modify-save
-// shape directly, with a rendezvous the typed op cannot expose), this test
-// runs the actual `mark_mismatch` op concurrently from two tasks (pure
-// disk since the final layering pass — the engine-mirror patch is
-// caller-side; the barrier test pins that half of the sequence). The
-// un-serialized race means either writer's save may be lost — the pins are
-// the safety properties, not a specific interleaving: both ops complete,
-// the final file parses, and the last completed write is on disk (at
-// least one entry updated).
+// The actual `mark_mismatch` op run concurrently from two tasks. Since M1
+// the op serializes under `REGISTRY_WRITE`, so BOTH updates survive —
+// the assertion below is exactly 2 mismatches (previously 1..=2, the
+// pinned lost-update window).
 // -------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -986,18 +976,287 @@ async fn two_writers_through_the_real_ops_stay_safe() {
     let disk: DownloadRegistry =
         toml::from_str(&read_registry_file()).expect("final registry parses");
 
-    // The last completed write is on disk: whichever op saved last always
-    // includes its own entry's patch, so at least one entry is marked (the
-    // other may or may not be — that is the pinned race).
+    // All-writers-win (M1/R4): the serialized writer means BOTH entries are
+    // marked — exactly 2, no lost update.
     let mismatches = disk
         .downloads
         .iter()
         .filter(|d| d.status == DownloadStatus::HashMismatch)
         .count();
-    assert!(
-        (1..=2).contains(&mismatches),
-        "expected the last write (1) or both writes (2) to survive, got {mismatches}"
+    assert_eq!(
+        mismatches, 2,
+        "every writer's update must survive (M1 single writer, R4 sign-off)"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// -------------------------------------------------------------------------
+// Single-writer serialization proof (M1)
+// -------------------------------------------------------------------------
+
+/// Barrier-scheduled interleaving proving the serialization is real: writer
+/// A parks INSIDE its `with_registry` closure (provably holding
+/// `REGISTRY_WRITE`), writer B enters the writer afterwards and CANNOT
+/// commit until A is released — and when it does, both updates survive and
+/// B's returned snapshot reflects A's already-committed write (each
+/// serialized writer loads the post-state of the previous one).
+///
+/// Scheduling is airtight without sleeps: the main thread observes A's
+/// `inside` flag (set under the mutex) before spawning B, and B can only
+/// set `done` after `with_registry` returns — which requires acquiring the
+/// mutex A provably still holds (A waits for `release` after setting
+/// `inside`). Mutual exclusion does the rest.
+#[test]
+fn with_registry_serializes_writers_all_updates_survive_snapshots_fresh() {
+    let _env = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tmp("serialize-proof");
+    let _guard = DataDirGuard::install(&tmp);
+
+    let a_path = local(&tmp, "a.bin");
+    let b_path = local(&tmp, "b.bin");
+    let content = expected_file(&[
+        block(
+            "a.bin",
+            "https://huggingface.co/org/model/resolve/main/a.bin",
+            &a_path,
+            10,
+            10,
+            "Incomplete",
+            None,
+            None,
+        ),
+        block(
+            "b.bin",
+            "https://huggingface.co/org/model/resolve/main/b.bin",
+            &b_path,
+            20,
+            20,
+            "Incomplete",
+            None,
+            None,
+        ),
+    ]);
+    std::fs::write(crate::paths::registry_path(), &content).expect("write fixture");
+
+    // A signals `inside` once its closure runs (under the writer mutex) and
+    // parks until `release` is set; condvar pairs avoid spinning.
+    let a_inside = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let release_a = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let b_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let b_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let writer_a = {
+        let a_inside = a_inside.clone();
+        let release_a = release_a.clone();
+        let a_path = a_path.clone();
+        std::thread::spawn(move || {
+            with_registry(|registry| {
+                {
+                    let (lock, cvar) = &*a_inside;
+                    let mut inside = lock.lock().unwrap();
+                    *inside = true;
+                    cvar.notify_all();
+                }
+                {
+                    let (lock, cvar) = &*release_a;
+                    let mut release = lock.lock().unwrap();
+                    while !*release {
+                        release = cvar.wait(release).unwrap();
+                    }
+                }
+                if let Some(entry) = registry
+                    .downloads
+                    .iter_mut()
+                    .find(|d| d.local_path == a_path)
+                {
+                    entry.status = DownloadStatus::HashMismatch;
+                }
+            })
+        })
+    };
+
+    // Main: wait until A provably holds the writer.
+    {
+        let (lock, cvar) = &*a_inside;
+        let mut inside = lock.lock().unwrap();
+        while !*inside {
+            inside = cvar.wait(inside).unwrap();
+        }
+    }
+
+    // B: starts (observed), enters the writer, flips its own entry.
+    let writer_b = {
+        let b_started = b_started.clone();
+        let b_done = b_done.clone();
+        let b_path = b_path.clone();
+        std::thread::spawn(move || {
+            b_started.store(true, std::sync::atomic::Ordering::SeqCst);
+            let snapshot = with_registry(|registry| {
+                if let Some(entry) = registry
+                    .downloads
+                    .iter_mut()
+                    .find(|d| d.local_path == b_path)
+                {
+                    entry.status = DownloadStatus::HashMismatch;
+                }
+            });
+            b_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            snapshot
+        })
+    };
+    while !b_started.load(std::sync::atomic::Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+
+    // While A holds the writer, B cannot have committed — B's `done` flag
+    // only lands after `with_registry` returns, which requires the mutex.
+    assert!(
+        !b_done.load(std::sync::atomic::Ordering::SeqCst),
+        "writer B committed while writer A provably held REGISTRY_WRITE — \
+         the single-writer serialization is broken"
+    );
+
+    // Release A; both writers commit, A first (deterministic order: B can
+    // only acquire after A releases).
+    {
+        let (lock, cvar) = &*release_a;
+        let mut release = lock.lock().unwrap();
+        *release = true;
+        cvar.notify_all();
+    }
+    let snapshot_a = writer_a.join().expect("writer A completed");
+    let snapshot_b = writer_b.join().expect("writer B completed");
+
+    // Disk: BOTH updates survived (all-writers-win), file parses.
+    let disk: DownloadRegistry =
+        toml::from_str(&read_registry_file()).expect("final registry parses");
+    assert_eq!(
+        disk.downloads
+            .iter()
+            .filter(|d| d.status == DownloadStatus::HashMismatch)
+            .count(),
+        2
+    );
+
+    // Snapshots are fresh under serialization: A committed first, so its
+    // snapshot predates B's write; B loaded A's committed post-state.
+    assert_eq!(snapshot_a.downloads[0].status, DownloadStatus::HashMismatch);
+    assert_eq!(snapshot_a.downloads[1].status, DownloadStatus::Incomplete);
+    assert_eq!(snapshot_b.downloads[0].status, DownloadStatus::HashMismatch);
+    assert_eq!(snapshot_b.downloads[1].status, DownloadStatus::HashMismatch);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// -------------------------------------------------------------------------
+// M1 bulk-op goldens (delete_incomplete_by_urls / purge_staging)
+//
+// The call-site pins live next to their callers (the TUI delete flow in
+// `ui/app/downloads.rs`, the hf-cache purge in `cli/hf_cache/sync.rs`);
+// these are the registry-side byte pins on the standard W2.4a fixture.
+// -------------------------------------------------------------------------
+
+/// The TUI delete flow's op: exactly the selected urls drop, order
+/// preserved, every other field byte-identical. Unknown urls still
+/// re-save (byte-stable), like every op.
+#[test]
+fn golden_delete_incomplete_by_urls_pins_bytes() {
+    let _env = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tmp("delete-urls");
+    let _guard = DataDirGuard::install(&tmp);
+    write_fixture(&tmp);
+
+    let snapshot =
+        delete_incomplete_by_urls(&[URL_INCOMPLETE.to_string(), URL_STAGING.to_string()]);
+
+    assert_eq!(
+        read_registry_file(),
+        expected_file(&[b_complete(&tmp), b_quant(&tmp)])
+    );
+    // The returned snapshot IS the post-write registry.
+    assert_eq!(snapshot.downloads.len(), 2);
+    assert_eq!(snapshot.downloads[0].filename, "complete.gguf");
+    assert_eq!(snapshot.downloads[1].filename, "quant.gguf");
+
+    // No-op delete (unknown url): byte-stable re-save, snapshot equal.
+    let snapshot = delete_incomplete_by_urls(&["https://no.such/url.bin".to_string()]);
+    assert_eq!(
+        read_registry_file(),
+        expected_file(&[b_complete(&tmp), b_quant(&tmp)])
+    );
+    assert_eq!(snapshot.downloads.len(), 2);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The hf-cache purge op on the standard fixture: the `.rhd-staging`
+/// entry (fixture entry 3) drops, order preserved; and the no-match case
+/// writes NOTHING at all (a missing registry file is not materialized).
+#[test]
+fn golden_purge_staging_pins_bytes_and_noop_writes_nothing() {
+    let _env = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tmp("purge-staging");
+    let _guard = DataDirGuard::install(&tmp);
+    write_fixture(&tmp);
+
+    let snapshot = purge_staging().expect("fixture holds one staging entry");
+
+    assert_eq!(
+        read_registry_file(),
+        expected_file(&[b_complete(&tmp), b_incomplete(&tmp), b_quant(&tmp)])
+    );
+    assert_eq!(snapshot.downloads.len(), 3);
+    assert!(snapshot
+        .downloads
+        .iter()
+        .all(|d| !d.local_path.contains(".rhd-staging")));
+
+    // Second pass: nothing matches → None, no write (bytes unchanged).
+    assert!(purge_staging().is_none());
+    assert_eq!(
+        read_registry_file(),
+        expected_file(&[b_complete(&tmp), b_incomplete(&tmp), b_quant(&tmp)])
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The atomic save (M1/R5): after a write the data dir holds ONLY the
+/// registry file — no temp litter — and a re-save over an existing file
+/// replaces its bytes wholesale.
+#[test]
+fn save_is_atomic_no_temp_litter() {
+    let _env = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tmp("atomic-save");
+    let _guard = DataDirGuard::install(&tmp);
+    write_fixture(&tmp);
+
+    mark_failed(URL_COMPLETE);
+
+    let names: Vec<String> = std::fs::read_dir(&tmp)
+        .expect("read data dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["hf-downloads.toml".to_string()],
+        "the atomic save must leave no temp file behind"
+    );
+    assert!(toml::from_str::<DownloadRegistry>(&read_registry_file()).is_ok());
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

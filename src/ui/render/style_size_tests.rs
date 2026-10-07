@@ -11,14 +11,14 @@
 // silently changing under refactors (W3.4 border/panel-list dedup).
 // =====================================================================
 
-use super::snapshot_tests::{quantization_fixtures, three_model_fixtures};
+use super::test_utils::{draw_ui_with_overlay, UiFixture};
 use super::*;
 use crate::models::{
     AppOptions, DownloadMetadata, DownloadProgress, DownloadStatus, FileTreeNode, ModelCardData,
-    ModelMetadata, QuantizationGroup, RepoFile, SortDirection, SortField,
+    ModelMetadata, RepoFile,
 };
+use crate::ui::app::options::OptionsDialogState;
 use ratatui::{backend::TestBackend, Terminal};
-use std::collections::HashMap;
 
 // ----------------- style-signature helpers -----------------
 
@@ -104,134 +104,25 @@ fn style_runs(terminal: &Terminal<TestBackend>, area: Rect) -> String {
 }
 
 /// Snapshot a style signature (no version text can appear in it, so
-/// unlike `snap_ui` no version filter is needed).
+/// unlike `snap_ui` no version filter is needed). The manifest gate
+/// (M5/U5) applies here too: style names embed THIS module, so they are
+/// registered under the `…__style_size_tests__` prefix.
 fn snap_style(name: &str, signature: &str) {
+    super::test_utils::require_snapshot_name(&format!(
+        "rust_hf_downloader__ui__render__style_size_tests__{name}"
+    ));
     insta::assert_snapshot!(name, signature);
 }
 
 // ----------------- fixture + draw helpers -----------------
+// The fixture bundle (UiFixture), the shared RenderParams defaults, and
+// the draw harness live in `super::test_utils` (M5/U5 consolidated the
+// three hand-copied variants of this setup); the wrappers below keep
+// this suite's original call shapes.
 
-/// Per-draw mutable state for the standard fixture pair from
-/// `snapshot_tests` (three models / two quantization groups).
-struct UiFixture {
-    input: Input,
-    models: Vec<ModelInfo>,
-    list_state: ListState,
-    quantizations: Vec<QuantizationGroup>,
-    quant_list_state: ListState,
-    quant_file_list_state: ListState,
-}
-
-impl UiFixture {
-    /// Models list with row 1 selected (mirrors
-    /// `snapshot_render_ui_model_list_selection`).
-    fn with_selection() -> Self {
-        let mut list_state = ListState::default();
-        list_state.select(Some(1));
-        Self {
-            input: Input::new("llama".to_string()),
-            models: three_model_fixtures(),
-            list_state,
-            quantizations: Vec::new(),
-            quant_list_state: ListState::default(),
-            quant_file_list_state: ListState::default(),
-        }
-    }
-
-    /// Quantization panels with group 0 / file 0 selected (mirrors
-    /// `snapshot_render_ui_quantization_panels`).
-    fn quant_view() -> Self {
-        let mut quant_list_state = ListState::default();
-        quant_list_state.select(Some(0));
-        let mut quant_file_list_state = ListState::default();
-        quant_file_list_state.select(Some(0));
-        Self {
-            input: Input::default(),
-            models: three_model_fixtures(),
-            list_state: ListState::default(),
-            quantizations: quantization_fixtures(),
-            quant_list_state,
-            quant_file_list_state,
-        }
-    }
-}
-
-/// Draw `render_ui` with the shared defaults of `snapshot_tests::
-/// draw_render_ui` (no error/metadata/file-tree, GGUF mode, no
-/// filters) but parameterized on focus, hover and HUD height, then
-/// run `overlay` in the SAME draw closure — mirrors the app loop,
-/// where popups and the HUD render on top of the live UI. Returns
-/// the HUD strip rect render_ui reserved (W4.10).
+/// GGUF-mode draw with the shared defaults, parameterized on focus,
+/// hover and HUD height.
 #[allow(clippy::too_many_arguments)]
-fn draw_ui_with_overlay(
-    terminal: &mut Terminal<TestBackend>,
-    fixture: &mut UiFixture,
-    focused: FocusedPane,
-    hovered: Option<FocusedPane>,
-    hud_height: u16,
-    status: &str,
-    selection_info: &str,
-    overlay: impl FnOnce(&mut Frame),
-) -> Rect {
-    let error: Option<String> = None;
-    let model_metadata: Option<ModelMetadata> = None;
-    let file_tree: Option<FileTreeNode> = None;
-    let mut file_tree_state = ListState::default();
-    let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
-
-    let mut hud_rect = Rect::default();
-    terminal
-        .draw(|frame| {
-            hud_rect = render_ui(
-                frame,
-                RenderParams {
-                    display_mode: ModelDisplayMode::Gguf,
-                    focus: FocusCtx {
-                        input_mode: InputMode::Normal,
-                        focused_pane: focused,
-                        hovered_panel: hovered,
-                    },
-                    list: ListCtx {
-                        input: &fixture.input,
-                        models: &fixture.models,
-                        list_state: &mut fixture.list_state,
-                        loading: false,
-                    },
-                    gguf: GgufPanelContext {
-                        quantizations: &fixture.quantizations,
-                        quant_list_state: &mut fixture.quant_list_state,
-                        quant_file_list_state: &mut fixture.quant_file_list_state,
-                        loading_quants: false,
-                        complete_downloads: &complete_downloads,
-                    },
-                    standard: StandardPanelContext {
-                        model_metadata: &model_metadata,
-                        file_tree: &file_tree,
-                        file_tree_state: &mut file_tree_state,
-                        loading: false,
-                    },
-                    filters: FilterCtx {
-                        sort_field: SortField::Downloads,
-                        sort_direction: SortDirection::Descending,
-                        min_downloads: 0,
-                        min_likes: 0,
-                        focused_field: 5,
-                    },
-                    status: StatusCtx {
-                        error: &error,
-                        status,
-                        selection_info,
-                    },
-                    hud_height,
-                },
-            )
-            .hud_strip;
-            overlay(frame);
-        })
-        .expect("failed to draw UI");
-    hud_rect
-}
-
 fn draw_ui(
     terminal: &mut Terminal<TestBackend>,
     fixture: &mut UiFixture,
@@ -244,12 +135,13 @@ fn draw_ui(
     draw_ui_with_overlay(
         terminal,
         fixture,
+        ModelDisplayMode::Gguf,
         focused,
         hovered,
         hud_height,
         status,
         selection_info,
-        |_| {},
+        |_, _| {},
     );
 }
 
@@ -403,59 +295,19 @@ fn draw_standard_ui(
     status: &str,
     selection_info: &str,
 ) {
-    let error: Option<String> = None;
-    let model_metadata = standard_metadata();
-    let file_tree = standard_tree();
-    let mut file_tree_state = ListState::default();
-    let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
-
-    terminal
-        .draw(|frame| {
-            render_ui(
-                frame,
-                RenderParams {
-                    display_mode: ModelDisplayMode::Standard,
-                    focus: FocusCtx {
-                        input_mode: InputMode::Normal,
-                        focused_pane: focused,
-                        hovered_panel: hovered,
-                    },
-                    list: ListCtx {
-                        input: &fixture.input,
-                        models: &fixture.models,
-                        list_state: &mut fixture.list_state,
-                        loading: false,
-                    },
-                    gguf: GgufPanelContext {
-                        quantizations: &fixture.quantizations,
-                        quant_list_state: &mut fixture.quant_list_state,
-                        quant_file_list_state: &mut fixture.quant_file_list_state,
-                        loading_quants: false,
-                        complete_downloads: &complete_downloads,
-                    },
-                    standard: StandardPanelContext {
-                        model_metadata: &Some(model_metadata.clone()),
-                        file_tree: &Some(file_tree.clone()),
-                        file_tree_state: &mut file_tree_state,
-                        loading: false,
-                    },
-                    filters: FilterCtx {
-                        sort_field: SortField::Downloads,
-                        sort_direction: SortDirection::Descending,
-                        min_downloads: 0,
-                        min_likes: 0,
-                        focused_field: 5,
-                    },
-                    status: StatusCtx {
-                        error: &error,
-                        status,
-                        selection_info,
-                    },
-                    hud_height,
-                },
-            );
-        })
-        .expect("failed to draw standard UI");
+    fixture.model_metadata = Some(standard_metadata());
+    fixture.file_tree = Some(standard_tree());
+    draw_ui_with_overlay(
+        terminal,
+        fixture,
+        ModelDisplayMode::Standard,
+        focused,
+        hovered,
+        hud_height,
+        status,
+        selection_info,
+        |_, _| {},
+    );
 }
 
 // ----------------- style snapshots -----------------
@@ -657,12 +509,13 @@ fn style_options_popup_clear_and_border() {
     draw_ui_with_overlay(
         &mut terminal,
         &mut fixture,
+        ModelDisplayMode::Gguf,
         FocusedPane::Models,
         None,
         0,
         "Press / to search",
         "Selection: 2 of 3",
-        |frame| {
+        |frame, _| {
             render_options_popup(
                 frame,
                 &options,
@@ -702,12 +555,13 @@ fn style_resume_popup_clear_and_background() {
     draw_ui_with_overlay(
         &mut terminal,
         &mut fixture,
+        ModelDisplayMode::Gguf,
         FocusedPane::Models,
         None,
         0,
         "Press / to search",
         "Selection: 2 of 3",
-        |frame| render_resume_popup(frame, &incomplete),
+        |frame, _| render_resume_popup(frame, &incomplete),
     );
     snap_style(
         "style_resume_popup_clear_and_background",
@@ -828,12 +682,13 @@ fn hud_threshold_boundary_full_and_clamped() {
         draw_ui_with_overlay(
             &mut terminal,
             &mut fixture,
+            ModelDisplayMode::Gguf,
             FocusedPane::Models,
             None,
             hud_height,
             "Downloading Llama-3.1-8B-Q4_K_M.gguf",
             "",
-            |frame| {
+            |frame, _| {
                 let area = Rect::new(0, height - 4 - hud_height, 100, hud_height);
                 render_activity_hud(frame, area, &data);
             },
@@ -899,13 +754,15 @@ fn hud_strip_rect_threshold_agreement() {
         let returned = draw_ui_with_overlay(
             &mut terminal,
             &mut fixture,
+            ModelDisplayMode::Gguf,
             FocusedPane::Models,
             None,
             activity_hud_height(&data), // desired, uncapped — render_ui clamps
             "Downloading Llama-3.1-8B-Q4_K_M.gguf",
             "",
-            |_| {},
-        );
+            |_, _| {},
+        )
+        .hud_strip;
         assert_eq!(returned, pinned, "render_ui rect at {label} (h={height})");
 
         // And an independent re-split of the historical Constraint list

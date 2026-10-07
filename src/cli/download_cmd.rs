@@ -5,13 +5,14 @@
 
 use std::path::PathBuf;
 
-use super::args::{valid_model_id, DownloadArgs};
+use super::args::DownloadArgs;
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::{parse_selector, resolve_files, selection_error_event, Selector};
 use super::run::{
-    effective_revision, emit_metadata_error, emit_run_failures, load_run_config, monitor,
-    queue_run, RunTally,
+    effective_revision, emit_client_error, emit_metadata_error, emit_run_failures,
+    emit_token_warning, invalid_model_id_message, load_run_config, monitor, queue_run,
+    require_valid_model_id, RunTally,
 };
 use super::{EXIT_FAILURE, EXIT_INTERRUPTED, EXIT_USAGE};
 use crate::engine::{EnqueuePolicy, QueuedDownload};
@@ -24,26 +25,29 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     );
 
     // --- 1. Configuration (Runner fold: run::load_run_config) ------------
-    let (options, token) = load_run_config(
+    let (options, token, api_client, token_warning) = match load_run_config(
         args.run_output.token.clone(),
         args.output.as_deref(),
         args.rate_limits.rate_limit,
         args.rate_limits.no_rate_limit,
         args.rate_limits.rate_limit_mbps,
         args.run_output.no_verify,
-    );
+    ) {
+        Ok(bootstrap) => bootstrap,
+        Err(e) => return emit_client_error(&mut reporter, &e),
+    };
+    if let Some(warning) = &token_warning {
+        emit_token_warning(&mut reporter, warning);
+    }
 
     // --- 2. Validate usage ------------------------------------------------
     let revision = effective_revision(&args.revision);
-    if !valid_model_id(&args.model_id) {
+    if let Err(code) = require_valid_model_id(&args.model_id) {
         reporter.emit(&Event::error(
             ErrorCode::Usage,
-            format!(
-                "invalid model ID {:?} — expected \"author/model-name\"",
-                args.model_id
-            ),
+            invalid_model_id_message(&args.model_id),
         ));
-        return EXIT_USAGE;
+        return code;
     }
     let selector = match parse_selector(&args) {
         Ok(selector) => selector,
@@ -55,7 +59,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
 
     // --- 3. Resolve files ---------------------------------------------------
     let metadata =
-        match crate::api::fetch_model_metadata(&args.model_id, &revision, token.as_ref()).await {
+        match crate::api::fetch_model_metadata(&api_client, &args.model_id, &revision).await {
             Ok(metadata) => metadata,
             Err(e) => return emit_metadata_error(&mut reporter, &args.model_id, &e),
         };

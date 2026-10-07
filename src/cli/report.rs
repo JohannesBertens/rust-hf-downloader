@@ -275,9 +275,12 @@ impl Reporter {
                 }
             }
             Event::SyncComplete { snapshot_path, .. } => {
-                // §2.4: in human mode the snapshot path IS the last line
+                // plans/hf-cache-sync.md §2.4: in human mode the snapshot path IS the last line
                 // (hf CLI parity). JSON consumers read the typed event.
                 self.line_stdout(snapshot_path);
+            }
+            Event::Warning { message } => {
+                self.line_stderr(&format!("Warning: {}", message));
             }
             Event::Error { code, message, .. } => {
                 self.line_stderr(&format!("error [{}]: {}", code, message));
@@ -303,7 +306,7 @@ impl Reporter {
         if covered {
             return;
         }
-        if let Some(model_id) = crate::engine::parse_auth_status(message) {
+        if let Some(model_id) = crate::models::parse_auth_status(message) {
             self.line_stderr(&format!(
                 "authentication required for {} (pass --token or set $HF_TOKEN)",
                 model_id
@@ -402,6 +405,26 @@ pub(super) fn format_overall_progress(
 /// `--progress plain` verification-drain heartbeat.
 pub(super) fn verification_heartbeat_line(active: usize, done: usize) -> String {
     format!("verifying: {active} in flight, {done} verified")
+}
+
+/// Progress-line content for the self-update asset download (plan
+/// M4/C5): the SAME shapes as the download progress lines — `bar_cli`,
+/// rounded percent, `size_full` bytes — minus speed/eta (a one-shot
+/// asset fetch has no speed estimate). Replaces `update_cmd`'s
+/// hand-rolled `downloading… X / Y (Z%)` line so the two progress
+/// disciplines cannot drift apart again.
+pub(super) fn format_update_progress(downloaded: u64, total: u64) -> String {
+    if total == 0 {
+        return format!("downloading… {}", size_full(downloaded));
+    }
+    let pct = (downloaded as f64 / total as f64) * 100.0;
+    format!(
+        "downloading… {} {}% {}/{}",
+        bar_cli(downloaded, total),
+        pct.round() as u64,
+        size_full(downloaded),
+        size_full(total)
+    )
 }
 
 /// Suffix `" eta <t>"` for the given remaining bytes at the given speed

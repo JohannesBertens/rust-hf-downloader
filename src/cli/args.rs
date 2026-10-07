@@ -314,7 +314,7 @@ pub struct HfCachePathArgs {
     pub token: Option<String>,
 }
 
-/// Validate a `--for` preset name (§2.3): only `vllm` exists today; the
+/// Validate a `--for` preset name (plans/hf-cache-sync.md §2.3): only `vllm` exists today; the
 /// error names the valid choice so clap surfaces it in usage output.
 fn parse_preset(s: &str) -> Result<String, String> {
     match s {

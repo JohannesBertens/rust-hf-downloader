@@ -1,5 +1,8 @@
 use super::*;
 use crate::models::{SortDirection, SortField};
+use crate::ui::app::options::{
+    OptionsDialogState, OptionsFieldId, OptionsFieldKind, OPTIONS_FIELDS,
+};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -80,73 +83,30 @@ fn mouse_areas_register_in_lookup_order() {
     // registration order: filter fields 0,1,2 in display order, then the
     // Results list before the bottom panels, bottom panels left-to-right.
     // This pins the order render_ui returns in `MouseAreas`.
-    use super::snapshot_tests::{quantization_fixtures, three_model_fixtures};
-    use crate::models::{DownloadMetadata, FileTreeNode, ModelMetadata};
-    use ratatui::widgets::ListState;
-    use std::collections::HashMap;
+    use super::test_utils::{
+        draw_ui_with_overlay, quantization_fixtures, three_model_fixtures, UiFixture,
+    };
+    use crate::models::ModelMetadata;
 
     let draw = |display_mode, metadata: Option<ModelMetadata>| {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        let input = Input::default();
-        let models = three_model_fixtures();
-        let mut list_state = ListState::default();
-        let quantizations = quantization_fixtures();
-        let mut quant_list_state = ListState::default();
-        let mut quant_file_list_state = ListState::default();
-        let file_tree: Option<FileTreeNode> = None;
-        let mut file_tree_state = ListState::default();
-        let complete_downloads: HashMap<String, DownloadMetadata> = HashMap::new();
-        let error: Option<String> = None;
+        let mut fixture = UiFixture::empty();
+        fixture.models = three_model_fixtures();
+        fixture.quantizations = quantization_fixtures();
+        fixture.model_metadata = metadata;
 
-        let mut out = None;
-        terminal
-            .draw(|frame| {
-                out = Some(render_ui(
-                    frame,
-                    RenderParams {
-                        display_mode,
-                        focus: FocusCtx {
-                            input_mode: InputMode::Normal,
-                            focused_pane: FocusedPane::Models,
-                            hovered_panel: None,
-                        },
-                        list: ListCtx {
-                            input: &input,
-                            models: &models,
-                            list_state: &mut list_state,
-                            loading: false,
-                        },
-                        gguf: GgufPanelContext {
-                            quantizations: &quantizations,
-                            quant_list_state: &mut quant_list_state,
-                            quant_file_list_state: &mut quant_file_list_state,
-                            loading_quants: false,
-                            complete_downloads: &complete_downloads,
-                        },
-                        standard: StandardPanelContext {
-                            model_metadata: &metadata,
-                            file_tree: &file_tree,
-                            file_tree_state: &mut file_tree_state,
-                            loading: false,
-                        },
-                        filters: FilterCtx {
-                            sort_field: SortField::Downloads,
-                            sort_direction: SortDirection::Descending,
-                            min_downloads: 0,
-                            min_likes: 0,
-                            focused_field: 5,
-                        },
-                        status: StatusCtx {
-                            error: &error,
-                            status: "",
-                            selection_info: "",
-                        },
-                        hud_height: 0,
-                    },
-                ));
-            })
-            .unwrap();
-        out.unwrap().mouse
+        draw_ui_with_overlay(
+            &mut terminal,
+            &mut fixture,
+            display_mode,
+            FocusedPane::Models,
+            None,
+            0,
+            "",
+            "",
+            |_, _| {},
+        )
+        .mouse
     };
 
     // GGUF mode: Models, QuantizationGroups, QuantizationFiles.

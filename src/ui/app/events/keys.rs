@@ -3,13 +3,13 @@
 //! options, resume, download-path, auth-error), extracted verbatim from
 //! the old single-file `ui/app/events.rs`. The dispatcher
 //! (`App::on_key_event`) lives in the `events` facade (`mod.rs`) and
-//! routes here by `PopupMode`/`InputMode`. Mouse handling is NOT here —
+//! routes here by `PopupMode`. Mouse handling is NOT here —
 //! `handle_mouse_*`/hover/click live in `ui/app/mod.rs` next to the
 //! crossterm event loop.
 
 use crate::models::*;
+use crate::ui::app::options::{OptionsFieldId, OPTIONS_FIELDS};
 use crate::ui::app::state::App;
-use crate::ui::render::{OptionsFieldId, OPTIONS_FIELDS};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tui_input::backend::crossterm::EventHandler;
 
@@ -225,7 +225,6 @@ impl App {
     pub(super) async fn handle_search_popup_input(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => {
-                self.input_mode = InputMode::Normal;
                 self.popup_mode = PopupMode::None;
                 // Clear results immediately before searching
                 self.clear_search_results();
@@ -233,7 +232,6 @@ impl App {
             }
             KeyCode::Esc => {
                 self.popup_mode = PopupMode::None;
-                self.input_mode = InputMode::Normal;
             }
             KeyCode::Char(c) => {
                 self.input.handle(tui_input::InputRequest::InsertChar(c));
@@ -267,7 +265,7 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     // Save the edited token (empty string becomes None)
-                    let new_token = self.options_token_input.value().to_string();
+                    let new_token = self.options_dialog.token_input.value().to_string();
                     self.options.hf_token = if new_token.is_empty() {
                         None
                     } else {
@@ -275,6 +273,13 @@ impl App {
                     };
                     self.options_dialog.editing_token = false;
 
+                    // The token rides in the session's shared client
+                    // (M4/B5; owner revision 2026-10-07) — rebuild it so
+                    // the change takes effect for the next search/fetch
+                    // (a malformed token surfaces as a status-line
+                    // WARNING while the client runs unauthenticated).
+                    self.rebuild_api_client();
+
                     // Save to disk
                     if let Err(e) = crate::config::save_config(&self.options) {
                         *self.status.write() = format!("Failed to save config: {}", e);
@@ -285,7 +290,9 @@ impl App {
                     self.options_dialog.editing_token = false;
                 }
                 _ => {
-                    self.options_token_input.handle_event(&Event::Key(key));
+                    self.options_dialog
+                        .token_input
+                        .handle_event(&Event::Key(key));
                 }
             }
         } else if self.options_dialog.editing_directory {
@@ -293,7 +300,7 @@ impl App {
                 KeyCode::Enter => {
                     // Save the edited directory
                     self.options.default_directory =
-                        self.options_directory_input.value().to_string();
+                        self.options_dialog.directory_input.value().to_string();
                     self.options_dialog.editing_directory = false;
 
                     // Save to disk
@@ -306,7 +313,9 @@ impl App {
                     self.options_dialog.editing_directory = false;
                 }
                 _ => {
-                    self.options_directory_input.handle_event(&Event::Key(key));
+                    self.options_dialog
+                        .directory_input
+                        .handle_event(&Event::Key(key));
                 }
             }
         } else {
@@ -341,14 +350,15 @@ impl App {
                         match spec.id {
                             OptionsFieldId::DefaultDirectory => {
                                 self.options_dialog.editing_directory = true;
-                                self.options_directory_input = tui_input::Input::default()
+                                self.options_dialog.directory_input = tui_input::Input::default()
                                     .with_value(self.options.default_directory.clone());
                             }
                             OptionsFieldId::HfToken => {
                                 self.options_dialog.editing_token = true;
-                                self.options_token_input = tui_input::Input::default().with_value(
-                                    self.options.hf_token.as_deref().unwrap_or("").to_string(),
-                                );
+                                self.options_dialog.token_input = tui_input::Input::default()
+                                    .with_value(
+                                        self.options.hf_token.as_deref().unwrap_or("").to_string(),
+                                    );
                             }
                             _ => {}
                         }

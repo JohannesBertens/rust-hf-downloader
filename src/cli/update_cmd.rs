@@ -2,7 +2,6 @@
 
 use super::args::UpdateArgs;
 use super::{EXIT_CHECKSUM, EXIT_FAILURE, EXIT_OK, EXIT_UPDATE_AVAILABLE};
-use crate::fmt::size_full;
 use serde::Serialize;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
@@ -133,33 +132,29 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
         return EXIT_UPDATE_AVAILABLE;
     }
 
-    // Download + verify. Progress: humans get a carriage-return line on
-    // stderr; JSON gets throttled `downloading` events.
+    // Download + verify. Progress: humans get the Reporter-shaped line
+    // (bar/percent/sizes from `cli::report`, M4/C5) with the same
+    // `\r`…`\x1b[K` rewrite discipline the download reporter uses; JSON
+    // gets throttled `downloading` events.
     let mut progress = |downloaded: u64, total: u64| {
-        let percent = if total > 0 {
-            downloaded as f64 / total as f64 * 100.0
-        } else {
-            0.0
-        };
         if args.json {
             if last_emit.elapsed() >= UPDATE_JSON_PROGRESS_INTERVAL || downloaded == total {
                 last_emit = Instant::now();
                 emit(UpdateEvent::Downloading {
                     downloaded_bytes: downloaded,
                     total_bytes: total,
-                    percent,
+                    percent: if total > 0 {
+                        downloaded as f64 / total as f64 * 100.0
+                    } else {
+                        0.0
+                    },
                 });
             }
         } else if human {
-            if total > 0 {
-                eprint!(
-                    "\r  downloading… {} / {} ({percent:.0}%)",
-                    size_full(downloaded),
-                    size_full(total)
-                );
-            } else {
-                eprint!("\r  downloading… {}", size_full(downloaded));
-            }
+            eprint!(
+                "\r{}\x1b[K",
+                crate::cli::report::format_update_progress(downloaded, total)
+            );
             let _ = std::io::stderr().flush();
         }
     };
@@ -168,7 +163,9 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
         Err(e) => return update_fail(&e, &emit),
     };
     if !args.json {
-        eprintln!("\r{}", " ".repeat(40));
+        // Same erase-to-end-of-line clear the download reporter uses
+        // (`clear_progress_line`'s shape, M4/C5).
+        eprint!("\r\x1b[2K");
     }
     emit(UpdateEvent::Verified {
         sha256: asset.sha256.clone(),
@@ -181,14 +178,10 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
         Ok(p) => p,
         Err(e) => return update_fail(&e, &emit),
     };
-    let current_exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            let err = update::UpdateError::Io(format!("locating current executable: {e}"));
-            return update_fail(&err, &emit);
-        }
-    };
-    if let Err(e) = update::swap(&current_exe, &binary_path) {
+    // `swap` takes only the staged binary: `self_replace` resolves the
+    // running executable itself (the former `current_exe` argument was
+    // ignored — dropped in M4/C5 as the smaller change).
+    if let Err(e) = update::swap(&binary_path) {
         return update_fail(&e, &emit);
     }
     // Best-effort temp cleanup; self_replace consumed the staged binary.

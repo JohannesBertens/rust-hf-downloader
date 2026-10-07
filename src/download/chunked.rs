@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::task::JoinSet;
 
 /// Parameters for chunked download
 pub(super) struct ChunkedDownloadParams<'a> {
@@ -121,7 +122,7 @@ pub(super) async fn download_chunked(
     drop(file); // Close to allow multiple handles
 
     // Phase 2b: spawn the chunk tasks (semaphore + shared counters)
-    let handles = spawn_chunk_tasks(
+    let tasks = spawn_chunk_tasks(
         client,
         final_url.clone(),
         incomplete_path.clone(),
@@ -131,8 +132,8 @@ pub(super) async fn download_chunked(
         total_size,
     );
 
-    // Phase 2c: wait for all chunks; first failure aborts the await
-    wait_for_chunks(handles).await?;
+    // Phase 2c: wait for all chunks; first failure aborts the rest
+    wait_for_chunks(tasks).await?;
 
     // Final progress update
     {
@@ -193,10 +194,16 @@ async fn probe_file_size(
     let timeout_secs = DOWNLOAD_CONFIG
         .download_timeout_secs
         .load(Ordering::Relaxed);
-    let client = crate::http_client::build_client_with_token(
+    let (client, token_warning) = crate::http_client::build_client_with_token(
         hf_token,
         Some(std::time::Duration::from_secs(timeout_secs)),
     )?;
+    // B5 owner revision 2026-10-07: a malformed token is dropped WITH A
+    // WARNING through the run's status channel; the transport proceeds
+    // unauthenticated (explicit, not the pre-M4 silent drop).
+    if let Some(w) = token_warning {
+        let _ = status_tx.send(format!("Warning: {}", w.message()));
+    }
 
     // Step 1: Get file size using a range request
     // Try the primary URL first, fallback to raw endpoint on 404
@@ -251,7 +258,9 @@ async fn probe_file_size(
 /// chunk. Each task registers itself in the progress struct, runs
 /// [`download_chunk_with_progress`], then marks its chunk
 /// completed/inactive — the loop body is the historical spawn closure,
-/// verbatim.
+/// verbatim. The tasks live in a [`JoinSet`] (plan M4/B4) so a failure
+/// in one chunk can abort every still-running sibling (see
+/// [`wait_for_chunks`]).
 fn spawn_chunk_tasks(
     client: reqwest::Client,
     final_url: String,
@@ -260,11 +269,10 @@ fn spawn_chunk_tasks(
     num_chunks: usize,
     chunk_size: usize,
     total_size: u64,
-) -> Vec<tokio::task::JoinHandle<ChunkTaskResult>> {
+) -> JoinSet<ChunkTaskResult> {
     // Step 3: Download chunks in parallel
     let max_concurrent = DOWNLOAD_CONFIG.concurrent_threads.load(Ordering::Relaxed);
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    let mut handles = Vec::new();
 
     // Shared progress tracking (W5.6 audit): `progress_downloaded` is a
     // single monotonic u64 counter — the only state its old mutex guarded —
@@ -279,6 +287,8 @@ fn spawn_chunk_tasks(
     let last_update_time = Arc::new(Mutex::new(start_time));
     let last_downloaded_bytes = Arc::new(Mutex::new(0u64));
 
+    let mut tasks: JoinSet<ChunkTaskResult> = JoinSet::new();
+
     for chunk_id in 0..num_chunks {
         let start = chunk_id as u64 * chunk_size as u64;
         let stop = std::cmp::min(start + chunk_size as u64 - 1, total_size - 1);
@@ -291,7 +301,7 @@ fn spawn_chunk_tasks(
         let last_update_time = last_update_time.clone();
         let last_downloaded_bytes = last_downloaded_bytes.clone();
 
-        let handle = tokio::spawn(async move {
+        tasks.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
 
             let chunk_total = stop - start + 1;
@@ -367,42 +377,38 @@ fn spawn_chunk_tasks(
             result?;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(chunk_size)
         });
-
-        handles.push(handle);
     }
 
-    handles
+    tasks
 }
 
-/// Phase 2c of [`download_chunked`] (W5.1b): await every chunk task.
+/// Phase 2c of [`download_chunked`] (W5.1b): await every chunk task
+/// until the [`JoinSet`] runs dry.
 ///
-/// Wait for all chunks to complete. On the first failure, stop awaiting
-/// the remaining chunk tasks: their handles would otherwise never be
-/// awaited and the zombie tasks keep running while the retry loop
-/// deletes and recreates the `.incomplete` file — a sporadic
-/// ENOENT/offset race (incident #37: "download failed after retries:
-/// No such file or directory", ~1/10 suite runs locally).
+/// On the first failure, [`JoinSet::abort_all`] cancels every remaining
+/// chunk task BEFORE the error propagates (plan M4/B4): their futures are
+/// dropped at their await points, so no zombie keeps streaming bytes at
+/// stale offsets into the `.incomplete` file while
+/// `execute_download_with_retry` deletes and recreates it — the sporadic
+/// ENOENT/offset race of incident #37 ("download failed after retries:
+/// No such file or directory", ~1/10 suite runs locally). Pinned by
+/// `abort_tests::first_chunk_error_aborts_parked_sibling_no_writes_after_recreate`.
 async fn wait_for_chunks(
-    handles: Vec<tokio::task::JoinHandle<ChunkTaskResult>>,
+    mut tasks: JoinSet<ChunkTaskResult>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut chunk_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
-    for handle in handles {
-        match handle.await {
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
             Ok(Ok(_size)) => {}
             Ok(Err(e)) => {
-                chunk_error = Some(e);
-                break;
+                tasks.abort_all();
+                return Err(e);
             }
             Err(join_err) => {
-                chunk_error = Some(format!("chunk task failed: {join_err}").into());
-                break;
+                tasks.abort_all();
+                return Err(format!("chunk task failed: {join_err}").into());
             }
         }
     }
-    if let Some(e) = chunk_error {
-        return Err(e);
-    }
-
     Ok(())
 }
 
@@ -546,4 +552,144 @@ async fn download_chunk_with_progress(
     file.flush().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod abort_tests {
+    //! Plan M4/B4: the abort contract of [`wait_for_chunks`]. A failed
+    //! chunk must ABORT its still-running siblings before the error
+    //! propagates to the retry loop — a merely-detached task keeps its
+    //! open file handle and writes at its stale offset into the file the
+    //! retry recreates (incident #37's zombie writer).
+    //!
+    //! Deterministic by construction (no flake loop): the parked chunk
+    //! parks on an in-process [`tokio::sync::Notify`] barrier, never on
+    //! network timing. The failing chunk errors only after the parked one
+    //! has registered, so both tasks are provably alive when the first
+    //! error lands; the parked task records — in an atomic the test reads
+    //! — every resumption after the barrier. Tokio's abort semantics make
+    //! the pass deterministic: a task parked at an await point is dropped
+    //! without its body ever being polled again, so it cannot observe the
+    //! barrier release. Against the pre-B4 `Vec<JoinHandle>` early-break
+    //! (remaining handles detached) the same test fails: the detached task
+    //! resumes on release and performs the stale write.
+
+    use super::{wait_for_chunks, ChunkTaskResult};
+    use std::io::{Seek, SeekFrom, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tokio::task::JoinSet;
+
+    type ChunkError = Box<dyn std::error::Error + Send + Sync>;
+
+    /// Unique temp dir per test run (pid + atomic counter; no env vars
+    /// touched, so no ENV_MUTEX is needed).
+    fn temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("chunk-abort-{}-{}-{}", tag, std::process::id(), n))
+    }
+
+    /// The stale write a zombie chunk task performs if it resumes after
+    /// the retry recreated the file: seek to its OLD offset and write —
+    /// exactly the corruption shape from incident #37.
+    fn zombie_write(path: &std::path::Path) {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("recreated .incomplete exists");
+        file.seek(SeekFrom::Start(1)).unwrap();
+        file.write_all(b"ZOMBIE").unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_chunk_error_aborts_parked_sibling_no_writes_after_recreate() {
+        let dir = temp_dir("parked");
+        std::fs::create_dir_all(&dir).unwrap();
+        let incomplete = dir.join("file.incomplete");
+
+        // The stale attempt's bytes — what a zombie would corrupt.
+        std::fs::write(&incomplete, b"OLD-DATA").unwrap();
+
+        let barrier = Arc::new(tokio::sync::Notify::new());
+        let parked_registered = Arc::new(AtomicBool::new(false));
+        let resumed_after_recreate = Arc::new(AtomicBool::new(false));
+
+        // Chunk 1 — the parked one: registers, then parks on the barrier.
+        // If it EVER resumes, it flags the atomic and performs the stale
+        // write into whatever file sits at the path at that moment.
+        let parked = {
+            let barrier = barrier.clone();
+            let parked_registered = parked_registered.clone();
+            let resumed = resumed_after_recreate.clone();
+            let path = incomplete.clone();
+            async move {
+                parked_registered.store(true, Ordering::SeqCst);
+                barrier.notified().await;
+                resumed.store(true, Ordering::SeqCst);
+                zombie_write(&path);
+                Ok::<u64, ChunkError>(7)
+            }
+        };
+
+        // Chunk 0 — the failing one: errors only after its sibling has
+        // parked, so both are provably alive when the first error lands.
+        let failing = {
+            let parked_registered = parked_registered.clone();
+            async move {
+                while !parked_registered.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                Err::<u64, ChunkError>("chunk 0: injected".into())
+            }
+        };
+
+        let mut tasks: JoinSet<ChunkTaskResult> = JoinSet::new();
+        tasks.spawn(failing);
+        tasks.spawn(parked);
+        let result = wait_for_chunks(tasks).await;
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "chunk 0: injected",
+            "the first error must propagate verbatim"
+        );
+
+        // The retry loop's behavior between attempts: delete the stale
+        // attempt and recreate the file from scratch.
+        std::fs::remove_file(&incomplete).unwrap();
+        std::fs::write(&incomplete, b"NEW").unwrap();
+
+        // Release the barrier the parked chunk waits on. If it was
+        // aborted, the release is a no-op (its future is gone); if it was
+        // merely detached (pre-B4), it resumes within this poll loop and
+        // the flag trips — polling for up to 1 s means a detached zombie
+        // fails fast and deterministically instead of on a fixed sleep.
+        barrier.notify_waiters();
+        for _ in 0..200 {
+            assert!(
+                !resumed_after_recreate.load(Ordering::SeqCst),
+                "parked chunk resumed after the retry recreated the file"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // No stale write landed: the recreated file is byte-identical.
+        assert_eq!(std::fs::read(&incomplete).unwrap(), b"NEW");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn all_success_tasks_are_awaited() {
+        // Sanity pin for the success path: every task's completion is
+        // observed before Ok(()) — the drain must run to exhaustion, not
+        // stop at the first join.
+        let mut tasks: JoinSet<ChunkTaskResult> = JoinSet::new();
+        for _ in 0..4 {
+            tasks.spawn(async { Ok::<u64, ChunkError>(1) });
+        }
+        wait_for_chunks(tasks)
+            .await
+            .expect("all-success chunks must join cleanly");
+    }
 }

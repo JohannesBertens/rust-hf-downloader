@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 /// it (the TUI's incomplete/complete lists) read the registry from disk
 /// exactly once and see one consistent view.
 pub async fn seed_registry_mirror(state: &EngineState) -> DownloadRegistry {
-    let registry = crate::registry::load_registry();
+    let registry = crate::registry::read_registry();
     *state.download_registry.lock().await = registry.clone();
     registry
 }
@@ -99,7 +99,7 @@ mod tests {
         // Registry file with one entry → both the mirror and the returned
         // snapshot match what is on disk (whole-registry assign, the
         // semantics both CLI bootstrap sites and the TUI scan used inline).
-        crate::registry::save_registry(&sample_registry());
+        crate::registry::upsert_pending(&sample_registry().downloads);
         let snapshot = seed_registry_mirror(&state).await;
         assert_eq!(snapshot.downloads.len(), 1);
         assert_eq!(snapshot.downloads[0].filename, "f.bin");
@@ -117,7 +117,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("engine-bootstrap-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
-        crate::registry::save_registry(&sample_registry());
+        crate::registry::upsert_pending(&sample_registry().downloads);
 
         let (state, download_tx, manager) = bootstrap().await;
 

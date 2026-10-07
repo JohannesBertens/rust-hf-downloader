@@ -9,9 +9,10 @@
 //! module exists as the single home of the drain loop): [`monitor`] holds
 //! no engine lock across an await (it `select!`s on the manager join, a
 //! ticker, and ctrl-c); [`poll_once`] takes every lock with `try_lock` in
-//! its own scope, never nested, touching in order `status_rx` (level 10),
-//! `outcome_rx`, `verification_progress` (7), `verify_rx`,
-//! `download_progress` (3) — a missed `try_lock` skips that tick's
+//! its own scope, never nested, touching in order the EventBus receivers
+//! `events.status_rx` and `events.outcome_rx` (receiver tier, level 10),
+//! the verification hub's `verification.progress` (7), `events.verify_rx`,
+//! then `download_progress` (3) — a missed `try_lock` skips that tick's
 //! heartbeat rather than printing a lock artifact. A guard must never
 //! outlive its statement, and no lock is ever held while acquiring
 //! another.
@@ -20,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::args::{apply_rate_limit_overrides, merge_token};
+use super::args::{apply_rate_limit_overrides, merge_token, valid_model_id};
 use super::events::{ErrorCode, Event, FileStatus, OverallProgress};
 use super::report::Reporter;
 use super::resolve::FileSpec;
@@ -74,6 +75,15 @@ impl RunTally {
 /// → token writeback → `apply_options` → `--no-verify` store. The tail
 /// order is load-bearing: the no-verify store must run AFTER
 /// `apply_options`, which re-enables verification from the config value.
+///
+/// The tail also builds the run's ONE shared `reqwest::Client` (plan
+/// M4/B5; owner revision 2026-10-07) with the merged token installed as
+/// its default auth header; every API call of the run threads it
+/// through. A token that cannot be represented in a header value is
+/// DROPPED WITH A WARNING here — the caller surfaces it via
+/// [`emit_token_warning`] and the run proceeds unauthenticated —
+/// replacing both the pre-M4 silent downgrade and the M4-era hard
+/// auth failure.
 pub(super) fn load_run_config(
     token_flag: Option<String>,
     output: Option<&str>,
@@ -81,7 +91,15 @@ pub(super) fn load_run_config(
     no_rate_limit: bool,
     rate_limit_mbps: Option<f64>,
     no_verify: bool,
-) -> (AppOptions, Option<String>) {
+) -> Result<
+    (
+        AppOptions,
+        Option<String>,
+        reqwest::Client,
+        Option<crate::http_client::TokenDroppedWarning>,
+    ),
+    crate::http_client::ClientBuildError,
+> {
     let mut options = crate::config::load_config();
     if let Some(dir) = output {
         options.default_directory = dir.to_string();
@@ -99,7 +117,40 @@ pub(super) fn load_run_config(
             .enable_verification
             .store(false, Ordering::Relaxed);
     }
-    (options, token)
+    let (client, token_warning) =
+        crate::http_client::build_client_with_token(token.as_deref(), None)?;
+    Ok((options, token, client, token_warning))
+}
+
+/// Surface the dropped-malformed-token warning (B5 owner revision
+/// 2026-10-07): the run PROCEEDS unauthenticated — the warning goes out
+/// first (NDJSON `warning` event / human `Warning:` stderr line) so a
+/// later 401 is diagnosable instead of mysterious.
+pub(super) fn emit_token_warning(
+    reporter: &mut Reporter,
+    warning: &crate::http_client::TokenDroppedWarning,
+) {
+    reporter.emit(&Event::Warning {
+        message: warning.message(),
+    });
+}
+
+/// Surface a shared-client build failure (the [`load_run_config`] tail):
+/// a plain client-build failure (TLS backend init) is `network` +
+/// [`EXIT_FAILURE`]. (The invalid-token case is a WARNING now, not an
+/// error — see [`emit_token_warning`].)
+pub(super) fn emit_client_error(
+    reporter: &mut Reporter,
+    error: &crate::http_client::ClientBuildError,
+) -> i32 {
+    let code = match error {
+        crate::http_client::ClientBuildError::Build(_) => ErrorCode::Network,
+    };
+    reporter.emit(&Event::error(
+        code,
+        format!("{} — the run cannot proceed without an HTTP client", error),
+    ));
+    EXIT_FAILURE
 }
 
 /// The partial bootstrap the query-only subcommands share (`hf-cache
@@ -107,7 +158,9 @@ pub(super) fn load_run_config(
 /// precedence from already-loaded options (`--token` > `$HF_TOKEN` >
 /// config) — no engine, no rate-limit flags, no `apply_options`. The
 /// caller keeps the loaded options for its own defaults (search params,
-/// or nothing). §8.8: `AppOptions::default()` itself reads `$HF_TOKEN`,
+/// or nothing).
+/// docs/DEFERRED.md#options-default-env-token-read:
+/// `AppOptions::default()` itself reads `$HF_TOKEN`,
 /// so the no-config-file path already carries the env token; the env axis
 /// wins over the file axis either way (pinned by the token-matrix tests —
 /// the dual read is unobservable here).
@@ -128,6 +181,28 @@ pub(super) fn effective_revision(revision: &Option<String>) -> String {
     revision
         .clone()
         .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string())
+}
+
+/// Shared `--model-id` usage gate (M6/C1: the block was triplicated across
+/// `download_cmd`, `hf-cache sync`, and `hf-cache path`): a model id must
+/// be exactly `author/model-name`. Returns `Err(EXIT_USAGE)` for a
+/// malformed id; the caller owns emission — the human/JSON paths differ
+/// per site (Reporter `usage` event for the engine-driven commands, plain
+/// `error [usage]:` eprintln in `hf-cache path`), wording from
+/// [`invalid_model_id_message`].
+pub(super) fn require_valid_model_id(model_id: &str) -> Result<(), i32> {
+    if valid_model_id(model_id) {
+        Ok(())
+    } else {
+        Err(EXIT_USAGE)
+    }
+}
+
+/// Usage message for a malformed model id — the exact historical bytes of
+/// all three former call sites (pinned end-to-end by the H4
+/// `human-usage-error` golden in tests/cli_exit_codes.rs).
+pub(super) fn invalid_model_id_message(model_id: &str) -> String {
+    format!("invalid model ID {model_id:?} — expected \"author/model-name\"")
 }
 
 /// Metadata-fetch failure shared by `download` and `hf-cache sync`
@@ -344,14 +419,14 @@ pub(super) async fn poll_once(
     reporter: &mut Reporter,
 ) {
     // Free-text status lines (human mode only; JSON uses typed events)
-    if let Ok(mut rx) = state.status_rx.try_lock() {
+    if let Ok(mut rx) = state.events.status_rx.try_lock() {
         while let Ok(message) = rx.try_recv() {
             reporter.status_line(&message);
         }
     }
 
     // Streaming per-file outcomes
-    if let Ok(mut rx) = state.outcome_rx.try_lock() {
+    if let Ok(mut rx) = state.events.outcome_rx.try_lock() {
         while let Ok(outcome) = rx.try_recv() {
             apply_outcome_event(&outcome, index_of, count, reporter, tally);
         }
@@ -361,7 +436,7 @@ pub(super) async fn poll_once(
     // None = the try_lock snapshot missed — skip the heartbeat that tick
     // rather than print a lock artifact as an in-flight count.
     let mut verifying_active: Option<usize> = None;
-    if let Ok(progress) = state.verification_progress.try_lock() {
+    if let Ok(progress) = state.verification.progress.try_lock() {
         verifying_active = Some(progress.len());
         for entry in progress.iter() {
             if seen_verifying.insert(entry.filename.clone()) {
@@ -373,7 +448,7 @@ pub(super) async fn poll_once(
     }
 
     // Typed verification results
-    if let Ok(mut rx) = state.verify_rx.try_lock() {
+    if let Ok(mut rx) = state.events.verify_rx.try_lock() {
         while let Ok(outcome) = rx.try_recv() {
             apply_verify_outcome(&outcome, reporter, tally);
         }
@@ -563,7 +638,7 @@ fn apply_verify_outcome(outcome: &VerifyOutcome, reporter: &mut Reporter, tally:
 mod tests {
     use super::*;
 
-    /// Shareable in-memory stderr sink (mirrors the one in `cli::tests`).
+    /// Shareable in-memory stderr sink (mirrors the one in `cli::testutil`).
     #[derive(Clone, Default)]
     struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -754,6 +829,24 @@ mod tests {
         assert_eq!(
             effective_revision(&Some("deadbeef".repeat(5))),
             "deadbeef".repeat(5)
+        );
+    }
+
+    /// C1 pin: the shared model-id gate validates exactly like
+    /// `args::valid_model_id`, returns EXIT_USAGE, and the message is the
+    /// historical byte-exact wording all three call sites emitted.
+    #[test]
+    fn model_id_gate_wording_and_exit_code_are_pinned() {
+        assert_eq!(require_valid_model_id("a/b"), Ok(()));
+        for bad in ["a", "a/b/c", "/b", "a/", ""] {
+            assert!(
+                matches!(require_valid_model_id(bad), Err(EXIT_USAGE)),
+                "gate accepted {bad:?}"
+            );
+        }
+        assert_eq!(
+            invalid_model_id_message("nodash"),
+            "invalid model ID \"nodash\" — expected \"author/model-name\""
         );
     }
 

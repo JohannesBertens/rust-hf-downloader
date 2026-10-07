@@ -34,11 +34,6 @@ pub enum FilterPreset {
     Recent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    Normal,
-}
-
 /// Sort field options for model search
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SortField {

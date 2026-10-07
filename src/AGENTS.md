@@ -29,12 +29,12 @@ Key modules
 - Core types: ModelInfo, ModelMetadata(+RepoFile/LfsInfo), FileTreeNode
 - Quantization: QuantizationInfo, QuantizationGroup
 - Download tracking: DownloadMetadata/Registry, DownloadStatus, ChunkProgress, DownloadProgress
-- App/UI enums: PopupMode, InputMode, FocusedPane, ModelDisplayMode
+- App/UI enums: PopupMode, FocusedPane, ModelDisplayMode
 - Filter/sort: SortField, SortDirection, FilterPreset; ApiCache and SearchKey
-- Default AppOptions: persisted config schema only (download/verification and filter settings; the options dialog's transient UI state — cursor row, live-edit flags — moved to ui/render/options_popup.rs::OptionsDialogState in §8.9, pinned by the TOML golden test in options.rs)
+- Default AppOptions: persisted config schema only (download/verification and filter settings; the options dialog's transient UI state — cursor row, live-edit flags, text-edit buffers — lives in ui/app/options.rs::OptionsDialogState since M5/U1, resolved in docs/DEFERRED.md#options-dialog-transient-state, pinned by the TOML golden test in options.rs)
 
 2) http_client.rs
-- build_client_with_token(token, timeout) -> reqwest::Client (adds Bearer header only if token is Some(non-empty))
+- build_client_with_token(token, timeout) -> (reqwest::Client, Option<TokenDroppedWarning>) (adds Bearer header only if token is Some(non-empty) AND header-representable; a malformed token is dropped with the warning and the client is unauthenticated)
 - get_with_optional_token(url, token) -> Response (unauthenticated if token empty/None)
 
 3) api/ facade (client/quant/tree submodules)
@@ -54,7 +54,6 @@ Key modules
   (v2.4's `fetch_model_files` compat wrapper was deleted: no callers remained;
    call fetch_model_metadata + classify_quantizations directly)
 - resolve_revision_sha(model_id, revision, token) -> Result<String> (revision commit SHA; unknown revision → 404)
-- fetch_multipart_sha256s(model_id, filenames[], token) -> map filename -> Option<sha256>
 - Helpers: extract_quantization_type, get_multipart_base_name, looks_like_quant_type
   • Test-only (`#[cfg(test)]`): has_gguf_files, is_quantization_directory,
     extract_quantization_type_from_dirname, parse_multipart_filename
@@ -62,13 +61,12 @@ Key modules
 4) config.rs
 - load_config() -> AppOptions (reads crate::paths::read_config_path(); defaults on missing/unparseable file; env HF_TOKEN override lives in AppOptions::default)
 - save_config(&AppOptions) (writes crate::paths::config_path())
-- apply_options(&AppOptions) — maps persisted options onto the global DOWNLOAD_CONFIG/VERIFICATION_CONFIG atomics
+- apply_options(&AppOptions) — maps persisted options onto the global DOWNLOAD_CONFIG/VERIFICATION_CONFIG atomics via the declarative ENGINE_OPTIONS table (M6/C4: one row per option, shared by apply + the test-only globals snapshot; pinned field-by-field in config.rs tests)
   • Tests cover path and default load
 
 5) registry.rs
-- Persistence of DownloadRegistry at ~/models/hf-downloads.toml
-- load_registry/save_registry, selectors for incomplete/complete
-- Typed mutation ops (W2.4) — every registry write routes through them; register_pending (CLI pending seeder, moved from engine.rs so pending writes have one owner) sits next to the upsert_pending op it drives; mark_complete is one fn taking a Completion::{AlreadyExists (status flip only) | Downloaded (status + downloaded_size + url rewrite)} flavor (the two former mark_complete/mark_complete_with_url ops merged); byte-level behavior pinned by the goldens in registry/registry_tests.rs
+- Persistence of DownloadRegistry at ~/models/hf-downloads.toml; single-writer (M1): every write routes through `with_registry` (std process-global `REGISTRY_WRITE`; leaf-only sync closures; returns the post-write snapshot callers mirror from); `load_registry`/`save_registry` are module-private (public reads via lock-free `read_registry`); the save is atomic (same-dir pid-suffixed temp + `sync_all` + rename-with-retry)
+- Typed mutation ops (W2.4 + M1): register_pending (CLI pending seeder, moved from engine.rs so pending writes have one owner), upsert_pending, upsert_metadata, mark_complete (one fn taking a Completion::{AlreadyExists (status flip only) | Downloaded (status + downloaded_size + url rewrite)} flavor), mark_failed, mark_mismatch, delete_incomplete_by_urls, purge_staging — byte-level behavior pinned by the goldens in registry/registry_tests.rs; the in-process two-writer race is fixed (all-writers-win, R4)
 
 6) download/ (W3.8: mod.rs facade + private chunked.rs — every crate::download::X path unchanged)
 - start_download(DownloadParams) async orchestrates a safe, parallel, ranged GET download, in three W5.1a phases:
@@ -77,7 +75,7 @@ Key modules
   • execute_download_with_retry: retry loop — transient errors consume a retry and delete .incomplete; 401 → AuthRequired; terminal failure → mark_failed + .incomplete cleanup
 - chunked.rs: download_chunked = probe_file_size (Range probe, /raw fallback on 404, Content-Range/Content-Length parse) + file prealloc + spawn_chunk_tasks/wait_for_chunks; renames .incomplete -> final on success; queues verification when enabled and hash known
   • W5.6: each chunk task takes one bundled ChunkContext (client, url, incomplete path, progress handles, span, pacing state — formerly a 12-arg fn); the cross-chunk `progress_downloaded` counter is an Arc<AtomicU64> (audited: single u64, no compound state — fetch_add per stream item, relaxed load for the speed snapshot; rendered progress flows through DownloadProgress under its own lock); the speed-pacing Instant + byte-marker pair stays mutexed (compound state: the window gate and the marker update move as one unit)
-- Path security: paths::sanitize::{sanitize_path_component, validate_and_sanitize_path} (see 12)) — start_download applies them to user-supplied filenames; blocks traversal
+- Path security: paths::sanitize::{sanitize_path_component, validate_and_sanitize_path} (see 13)) — start_download applies them to user-supplied filenames; blocks traversal
 - DownloadConfig (global atomics in mod.rs) controls chunking, retries, timeouts, and UI update cadence
 
 7) verification.rs
@@ -94,32 +92,45 @@ Key modules
 - app/*: state, events, model and download flows
 
 9) utils.rs — exactly two genuinely-generic families (final pass; formatters moved to fmt.rs)
-- digest streaming: stream_file_digest(path, hasher, buffer_size, on_chunk) (progress-reporting read+hash loop), sha256_file, DIGEST_CHUNK
+- digest streaming: stream_file_digest(path, hasher, buffer_size, on_chunk) (progress-reporting read+hash loop), DIGEST_CHUNK
 - atomic rename: atomic_rename_with_retry / atomic_rename_with_retry_async (retry policy is per-site: download 4 retries/100ms linear backoff; cache_layout: retries=0 single attempt)
 
-10) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
+10) fmt.rs — human-readable formatting primitives (W1.4), one wrapper per surface
+- ETA: eta_cli (f64 seconds, "?" guard) vs eta_hud (u64, ~ prefix, zero-padded hour minutes); truncation: truncate_path_cli (tail, leading …) vs the middle-marker TUI variants (truncate_filename …, truncate_name_middle_hud ~); bytes: size_full "1.00 GB" vs size_hud-compact "1.0GB" (binary 1024 thresholds); number is deliberately decimal
+- The full-vs-HUD presentation split is DELIBERATE — do not unify the variants (contract pinned in fmt.rs:1-32); the #[cfg(test)] oracle module holds frozen copies of the old helper bodies and the table tests assert wrapper == oracle
+
+11) cli/ — one-shot CLI surface (v2.3.0+, split into a directory)
 - `download` + `search` + `update` + `hf-cache` subcommands (clap derive); reuses engine::bootstrap
-- Split by section: mod (Cli/Command/run), args, resolve, events, report, run (cross-command runner: RunTally/monitor/poll_once + load_run_config/queue_run/run-tail emissions), download_cmd, search_cmd, hf_cache/ (mod = dispatch + the shared `absolute_path` + the facade re-exports `cli/tests.rs` imports; selection = pure §2.2 selector; sync = §5.2 sync pipeline; path = snapshot-path math), update_cmd, tests
+- Split by section: mod (Cli/Command/run), args, resolve, events, report, run (cross-command runner: RunTally/monitor/poll_once + load_run_config/queue_run/run-tail emissions), download_cmd, search_cmd, hf_cache/ (mod = dispatch + the shared `absolute_path` + the facade re-exports `cli/tests.rs` imports; selection = pure plans/hf-cache-sync.md §2.2 selector; sync = §5.2 sync pipeline; path = snapshot-path math), update_cmd, per-subject *_tests.rs test modules + testutil fixtures (M6/T1)
 - Human reporter or JSON Lines (`--json`); documented exit-code table
 - `--revision`, rate-limit flags; HF_ENDPOINT honored via api::api_base
 
-11) engine/ — the single shared download pipeline bootstrap (v2.9.x; split from one engine.rs into a facade + private submodules, external crate::engine:: imports unchanged)
-- mod.rs: EngineState bundle (+ QueuedDownload message type, auth-status string contract W2.6); submodule facade (pub use enqueue/workers/bootstrap)
-- enqueue.rs: EngineState::enqueue(files, policy) (W2.1): the one enqueue transaction (registry bookkeeping per policy → queue.add → HUD mirror → sends → failed-send rollback); every divergence between the six legacy inline sites is an EnqueuePolicy knob — fields sealed, the five named constructors are the only public API (tui_quant/tui_repository/tui_resume/cli_download/hf_cache_sync): RegistryMode {AlreadyRecorded (TUI resume) | StagingSweep (hf-cache sync) | Mirror (TUI confirms) | Disk (CLI register_pending)}, SendDiscipline {Interactive | Resume | Batch} (queue timing + HUD-mirror shape + rollback, collapsed to the three correlated combos that occur), InvalidPolicy {ReportAndQueue (Mirror) | AbortAll (Disk) | SkipValidation (no-write flavors)}; outcome {sent, invalid[], aborted} feeds the call sites' own status/error strings; the 8 characterization tests live here
+12) engine/ — the single shared download pipeline bootstrap (v2.9.x; split from one engine.rs into a facade + private submodules, external crate::engine:: imports unchanged)
+- mod.rs: EngineState bundles (M3: queue/events/verification + top-level fields; field→bundle ownership table) + QueuedDownload message type; submodule facade (pub use enqueue/workers/bootstrap). The auth-status string contract moved to models/engine.rs in M3
+- enqueue.rs: EngineState::enqueue(files, policy) (W2.1): the one enqueue transaction (registry bookkeeping per policy → queue.add → HUD mirror → sends → failed-send rollback); every divergence between the six legacy inline sites is an EnqueuePolicy knob — fields sealed, the five named constructors are the only public API (tui_quant/tui_repository/tui_resume/cli_download/hf_cache_sync): RegistryMode {NoWrites (the one no-write flavor behind both tui_resume and hf-cache sync; M5/E4 merged the two historical variants after an equivalence pin) | Mirror (TUI confirms) | Disk (CLI register_pending)}, SendDiscipline {Interactive | Resume | Batch} (queue timing + HUD-mirror shape + rollback, collapsed to the three correlated combos that occur); the former third knob InvalidPolicy was deleted in M5/E4 (read at one site where its value was constant); outcome {sent, invalid[], aborted} feeds the call sites' own status/error strings; the characterization tests live here
 - workers.rs: spawn_manager (serial channel consumer → download::start_download, queue accounting) + spawn_verification_worker + ManagerHandle (drain-based join contract)
 - bootstrap.rs: bootstrap() (state → registry-mirror seed → verification worker → manager) + seed_registry_mirror()
 - CLI: run::queue_run (engine::bootstrap → EngineState::enqueue → drop the sender) in run_download + hf-cache sync (after purging staging registry entries); TUI: composes the same pieces (EngineState::new in App::new, seed_registry_mirror in the startup scan, both spawns in App::run) — never duplicate this logic
 
-12) paths.rs — cross-platform path resolution (v2.6.0) + path-security policy (paths::sanitize)
+13) paths.rs — app-path resolution (v2.6.0) + path-security policy (paths::sanitize)
 - Precedence: env overrides > portable mode (config.toml next to exe) > dirs
   defaults > temp fallback; never hardcode $HOME or format! paths elsewhere
 - sanitize: per-component sanitization (traversal, control/Windows-illegal chars,
   reserved device names) + containment-checked validate_and_sanitize_path
+- Hub-cache dir resolution + CACHEDIR.TAG moved to cache_layout (M6/C7);
+  one-cycle pub-use shims remain here
 
-13) rate_limiter.rs — token-bucket limiter (v1.2.0)
+13b) cache_layout.rs — all HuggingFace hub-cache knowledge (M6/C7 consolidated)
+- Hub-cache dir resolution (hf_hub_cache: --cache-dir > HF_HUB_CACHE >
+  HUGGINGFACE_HUB_CACHE > HF_HOME > platform default — huggingface_hub
+  parity) + write_cachedir_tag backup-tool marker (moved from paths.rs)
+- Layout writer (v2.11.0): staging→blobs→snapshots atomic publish, relative
+  symlinks, refs, per-repo sync lock, staging cleanup
+
+14) rate_limiter.rs — token-bucket limiter (v1.2.0)
 - Global VERIFICATION/DownloadConfig atomics; single consolidated state lock
 
-14) update.rs — self-update (v2.10.0)
+15) update.rs — self-update (v2.10.0)
 - `update` subcommand backend: fetch latest.json manifest (RHD_UPDATE_BASE
   override), strict VersionTriple compare, platform asset by target triple
 - SHA256-verified streamed download to a temp dir; tar.gz (unix) / zip

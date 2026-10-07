@@ -1,5 +1,5 @@
 //! App state: the `App` struct, its construction, and the non-blocking
-//! render cache (`RenderCache` + [`snapshot`] helper). Engine-owned state
+//! render cache (`RenderCache` + [`snapshot_in_place`] helper). Engine-owned state
 //! lives on `App::engine` (one `EngineState`, W2.3); only TUI concerns and
 //! `download_tx` are direct fields.
 use crate::models::*;
@@ -18,7 +18,6 @@ pub use crate::engine::QueuedDownload;
 pub struct App {
     pub running: bool,
     pub input: Input,
-    pub input_mode: InputMode,
     pub focused_pane: FocusedPane,
     pub models: Arc<RwLock<Vec<ModelInfo>>>,
     pub list_state: ListState,
@@ -50,8 +49,20 @@ pub struct App {
     pub download_tx: mpsc::UnboundedSender<QueuedDownload>,
     pub incomplete_downloads: Vec<DownloadMetadata>,
     pub options: crate::models::AppOptions,
-    pub options_directory_input: Input,
-    pub options_token_input: Input,
+    // Options-dialog transient UI state
+    // (docs/DEFERRED.md#options-dialog-transient-state: moved out of AppOptions —
+    // cursor row + live-edit flags + the two text-edit buffers, M5/U1;
+    // AppOptions is pure config schema). Lives in ui/app/options.rs.
+    pub options_dialog: super::options::OptionsDialogState,
+    /// The ONE `reqwest::Client` this TUI session's API requests share
+    /// (plan M4/B5), built from `options.hf_token` — the token lives in
+    /// the client's default `Authorization` header, so no call site
+    /// handles it. Rebuilt whenever the token changes
+    /// ([`App::rebuild_api_client`]); a malformed token is dropped WITH A
+    /// WARNING on the status line (owner revision 2026-10-07) and the
+    /// client runs unauthenticated — explicitly, never as the old silent
+    /// header drop that later blamed a 401.
+    pub api_client: reqwest::Client,
     // Non-GGUF model support
     pub model_metadata: Arc<RwLock<Option<ModelMetadata>>>,
     pub file_tree: Arc<RwLock<Option<FileTreeNode>>>,
@@ -69,12 +80,10 @@ pub struct App {
     // Mouse interaction state (one bundle — the fields travel together
     // through the render pass and the mouse handlers; see MouseState)
     pub mouse: MouseState,
-    // Options-dialog transient UI state (§8.9: moved out of AppOptions —
-    // cursor row + live-edit flags; AppOptions is pure config schema)
-    pub options_dialog: crate::ui::render::OptionsDialogState,
     // Last-known-good snapshots of the engine's tokio::Mutex state for
-    // non-blocking rendering: draw() refreshes each field via `snapshot`
-    // when the lock is free and falls back to the previous snapshot when
+    // non-blocking rendering: draw() refreshes each field via
+    // `snapshot_in_place` when the lock is free and falls back to the
+    // previous snapshot when
     // the lock is held by another task.
     pub render_cache: RenderCache,
 }
@@ -113,19 +122,37 @@ impl App {
 
         let file_tree_state = ListState::default();
 
+        // One shared API client per session (M4/B5; owner revision
+        // 2026-10-07): a malformed token is DROPPED WITH A WARNING — the
+        // status line carries it (not the error popup) while the client
+        // runs unauthenticated; public repos stay usable and the reason
+        // is on screen if a gated one 401s.
+        let mut startup_error: Option<String> = None;
+        let (api_client, token_warning) =
+            crate::http_client::build_client_with_token(options.hf_token.as_deref(), None)
+                .unwrap_or_else(|e| {
+                    // TLS backend init failure is the only hard case left —
+                    // same treatment as rebuild_api_client's Err arm
+                    // (error field + anonymous default client).
+                    startup_error = Some(format!("Failed to build HTTP client: {e}"));
+                    (reqwest::Client::new(), None)
+                });
+        let startup_status = match (&startup_error, token_warning) {
+            (Some(_), _) => "Welcome! Press '/' to search for models".to_string(),
+            (None, Some(w)) => format!("Warning: Invalid HF token — {}", w.message()),
+            (None, None) => "Welcome! Press '/' to search for models".to_string(),
+        };
+
         Self {
             running: false,
             input: Input::default(),
-            input_mode: InputMode::Normal, // Start in normal mode
             focused_pane: FocusedPane::Models,
             models: Arc::new(RwLock::new(Vec::new())),
             list_state,
             quant_list_state,
             loading: Arc::new(RwLock::new(false)),
-            error: Arc::new(RwLock::new(None)),
-            status: Arc::new(RwLock::new(
-                "Welcome! Press '/' to search for models".to_string(),
-            )),
+            error: Arc::new(RwLock::new(startup_error)),
+            status: Arc::new(RwLock::new(startup_status)),
             selection_info: Arc::new(RwLock::new(String::new())),
             quantizations: Arc::new(RwLock::new(Vec::new())),
             quant_file_list_state,
@@ -138,8 +165,7 @@ impl App {
             download_tx,
             incomplete_downloads: Vec::new(),
             options,
-            options_directory_input: Input::default(),
-            options_token_input: Input::default(),
+            api_client,
             // Non-GGUF model support
             model_metadata: Arc::new(RwLock::new(None)),
             file_tree: Arc::new(RwLock::new(None)),
@@ -152,7 +178,7 @@ impl App {
             focused_filter_field: 0,
             // Mouse interaction state
             mouse: MouseState::default(),
-            options_dialog: crate::ui::render::OptionsDialogState::default(),
+            options_dialog: super::options::OptionsDialogState::default(),
             // Cached values for non-blocking render
             render_cache: RenderCache::default(),
         }
@@ -161,6 +187,39 @@ impl App {
     /// Synchronize options to global config atomics
     pub fn sync_options_to_config(&self) {
         crate::config::apply_options(&self.options);
+    }
+
+    /// Rebuild [`App::api_client`] after the token changed (options-dialog
+    /// token-commit path — M4/B5; owner revision 2026-10-07). A malformed
+    /// token is dropped WITH A WARNING on the status line; the client then
+    /// runs unauthenticated — explicit, never the old silent header drop
+    /// that later blamed a 401, and never a hard failure either.
+    pub fn rebuild_api_client(&mut self) {
+        match crate::http_client::build_client_with_token(self.options.hf_token.as_deref(), None) {
+            Ok((client, token_warning)) => {
+                self.api_client = client;
+                match token_warning {
+                    Some(w) => {
+                        *self.status.write() =
+                            format!("Warning: Invalid HF token — {}", w.message());
+                    }
+                    // A (now) valid token REPLACES any lingering
+                    // malformed-token warning so a repaired token gets
+                    // visible confirmation instead of a stale warning.
+                    None => {
+                        let mut status = self.status.write();
+                        if status.starts_with("Warning: Invalid HF token") {
+                            *status = "Token updated".to_string();
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Only the hard build failure remains an error.
+                *self.error.write() = Some(format!("Failed to rebuild HTTP client: {e}"));
+                self.api_client = reqwest::Client::new();
+            }
+        }
     }
 
     /// Terminate application
@@ -198,15 +257,15 @@ impl Default for MouseState {
 
 /// Last-known-good snapshots of the engine's `tokio::Mutex` state, used by
 /// `App::draw` for non-blocking rendering. Each field mirrors one engine
-/// mutex; `draw` refreshes it through [`snapshot`] when the lock is free
+/// mutex; `draw` refreshes it through [`snapshot_in_place`] when the lock is free
 /// and renders the previous snapshot when the lock is held by another
 /// task. Defaults equal the engine's fresh-state initial values.
 #[derive(Debug, Default)]
 pub struct RenderCache {
     pub complete_downloads: CompleteDownloads,
     pub download_progress: Option<DownloadProgress>,
-    /// Combined cache for the queue summary (`size`, `bytes`).
-    pub download_queue: crate::models::QueueState,
+    /// Combined cache for the queue totals summary (`size`, `bytes`).
+    pub download_queue_totals: crate::models::QueueTotals,
     pub download_queue_items: Vec<crate::models::QueueItemSummary>,
     /// Derived under the verification-queue lock (summed `total_size`),
     /// not a clone of the queue itself.
@@ -215,17 +274,13 @@ pub struct RenderCache {
 }
 
 /// Non-blocking snapshot of an engine `tokio::Mutex<T>` for rendering:
-/// when the lock is free, copy the guarded value into `cache` and return
-/// the fresh clone; when the lock is held by another task, return the
-/// last-good `cache` value instead. The guard is scoped inside this
-/// helper only — no lock is ever held beyond the copy (W0.8 rule).
-pub(super) fn snapshot<T: Clone>(m: &Mutex<T>, cache: &mut T) -> T {
-    match m.try_lock() {
-        Ok(guard) => {
-            *cache = guard.clone();
-            guard.clone()
-        }
-        Err(_) => cache.clone(),
+/// when the lock is free, copy the guarded value into `cache` in place;
+/// when the lock is held by another task, leave `cache` unchanged.
+/// The guard is scoped inside this helper only — no lock is ever held
+/// beyond the copy (W0.8 rule).
+pub(super) fn snapshot_in_place<T: Clone>(m: &Mutex<T>, cache: &mut T) {
+    if let Ok(guard) = m.try_lock() {
+        *cache = guard.clone();
     }
 }
 
@@ -234,41 +289,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_refreshes_cache_when_lock_is_free() {
+    fn snapshot_in_place_refreshes_cache_when_lock_is_free() {
         let m = Mutex::new(vec![1u64, 2]);
         let mut cache = Vec::new();
 
-        let got = snapshot(&m, &mut cache);
+        snapshot_in_place(&m, &mut cache);
 
-        assert_eq!(got, vec![1, 2]);
         assert_eq!(cache, vec![1, 2], "cache must be refreshed on success");
     }
 
     #[test]
-    fn snapshot_falls_back_to_cache_when_lock_is_held() {
+    fn snapshot_in_place_falls_back_to_cache_when_lock_is_held() {
         let m = Mutex::new(vec![9u64]);
         let mut cache = vec![7u64];
 
         // Hold the lock across the call — try_lock must fail and the
-        // helper must yield the cached value without touching the cache.
+        // helper must leave the cached value untouched.
         let guard = m.try_lock().unwrap();
-        let got = snapshot(&m, &mut cache);
+        snapshot_in_place(&m, &mut cache);
         drop(guard);
 
-        assert_eq!(got, vec![7], "held lock must yield the cached value");
         assert_eq!(cache, vec![7], "cache must be untouched on fallback");
     }
 
     #[test]
     fn render_cache_defaults_match_fresh_engine_state() {
         // Per-field defaults must equal the pre-RenderCache initial values
-        // (HashMap::new(), None, QueueState::new(0, 0), Vec::new(), 0,
+        // (HashMap::new(), None, QueueTotals::new(0, 0), Vec::new(), 0,
         // Vec::new()) so a fresh App renders exactly as before.
         let c = RenderCache::default();
         assert!(c.complete_downloads.is_empty());
         assert!(c.download_progress.is_none());
-        assert_eq!(c.download_queue.size, 0);
-        assert_eq!(c.download_queue.bytes, 0);
+        assert_eq!(c.download_queue_totals.size, 0);
+        assert_eq!(c.download_queue_totals.bytes, 0);
         assert!(c.download_queue_items.is_empty());
         assert_eq!(c.verification_queue_bytes, 0);
         assert!(c.verification_progress.is_empty());
