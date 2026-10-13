@@ -152,7 +152,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     if interrupted {
         reporter.emit(&Event::error(
             ErrorCode::Interrupted,
-            "interrupted by SIGINT; unfinished files stay registered as incomplete and restart from scratch on the next run".to_string(),
+            "interrupted by SIGINT; unfinished files stay registered as incomplete and RESUME from their partial download on the next run".to_string(),
         ));
         return EXIT_INTERRUPTED;
     }

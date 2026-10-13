@@ -496,7 +496,7 @@ prints only the result array) — and on failure the `error` event is
 | 1 | Download failed after retries, or a hash mismatch |
 | 2 | Authentication required (`--token` / `$HF_TOKEN` / config token) |
 | 64 | Usage error, unknown file, or ambiguous selection |
-| 130 | Interrupted (Ctrl-C); unfinished files restart from scratch on the next run |
+| 130 | Interrupted (Ctrl-C); unfinished files stay registered as incomplete and RESUME from their partial download on the next run |
 
 CLI downloads share the TUI's engine, config, and `~/models/hf-downloads.toml`
 registry, so files downloaded headlessly show up in the TUI's resume/complete

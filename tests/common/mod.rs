@@ -26,6 +26,8 @@ pub const MOCK_REVISION_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 // Mock model repo
 // ---------------------------------------------------------------------------
 
+/// One file served by the mock (see [`MockRepo::files`]).
+#[derive(Clone)]
 pub struct FileEntry {
     pub path: String,
     pub content: Vec<u8>,
@@ -40,6 +42,10 @@ pub struct FileEntry {
     /// the real Hub answering for a blob shorter than advertised).
     /// None = advertise the actual content length.
     pub advertised_size: Option<u64>,
+    /// ETag served on range/plain responses for this file (None = no ETag
+    /// header). Resume tests use it as the strong validator the transport
+    /// must compare against its journal before continuing a partial file.
+    pub etag: Option<String>,
 }
 
 pub struct MockRepo {
@@ -81,7 +87,47 @@ pub struct MockRepo {
     /// unknown revisions still 404 first). Pins that a failed subdirectory
     /// fetch surfaces as a run error instead of a silently truncated tree.
     pub fail_subdir: Option<String>,
+    /// Mid-download transient-timeout injection (issue #50 resume tests):
+    /// the `on_nth`-th range-bearing request to `stall.path` sleeps for
+    /// `duration` before serving. Combined with a short client timeout
+    /// this produces a reqwest TIMEOUT error mid-download — the transient
+    /// class the transport's retry loop resumes from. Counted at arrival
+    /// like `range_scripts` (see the counting note there); exact-nth
+    /// semantics (only that one request stalls).
+    pub range_stalls: Vec<Arc<RangeStall>>,
+    /// Mutable file content for server-change scenarios (issue #50 resume
+    /// tests): when set and an entry with a matching `path` is stored, it
+    /// REPLACES the static `files` entry everywhere (tree listing, range
+    /// serving, LFS metadata). Tests clone the Arc before `spawn_mock`,
+    /// then store a changed `FileEntry` between child runs to simulate
+    /// "the server's copy changed while a partial download sat on disk".
+    pub content_override: Option<Arc<std::sync::Mutex<Option<FileEntry>>>>,
 }
+
+/// One mid-download stall script (see [`MockRepo::range_stalls`]).
+pub struct RangeStall {
+    pub path: String,
+    /// Stall exactly the n-th range-bearing request to `path` (1-based,
+    /// counting the transport's `bytes=0-0` probe).
+    pub on_nth: u64,
+    pub duration: Duration,
+    pub seen: std::sync::atomic::AtomicU64,
+}
+
+/// One observed range-bearing request (see [`RangeLog`]). The transport's
+/// probe is recognizable as `(start, end) == (0, 0)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RangeReq {
+    pub path: String,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// Shared log of every range-bearing request the mock served (or tried to
+/// serve — appended at arrival, so timed-out/cancelled handlers still
+/// count). Resume tests assert, against this log, that a resumed attempt
+/// does NOT re-request byte ranges a previous attempt already downloaded.
+pub type RangeLog = Arc<std::sync::Mutex<Vec<RangeReq>>>;
 
 /// One per-path range-request script entry (see
 /// [`MockRepo::range_scripts`]). `seen` counts EVERY range-bearing
@@ -105,6 +151,22 @@ impl RangeScript {
 }
 
 impl MockRepo {
+    /// Resolve the `FileEntry` served for `path`: the `content_override`
+    /// entry when one is stored for this path, else the static `files`
+    /// entry. Every serving surface (tree listing, range serving) goes
+    /// through this so an override changes the file consistently.
+    pub fn lookup(&self, path: &str) -> Option<FileEntry> {
+        if let Some(cell) = &self.content_override {
+            let guard = cell.lock().unwrap();
+            if let Some(entry) = guard.as_ref() {
+                if entry.path == path {
+                    return Some(entry.clone());
+                }
+            }
+        }
+        self.files.iter().find(|f| f.path == path).cloned()
+    }
+
     /// Tree listing for a directory path ("" = repo root), deriving
     /// directory entries from file paths — mirrors the real API where
     /// subdir listings carry full paths (`Dynamic/model.gguf`).
@@ -133,6 +195,8 @@ impl MockRepo {
                     }));
                 }
             } else {
+                // Override wins for listing metadata too (size/LFS oid)
+                let f = self.lookup(f.path.as_str()).unwrap_or_else(|| f.clone());
                 let size = f.advertised_size.unwrap_or(f.content.len() as u64);
                 let mut entry = json!({
                     "type": "file",
@@ -265,7 +329,7 @@ pub async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
             .unwrap();
     }
 
-    let entry = match repo.files.iter().find(|f| f.path == file_path) {
+    let entry = match repo.lookup(&file_path) {
         Some(entry) => entry,
         None => {
             return Response::builder()
@@ -311,6 +375,9 @@ pub async fn handle(req: Request<Body>, repo: Arc<MockRepo>) -> Response<Body> {
     if !content_range.is_empty() {
         builder = builder.header("content-range", content_range);
     }
+    if let Some(etag) = &entry.etag {
+        builder = builder.header("etag", etag);
+    }
     builder.body(Body::from(body)).unwrap()
 }
 
@@ -324,6 +391,13 @@ pub fn response_json(status: StatusCode, value: &Value) -> Response<Body> {
 
 /// Spawn the mock server; returns its base URL (`HF_ENDPOINT` value).
 pub async fn spawn_mock(repo: MockRepo) -> String {
+    spawn_mock_observed(repo).await.0
+}
+
+/// [`spawn_mock`] plus the shared [`RangeLog`] of every range-bearing
+/// request (appended at arrival, before any stall/delay can get the
+/// handler cancelled — see the script-counting note inside).
+pub async fn spawn_mock_observed(repo: MockRepo) -> (String, RangeLog) {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
 
     // One-shot stall flag for the timeout/retry test; extracted before the
@@ -334,7 +408,10 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
     // probe) succeeds.
     let fail_after_first = repo.fail_status_after_first_range;
     let range_scripts: Vec<Arc<RangeScript>> = repo.range_scripts.clone();
+    let range_stalls: Vec<Arc<RangeStall>> = repo.range_stalls.clone();
     let range_requests = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let range_log: RangeLog = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let range_log_ret = range_log.clone();
     let repo = Arc::new(repo);
     let sleep_flag = Arc::new(Mutex::new(sleep_once));
 
@@ -343,12 +420,16 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
         let sleep_flag = sleep_flag.clone();
         let range_requests = range_requests.clone();
         let range_scripts = range_scripts.clone();
+        let range_stalls = range_stalls.clone();
+        let range_log = range_log.clone();
         async move {
             Ok::<_, hyper::Error>(service_fn(move |req| {
                 let repo = repo.clone();
                 let sleep_flag = sleep_flag.clone();
                 let range_requests = range_requests.clone();
                 let range_scripts = range_scripts.clone();
+                let range_stalls = range_stalls.clone();
+                let range_log = range_log.clone();
                 async move {
                     let is_resolve = req.uri().path().contains("/resolve/main/");
                     // Per-path scripted failures (G4/G5): COUNT the request
@@ -361,6 +442,7 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
                     // script combination can still build
                     // timeout-then-error attempt sequences.
                     let mut script_hit: Option<(usize, usize)> = None; // (script idx, n)
+                    let mut stall_hit: Option<Duration> = None;
                     if req.headers().contains_key("range") {
                         for (idx, script) in range_scripts.iter().enumerate() {
                             if req.uri().path().contains(&script.path) {
@@ -369,6 +451,30 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
                                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                                     as usize;
                                 script_hit = Some((idx, n));
+                                break;
+                            }
+                        }
+                        // Mid-download stall injection (issue #50 tests):
+                        // same arrival-counting contract as scripts; the
+                        // SLEEP happens after the delay/script gates so a
+                        // stalled request can also be a scripted one.
+                        let range = req
+                            .headers()
+                            .get("range")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(parse_range);
+                        range_log.lock().unwrap().push(RangeReq {
+                            path: req.uri().path().to_string(),
+                            start: range.map(|r| r.0).unwrap_or(0),
+                            end: range.map(|r| r.1).unwrap_or(0),
+                        });
+                        for stall in &range_stalls {
+                            if req.uri().path().contains(&stall.path) {
+                                let n =
+                                    stall.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                if n + 1 == stall.on_nth {
+                                    stall_hit = Some(stall.duration);
+                                }
                                 break;
                             }
                         }
@@ -414,6 +520,13 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
                             );
                         }
                     }
+                    // The mid-download stall (see arrival counting above):
+                    // outlasts the client's timeout so the chunk task sees
+                    // a reqwest timeout error — the transient class the
+                    // retry loop must resume from instead of restarting.
+                    if let Some(duration) = stall_hit {
+                        tokio::time::sleep(duration).await;
+                    }
                     Ok::<Response<Body>, hyper::Error>(handle(req, repo).await)
                 }
             }))
@@ -423,7 +536,7 @@ pub async fn spawn_mock(repo: MockRepo) -> String {
     let server = Server::bind(&addr).serve(make_service);
     let url = format!("http://{}", server.local_addr());
     tokio::spawn(server);
-    url
+    (url, range_log_ret)
 }
 
 // ---------------------------------------------------------------------------
