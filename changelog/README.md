@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.15.0] - 2026-10-13
+
+### Version 2.15.0 (2026-10-13)
+- **Resumable downloads (issue #50, PR #51)**: interrupted downloads now
+  RESUME instead of restarting from byte 0 — network timeouts, connection
+  resets, terminal HTTP errors, 401s and SIGINT all keep the partial
+  `.incomplete` file plus a new per-file resume journal
+  (`<file>.incomplete.state.json`); a later run re-validates the journal
+  against a fresh probe (size/layout/LFS sha256, ETag secondary) and
+  continues: completed chunks are skipped entirely, partial chunks resume
+  mid-range. Works across all frontends (CLI `download`, `hf-cache sync`
+  staging, TUI); the TUI delete flow cleans the journal too.
+- **Transport hardening**: chunk workers now assert `206 Partial Content`
+  and reject short or over-delivering stream bodies — closes a
+  pre-existing silent-corruption hole (clean-FIN short bodies and
+  Range-ignoring `200` responses were miscounted as chunk success).
+- **Internal**: new `download::journal` module (terminal-leaf
+  poison-tolerant writer, coalesced atomic persistence, data-before-journal
+  crash ordering, completion fsync); SIGINT/exit-130 message updated;
+  registry semantics and lock hierarchy untouched. Tests 464 -> 487,
+  including 5 wire-level resume e2e scenarios, 17 journal unit tests and
+  4 worker-level tests (mid-chunk resume core mechanism). Plan + fix each
+  reviewed by three models (GLM-5.3, GLM-5.2, GLM-5.3-flash), all
+  APPROVE-WITH-CHANGES, findings applied.
+
 ## [2.14.0] - 2026-10-07
 
 ### Version 2.14.0 (2026-10-07)
