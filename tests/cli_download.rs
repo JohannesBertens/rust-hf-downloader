@@ -36,6 +36,7 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
             path: "model-Q4_K_M.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -47,6 +48,8 @@ async fn happy_path_downloads_verifies_and_exits_zero() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -90,6 +93,7 @@ async fn human_mode_summary_on_stdout() {
             path: "only.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -101,6 +105,8 @@ async fn human_mode_summary_on_stdout() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -136,6 +142,7 @@ async fn already_exists_skips_download_and_verifies() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -147,6 +154,8 @@ async fn already_exists_skips_download_and_verifies() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -180,6 +189,7 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(wrong.clone()),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -191,6 +201,8 @@ async fn hash_mismatch_exits_one_and_marks_registry() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -224,6 +236,7 @@ async fn gated_repo_exits_two() {
             path: "model.gguf".to_string(),
             advertised_sha256: None,
             advertised_size: None,
+            etag: None,
             content,
         }],
         gated: true,
@@ -235,6 +248,8 @@ async fn gated_repo_exits_two() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -259,12 +274,14 @@ async fn ambiguous_selector_exits_64_with_available_list() {
                 path: "model-Q4_K_M.gguf".to_string(),
                 advertised_sha256: None,
                 advertised_size: None,
+                etag: None,
                 content: fixture_bytes(10),
             },
             FileEntry {
                 path: "model-Q8_0.gguf".to_string(),
                 advertised_sha256: None,
                 advertised_size: None,
+                etag: None,
                 content: fixture_bytes(20),
             },
         ],
@@ -277,6 +294,8 @@ async fn ambiguous_selector_exits_64_with_available_list() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -305,12 +324,14 @@ async fn quant_selector_downloads_only_that_quantization() {
                 path: "model-Q4_K_M.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&q4)),
                 advertised_size: None,
+                etag: None,
                 content: q4.clone(),
             },
             FileEntry {
                 path: "model-Q8_0.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&q8)),
                 advertised_size: None,
+                etag: None,
                 content: q8.clone(),
             },
         ],
@@ -323,6 +344,8 @@ async fn quant_selector_downloads_only_that_quantization() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -351,12 +374,14 @@ async fn all_selector_downloads_every_file() {
                 path: "one.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&one)),
                 advertised_size: None,
+                etag: None,
                 content: one.clone(),
             },
             FileEntry {
                 path: "two.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&two)),
                 advertised_size: None,
+                etag: None,
                 content: two.clone(),
             },
         ],
@@ -369,6 +394,8 @@ async fn all_selector_downloads_every_file() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -394,6 +421,7 @@ async fn transient_timeout_is_retried() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -406,6 +434,8 @@ async fn transient_timeout_is_retried() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -430,6 +460,7 @@ async fn no_verify_skips_verification_events() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -441,6 +472,8 @@ async fn no_verify_skips_verification_events() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -479,6 +512,7 @@ async fn raw_endpoint_fallback_after_resolve_404() {
             // no LFS pointer: nothing to verify anyway
             advertised_sha256: None,
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -490,6 +524,8 @@ async fn raw_endpoint_fallback_after_resolve_404() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -520,6 +556,7 @@ async fn revision_flag_downloads_from_branch() {
             path: "model-2.0bpw.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -531,6 +568,8 @@ async fn revision_flag_downloads_from_branch() {
         branches: vec!["2.0bpw".to_string()],
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -581,6 +620,7 @@ async fn revision_default_main_empty_exits_64() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -592,6 +632,8 @@ async fn revision_default_main_empty_exits_64() {
         branches: vec!["2.0bpw".to_string()],
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -619,6 +661,8 @@ async fn revision_unknown_branch_exits_64() {
         branches: vec!["2.0bpw".to_string()],
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -652,6 +696,8 @@ async fn usage_errors_exit_64() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
     let env = TestEnv::new(&endpoint);
@@ -697,6 +743,7 @@ fn search_repo() -> MockRepo {
             path: "model.gguf".to_string(),
             advertised_sha256: None,
             advertised_size: None,
+            etag: None,
             content: fixture_bytes(10),
         }],
         gated: false,
@@ -712,6 +759,8 @@ fn search_repo() -> MockRepo {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     }
 }
 
@@ -862,18 +911,21 @@ async fn nested_subdirectory_files_download_and_verify() {
                 path: "README.md".to_string(),
                 advertised_sha256: None,
                 advertised_size: None,
+                etag: None,
                 content: b"# readme".to_vec(),
             },
             FileEntry {
                 path: "Dynamic/model.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&weights)),
                 advertised_size: None,
+                etag: None,
                 content: weights.clone(),
             },
             FileEntry {
                 path: "Dynamic/mmproj-model.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mmproj)),
                 advertised_size: None,
+                etag: None,
                 content: mmproj.clone(),
             },
         ],
@@ -886,6 +938,8 @@ async fn nested_subdirectory_files_download_and_verify() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -965,24 +1019,28 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
                 path: "model.Q8_0.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&weights)),
                 advertised_size: None,
+                etag: None,
                 content: weights.clone(),
             },
             FileEntry {
                 path: "model.mmproj-Q8_0.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mmproj)),
                 advertised_size: None,
+                etag: None,
                 content: mmproj.clone(),
             },
             FileEntry {
                 path: "model.mxfp4_moe-00001-of-00002.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mxfp4_p1)),
                 advertised_size: None,
+                etag: None,
                 content: mxfp4_p1.clone(),
             },
             FileEntry {
                 path: "model.mxfp4_moe-00002-of-00002.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&mxfp4_p2)),
                 advertised_size: None,
+                etag: None,
                 content: mxfp4_p2.clone(),
             },
         ],
@@ -995,6 +1053,8 @@ async fn mmproj_and_mxfp4_moe_quant_selectors() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -1057,12 +1117,14 @@ async fn download_progress_plain_prints_lines_without_tty() {
                 path: "one.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&one)),
                 advertised_size: None,
+                etag: None,
                 content: one.clone(),
             },
             FileEntry {
                 path: "two.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&two)),
                 advertised_size: None,
+                etag: None,
                 content: two.clone(),
             },
         ],
@@ -1077,6 +1139,8 @@ async fn download_progress_plain_prints_lines_without_tty() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -1136,6 +1200,7 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
             path: "one.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&one)),
             advertised_size: None,
+            etag: None,
             content: one.clone(),
         }],
         gated: false,
@@ -1149,6 +1214,8 @@ async fn download_progress_plain_single_file_has_no_aggregate() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -1189,12 +1256,14 @@ async fn subdir_tree_fetch_failure_surfaces_network_error_and_exits_one() {
                 path: "README.md".to_string(),
                 advertised_sha256: None,
                 advertised_size: None,
+                etag: None,
                 content: b"# readme".to_vec(),
             },
             FileEntry {
                 path: "Dynamic/model.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(&weights)),
                 advertised_size: None,
+                etag: None,
                 content: weights.clone(),
             },
         ],
@@ -1207,6 +1276,8 @@ async fn subdir_tree_fetch_failure_surfaces_network_error_and_exits_one() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: Some("Dynamic".to_string()),
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -1255,6 +1326,7 @@ async fn invalid_token_warns_at_bootstrap_and_proceeds_unauthenticated() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -1266,6 +1338,8 @@ async fn invalid_token_warns_at_bootstrap_and_proceeds_unauthenticated() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -1331,6 +1405,8 @@ async fn invalid_token_search_warns_and_proceeds_unauthenticated() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 

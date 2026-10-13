@@ -54,6 +54,7 @@ async fn server_500_mid_download_fails_and_marks_registry() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -65,6 +66,8 @@ async fn server_500_mid_download_fails_and_marks_registry() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -131,6 +134,7 @@ async fn advertised_size_mismatch_fails_on_tail_chunk_416() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: Some(advertised),
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -142,6 +146,8 @@ async fn advertised_size_mismatch_fails_on_tail_chunk_416() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -197,6 +203,7 @@ async fn timeout_then_terminal_500_attempts_exactly_max_retries_plus_one() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content,
         }],
         gated: false,
@@ -208,6 +215,8 @@ async fn timeout_then_terminal_500_attempts_exactly_max_retries_plus_one() {
         branches: Vec::new(),
         range_scripts: vec![script.clone()],
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 
@@ -264,6 +273,7 @@ async fn timeout_then_success_retries_and_exits_ok() {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(&content)),
             advertised_size: None,
+            etag: None,
             content: content.clone(),
         }],
         gated: false,
@@ -275,6 +285,8 @@ async fn timeout_then_success_retries_and_exits_ok() {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     })
     .await;
 

@@ -92,6 +92,7 @@ fn single_file_repo(content: &[u8]) -> MockRepo {
             path: "model.gguf".to_string(),
             advertised_sha256: Some(sha256_hex(content)),
             advertised_size: None,
+            etag: None,
             content: content.to_vec(),
         }],
         gated: false,
@@ -103,6 +104,8 @@ fn single_file_repo(content: &[u8]) -> MockRepo {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     }
 }
 
@@ -116,12 +119,14 @@ fn two_file_repo(content: &[u8]) -> MockRepo {
                 path: "a.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(content)),
                 advertised_size: None,
+                etag: None,
                 content: content.to_vec(),
             },
             FileEntry {
                 path: "b.gguf".to_string(),
                 advertised_sha256: Some(sha256_hex(content)),
                 advertised_size: None,
+                etag: None,
                 content: content.to_vec(),
             },
         ],
@@ -134,6 +139,8 @@ fn two_file_repo(content: &[u8]) -> MockRepo {
         branches: Vec::new(),
         range_scripts: Vec::new(),
         fail_subdir: None,
+        range_stalls: Vec::new(),
+        content_override: None,
     }
 }
 
@@ -318,6 +325,7 @@ async fn exit_failure_mixed_one_ok_one_500() {
         path: "b.gguf".to_string(),
         advertised_sha256: Some(sha256_hex(&other)),
         advertised_size: None,
+        etag: None,
         content: other.clone(),
     };
     repo.range_scripts = vec![fail_b];
