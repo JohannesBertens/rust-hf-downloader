@@ -386,6 +386,32 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// RAII guard redirecting the process-global data dir (registry
+    /// location) for this test — the `DataDirGuard` pattern from
+    /// `registry/registry_tests.rs`, kept LOCAL because the M3 DAG guard
+    /// (tests/docs_guards.rs) forbids this module from referencing the
+    /// engine crate path (even its test_support).
+    struct DataDirGuard {
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl DataDirGuard {
+        fn install(dir: &Path) -> Self {
+            let original = std::env::var_os(crate::paths::ENV_DATA_DIR);
+            std::env::set_var(crate::paths::ENV_DATA_DIR, dir);
+            Self { original }
+        }
+    }
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(v) => std::env::set_var(crate::paths::ENV_DATA_DIR, v),
+                None => std::env::remove_var(crate::paths::ENV_DATA_DIR),
+            }
+        }
+    }
+
     /// A standalone hub with its own channels (the engine wiring — shared
     /// channels, shared registry Arc — is pinned by the engine-side shape
     /// test; these tests only need the worker's own behavior).
@@ -606,9 +632,22 @@ mod tests {
     }
 
     #[tokio::test]
+    // The mismatch path runs `registry::mark_mismatch` — a DISK registry
+    // op. Unguarded (as shipped in v2.14.0) this test raced every other
+    // env-guarded test: `registry_path()` is resolved per read/write, so
+    // the op's load can run under one test's `RUST_HF_DOWNLOADER_DATA_DIR`
+    // and its save under the next test's (observed: this test's writes
+    // landing in `app-delete-incomplete-*`'s registry, breaking its TOML
+    // golden ~20-40% of parallel runs). Same ENV_MUTEX + EnvGuard
+    // discipline as every other registry-touching test.
+    #[allow(clippy::await_holding_lock)]
     async fn short_expected_sha256_does_not_panic_on_mismatch() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("test-b2-short-sha-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = DataDirGuard::install(&tmp);
         let file_path = tmp.join("test.bin");
         std::fs::write(&file_path, b"test payload").unwrap();
 
@@ -643,11 +682,18 @@ mod tests {
     }
 
     #[tokio::test]
+    // See the guard note on `short_expected_sha256_does_not_panic_on_mismatch`
+    // — this mismatch-path test writes the registry too.
+    #[allow(clippy::await_holding_lock)]
     async fn long_expected_sha256_still_truncates_with_ellipsis() {
         // Pins the OTHER branch of the conditional ellipsis: a full
         // 64-char expected hash is truncated to 16 chars and keeps "...".
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("test-b2-long-sha-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = DataDirGuard::install(&tmp);
         let file_path = tmp.join("test.bin");
         std::fs::write(&file_path, b"test payload").unwrap();
 
