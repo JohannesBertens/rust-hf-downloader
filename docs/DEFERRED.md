@@ -175,13 +175,21 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
 ## rate-limiter-zero-rate
 
 - **Symbol:** `RateLimiter`
-- **Status:** open
+- **Status:** resolved (ponytail audit finding 1 — landed 2026-10-13)
 - **Finding:** `src/rate_limiter.rs`: a rate of `0.0` while the limiter
   stays enabled makes `acquire` compute an infinite wait
   (`tokens_needed / 0.0`) and panic in `Duration::from_secs_f64`.
   Construction treats 0 as unlimited/disabled; the runtime rate update
-  path does not.
-- **Remedy:** treat a runtime rate of 0 as disable (or reject it).
+  path does not. Reachable from a hand-edited config file
+  (`download_rate_limit_mbps = 0`, or a negative value which casts to 0,
+  with `download_rate_limit_enabled = true`) and from `--rate-limit`
+  alone reading that config value — the CLI flag parser rejects 0, the
+  config path did not.
+- **Remedy (landed):** `acquire` treats a state rate of `<= 0.0` as
+  unlimited (return immediately, checked under the state lock so a
+  runtime `set_rate(0)` takes effect on the next acquire), matching the
+  documented `0 = unlimited` contract. Pinned by
+  `test_zero_rate_is_unlimited` and `test_runtime_zero_rate_is_unlimited`.
 - **Provenance:** readability plan §8 item 4.
 
 ## queue-item-filename-only-match
