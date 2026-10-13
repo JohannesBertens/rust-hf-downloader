@@ -219,6 +219,9 @@ async fn terminal_failure_preserves_incomplete_and_journal_for_resume() {
     let (endpoint, _log) = spawn_mock_observed(repo).await;
 
     let env = TestEnv::new(&endpoint);
+    // Determinism (plan review): 2 workers so the scripted failure fires only
+    // after the in-flight chunks completed AND journaled.
+    env.set("concurrent_threads", "2");
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
@@ -281,6 +284,9 @@ async fn second_run_resumes_from_journal_and_completes() {
     let (endpoint, log) = spawn_mock_observed(repo).await;
 
     let env = TestEnv::new(&endpoint);
+    // Determinism (plan review): 2 workers so the scripted failure fires only
+    // after the in-flight chunks completed AND journaled.
+    env.set("concurrent_threads", "2");
 
     // Run 1: terminal failure, partial state preserved (scenario 2).
     let (code, stdout, stderr) = env
@@ -359,6 +365,9 @@ async fn server_size_change_discards_journal_and_restarts() {
     let (endpoint, log) = spawn_mock_observed(repo).await;
 
     let env = TestEnv::new(&endpoint);
+    // Determinism (plan review): 2 workers so the scripted failure fires only
+    // after the in-flight chunks completed AND journaled.
+    env.set("concurrent_threads", "2");
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
@@ -409,6 +418,9 @@ async fn server_etag_change_discards_journal_and_restarts() {
     let (endpoint, log) = spawn_mock_observed(repo).await;
 
     let env = TestEnv::new(&endpoint);
+    // Determinism (plan review): 2 workers so the scripted failure fires only
+    // after the in-flight chunks completed AND journaled.
+    env.set("concurrent_threads", "2");
     let (code, stdout, stderr) = env
         .run(&["download", "a/b", "--file", "model.gguf", "--json"])
         .await;
