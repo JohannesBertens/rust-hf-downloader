@@ -1,14 +1,12 @@
-//! Issue #50 e2e reproduction suite: "Download does not resume if the
-//! download fails halfway through".
+//! Issue #50 e2e suite: "Download does not resume if the download fails
+//! halfway through".
 //!
-//! Today the transport destroys partial progress at every opportunity —
-//! `prepare_download_paths` deletes a pre-existing `.incomplete` file at
-//! start, the retry loop deletes it on every transient retry, and terminal
-//! failures delete it too, so every attempt restarts from byte 0. On slow
-//! or flaky connections this makes large models impossible to download.
-//!
-//! These tests pin the DESIRED behavior (they FAIL on the unfixed
-//! transport):
+//! Before the fix, the transport destroyed partial progress at every
+//! opportunity — `prepare_download_paths` deleted a pre-existing
+//! `.incomplete` file at start, the retry loop deleted it on every
+//! transient retry, and terminal failures deleted it too, so every
+//! attempt restarted from byte 0. These scenarios pin the RESUME contract
+//! the fix introduced (they fail against the pre-fix transport):
 //!
 //! | # | scenario                                  | pins |
 //! |---|-------------------------------------------|------|
@@ -16,7 +14,7 @@
 //! | 2 | terminal 500 mid-download                    | `.incomplete` + a resume journal survive on disk for later runs |
 //! | 3 | second CLI run after terminal failure        | run 2 resumes from the journal (no re-request of completed chunks) and finishes byte-exact |
 //! | 4 | server content size changed between runs     | journal is discarded, download restarts from byte 0 (no over-resume) |
-//! | 5 | server ETag changed between runs (same size) | journal is discarded, download restarts from byte 0 (no over-resume) |
+//! | 5 | server ETag/sha changed between runs         | journal is discarded, download restarts from byte 0 (no over-resume) |
 //!
 //! The wire-level truth comes from the mock's [`RangeLog`]: every
 //! range-bearing request is recorded at arrival, so a restart-from-zero

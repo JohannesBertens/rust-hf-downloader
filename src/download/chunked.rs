@@ -649,6 +649,19 @@ async fn download_chunk_with_progress(
     while let Some(item) = stream.next().await {
         let bytes = item?;
 
+        // Over-delivery cap (fix review): a body longer than the
+        // requested range would write past `stop` into the NEXT chunk's
+        // byte territory — the corruption mirror of the short-stream
+        // hole below. Fail instead of silently clobbering a sibling.
+        if chunk_downloaded + bytes.len() as u64 > chunk_total {
+            return Err(format!(
+                "chunk {} over-delivery: {} bytes exceed the requested range",
+                chunk_id,
+                bytes.len()
+            )
+            .into());
+        }
+
         // Rate limiting: acquire tokens before writing
         if DOWNLOAD_CONFIG.rate_limit_enabled.load(Ordering::Relaxed) {
             RATE_LIMITER.acquire(bytes.len()).await?;
@@ -695,24 +708,25 @@ async fn download_chunk_with_progress(
             };
             drop(last_update_global);
 
-            let mut prog = progress.lock().await;
-            if let Some(p) = prog.as_mut() {
-                if let Some(chunk) = p.chunks.iter_mut().find(|c| c.chunk_id == chunk_id) {
-                    chunk.downloaded = chunk_downloaded;
-                    chunk.speed_mbps = chunk_speed_mbps;
-                }
+            {
+                let mut prog = progress.lock().await;
+                if let Some(p) = prog.as_mut() {
+                    if let Some(chunk) = p.chunks.iter_mut().find(|c| c.chunk_id == chunk_id) {
+                        chunk.downloaded = chunk_downloaded;
+                        chunk.speed_mbps = chunk_speed_mbps;
+                    }
 
-                // Update total speed and downloaded if calculated
-                if let Some((speed, total)) = total_speed_mbps {
-                    p.speed_mbps = speed;
-                    p.downloaded = total;
+                    // Update total speed and downloaded if calculated
+                    if let Some((speed, total)) = total_speed_mbps {
+                        p.speed_mbps = speed;
+                        p.downloaded = total;
+                    }
                 }
-            }
+            } // progress guard released BEFORE journaling (fix-review
+              // finding, unanimous): the journal mutex is a terminal leaf
+              // and its sync write must never run under (and so stall
+              // renders waiting on) the progress lock.
 
-            // Journal the current offset (coalesced by the writer).
-            // Called OUTSIDE the progress-lock scope: the journal mutex
-            // is a terminal leaf and its sync write must not stall
-            // renders waiting on the progress lock.
             journal.record(chunk_id, chunk_downloaded);
 
             last_update = now;
@@ -1090,6 +1104,141 @@ mod resume_worker_tests {
             knobs.seen.lock().unwrap().last().unwrap(),
             "bytes=1024-2047"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_range_ignoring_200_response() {
+        // A server that answers a Range request with 200 + the FULL body
+        // would have its bytes written at the seek offset — silent
+        // corruption. The worker must fail with a clear error instead
+        // (fix-review finding: pin the 206-assert branch; note this is a
+        // deliberate capability change — range-incapable servers are no
+        // longer supported by the chunked transport; HF always honors
+        // Range).
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Response, Server, StatusCode};
+
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let make_service = make_service_fn(move |_| async move {
+            Ok::<_, hyper::Error>(service_fn(move |_req| async move {
+                Ok::<Response<Body>, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(vec![0u8; 3000]))
+                        .unwrap(),
+                )
+            }))
+        });
+        let server = Server::bind(&addr).serve(make_service);
+        let url = format!("http://{}/a/b/resolve/main/model.gguf", server.local_addr());
+        tokio::spawn(server);
+
+        let dir = std::env::temp_dir().join(format!("rhd-200-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let incomplete = dir.join("model.gguf.incomplete");
+        std::fs::write(&incomplete, vec![0u8; 3000]).unwrap();
+
+        let jpath = journal_path(&incomplete);
+        let journal = Arc::new(JournalWriter::new(
+            jpath.clone(),
+            ResumeJournal::fresh(&url, None, 3000, 1024, None, None, 3),
+        ));
+
+        let ctx = ChunkContext {
+            client: reqwest::Client::new(),
+            download_url: url,
+            incomplete_path: incomplete.clone(),
+            progress: Arc::new(Mutex::new(None)),
+            progress_downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_update_time: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_downloaded_bytes: Arc::new(Mutex::new(0u64)),
+            journal,
+            chunk_id: 1,
+            start: 1024,
+            stop: 2047,
+            resume_offset: 0,
+            last_update: std::time::Instant::now(),
+            last_bytes: 0,
+        };
+
+        let err = download_chunk_with_progress(ctx)
+            .await
+            .expect_err("a 200 answer to a Range request must fail the chunk");
+        assert!(
+            err.to_string().contains("ignored Range"),
+            "error should name the ignored Range: {err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_rejects_over_delivery_past_chunk_end() {
+        // Over-delivery mirror of the short-stream hole: a 206 body LONGER
+        // than the requested range would write past `stop` into the next
+        // chunk's territory. The over-delivery cap must fail the chunk
+        // before any write lands (fix-review finding).
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Response, Server, StatusCode};
+
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let make_service = make_service_fn(move |_| {
+            async move {
+                Ok::<_, hyper::Error>(service_fn(move |_req| async move {
+                    // A 206 status with a body LONGER than any requested
+                    // range (3000 bytes to every request).
+                    Ok::<Response<Body>, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::PARTIAL_CONTENT)
+                            .header("content-range", "bytes 1024-2047/3000")
+                            .body(Body::from(vec![7u8; 3000]))
+                            .unwrap(),
+                    )
+                }))
+            }
+        });
+        let server = Server::bind(&addr).serve(make_service);
+        let url = format!("http://{}/a/b/resolve/main/model.gguf", server.local_addr());
+        tokio::spawn(server);
+
+        let dir = std::env::temp_dir().join(format!("rhd-over-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let incomplete = dir.join("model.gguf.incomplete");
+        std::fs::write(&incomplete, vec![0u8; 3000]).unwrap();
+
+        let jpath = journal_path(&incomplete);
+        let journal = Arc::new(JournalWriter::new(
+            jpath.clone(),
+            ResumeJournal::fresh(&url, None, 3000, 1024, None, None, 3),
+        ));
+
+        let ctx = ChunkContext {
+            client: reqwest::Client::new(),
+            download_url: url,
+            incomplete_path: incomplete.clone(),
+            progress: Arc::new(Mutex::new(None)),
+            progress_downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_update_time: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_downloaded_bytes: Arc::new(Mutex::new(0u64)),
+            journal,
+            chunk_id: 1,
+            start: 1024,
+            stop: 2047,
+            resume_offset: 0,
+            last_update: std::time::Instant::now(),
+            last_bytes: 0,
+        };
+
+        let err = download_chunk_with_progress(ctx)
+            .await
+            .expect_err("an over-delivering body must fail the chunk");
+        assert!(
+            err.to_string().contains("over-delivery"),
+            "error should name the over-delivery: {err}"
+        );
+        // Nothing was written (the first stream item already exceeded the
+        // range; the file is untouched).
+        assert_eq!(std::fs::read(&incomplete).unwrap(), vec![0u8; 3000]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

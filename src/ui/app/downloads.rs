@@ -320,18 +320,19 @@ impl App {
             .collect();
 
         for metadata in &self.incomplete_downloads {
-            // Try to delete the actual .incomplete file — and, since the
-            // resume fix (issue #50), the journal sidecar next to it, so
-            // the delete flow leaves no orphan state behind.
+            // Remove the `.incomplete` file — and, since the resume fix
+            // (issue #50), the journal sidecar next to it (always: an
+            // orphan journal must not survive a failed `.incomplete`
+            // removal either), so the delete flow leaves no stale state.
+            // The path helper is the transport's one exported naming
+            // scheme — no magic string here.
             let file_path = PathBuf::from(&metadata.local_path);
             let incomplete_path = PathBuf::from(format!("{}.incomplete", file_path.display()));
-            let journal_path = PathBuf::from(format!("{}.state.json", incomplete_path.display()));
+            let journal_path = crate::download::journal_sidecar_path(&incomplete_path);
+            let _ = tokio::fs::remove_file(&journal_path).await;
 
             match tokio::fs::remove_file(&incomplete_path).await {
-                Ok(_) => {
-                    let _ = tokio::fs::remove_file(&journal_path).await;
-                    deleted += 1;
-                }
+                Ok(_) => deleted += 1,
                 Err(e) => {
                     errors.push(format!("{}: {}", metadata.filename, e));
                 }

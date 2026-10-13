@@ -5,7 +5,7 @@
 //!
 //! # Layout
 //!
-//! This file is a facade over one private submodule (the `engine/`
+//! This file is a facade over two private submodules (the `engine/`
 //! precedent — every `crate::download::X` import keeps compiling
 //! unchanged):
 //!
@@ -13,6 +13,11 @@
 //!   probe/spawn/wait phases, W5.1b), `ChunkContext` +
 //!   `download_chunk_with_progress` (the per-chunk worker), and the
 //!   chunk-size math.
+//! - `journal` — the resume journal (issue #50): the
+//!   `<final>.incomplete.state.json` sidecar and its writer (see that
+//!   module's docs for the validation rules, crash ordering, and the
+//!   terminal-leaf lock discipline); only [`journal_sidecar_path`] is
+//!   exported for outside consumers.
 //!
 //! [`start_download`] itself (with its W5.1a phases
 //! `prepare_download_paths` / `handle_existing_file` /
@@ -24,6 +29,14 @@
 
 mod chunked;
 mod journal;
+
+/// Path of the resume-journal sidecar for a `.incomplete` file path
+/// (issue #50) — the one place the `<path>.state.json` naming scheme is
+/// exported for consumers outside the transport (the TUI delete flow);
+/// everything under [`journal`] stays private to the facade.
+pub fn journal_sidecar_path(incomplete_path: &std::path::Path) -> PathBuf {
+    journal::journal_path(incomplete_path)
+}
 
 use crate::models::{CompleteDownloads, DownloadProgress, FileOutcome, VerificationQueueItem};
 use crate::paths::sanitize::sanitize_path_component;
@@ -306,12 +319,24 @@ async fn handle_existing_file(
     let PreparedDownload {
         url,
         final_path,
-        incomplete_path: _,
+        incomplete_path,
     } = prepared;
 
     // Also check for the complete file - if it exists, queue for verification if enabled
     if !final_path.exists() {
         return None;
+    }
+
+    // The final file is complete: any leftover partial state next to it is
+    // stale (fix-review finding — the pre-#50 prepare-time delete used to
+    // clear it; a full-size `.incomplete` + journal must not leak forever
+    // beside a finished file).
+    if incomplete_path.exists() {
+        let _ = tokio::fs::remove_file(incomplete_path).await;
+    }
+    let stale_journal = journal::journal_path(incomplete_path);
+    if stale_journal.exists() {
+        journal::remove(&stale_journal);
     }
 
     let _ = status_tx.send(format!(

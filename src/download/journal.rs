@@ -69,8 +69,10 @@ pub(super) struct ResumeJournal {
     /// different layout).
     pub chunk_size: u64,
     /// The probe response's ETag, when the server sent one (secondary
-    /// validator — real-CDN ETags may vary per node, so a mismatch here is
-    /// only advisory; the sha256 check is the load-bearing one).
+    /// validator — see `validate`: it is only consulted when the sha256
+    /// rule did not already decide identity; a mismatch discards the
+    /// journal, which is safe but can be spurious on CDNs whose ETags
+    /// vary per node).
     pub etag: Option<String>,
     /// The run's `expected_sha256` (LFS oid), when the tree API advertised
     /// one — the PRIMARY content validator: stable across runs, unlike
@@ -96,9 +98,10 @@ pub(super) fn load(path: &Path) -> Option<ResumeJournal> {
     serde_json::from_str(&text).ok()
 }
 
-/// Atomically persist a journal (same-dir temp + `sync_all` + rename).
-/// Best-effort: IO failures are swallowed by [`JournalWriter::record`]
-/// callers that use it through the writer; direct callers log upstream.
+/// Atomically persist a journal (same-dir temp + `sync_all` + rename,
+/// Windows-retry aware via the [`crate::utils`] twin). Best-effort: IO
+/// failures are swallowed by [`JournalWriter::record`] callers that use
+/// it through the writer; direct callers log upstream.
 pub(super) fn save(path: &Path, journal: &ResumeJournal) -> std::io::Result<()> {
     let body = serde_json::to_vec_pretty(journal)
         .map_err(|e| std::io::Error::other(format!("journal serialize: {e}")))?;
@@ -109,12 +112,14 @@ pub(super) fn save(path: &Path, journal: &ResumeJournal) -> std::io::Result<()> 
         // visible (power-loss window shrunk to metadata-only).
         let _ = file.sync_all();
     }
-    std::fs::rename(&tmp, path)
+    crate::utils::atomic_rename_with_retry(&tmp, path, 4, std::time::Duration::from_millis(50))
 }
 
-/// Best-effort journal delete (missing file is fine).
+/// Best-effort journal delete (missing file is fine), including any
+/// leftover `.tmp` from a save interrupted by a crash.
 pub(super) fn remove(path: &Path) {
     let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(PathBuf::from(format!("{}.tmp", path.display())));
 }
 
 impl ResumeJournal {
@@ -184,17 +189,28 @@ impl ResumeJournal {
             // progress). Callers treat this as "restart fresh".
             None => return false,
         }
-        // Primary content validator: the stable LFS oid, when both sides
-        // have one.
-        if let (Some(journaled), Some(current)) = (&self.sha256, sha256) {
-            if journaled != current {
-                return false;
+        // Primary content validator: the stable LFS oid. When BOTH sides
+        // have one, a match PROVES the content is identical — and an ETag
+        // difference is then provably irrelevant (CDN-per-node ETags), so
+        // the etag rule is skipped entirely in that case.
+        let sha256_proved = match (&self.sha256, sha256) {
+            (Some(journaled), Some(current)) => {
+                if journaled != current {
+                    return false;
+                }
+                true
             }
-        }
-        // Secondary, best-effort: ETag when both sides have one.
-        if let (Some(journaled), Some(current)) = (&self.etag, etag) {
-            if journaled != current {
-                return false;
+            _ => false,
+        };
+        // Secondary content validator, only when sha256 did not decide:
+        // best-effort (a mismatch discards — fail-safe direction, but can
+        // be spurious on varying-ETag CDNs; only reachable when at least
+        // one side lacks the LFS oid).
+        if !sha256_proved {
+            if let (Some(journaled), Some(current)) = (&self.etag, etag) {
+                if journaled != current {
+                    return false;
+                }
             }
         }
         true
@@ -235,6 +251,11 @@ impl JournalWriter {
     /// record; otherwise at most once per [`FLUSH_INTERVAL`].
     pub(super) fn record(&self, chunk_id: usize, downloaded: u64) {
         let mut inner = self.lock_inner();
+        // Bounds first (fix-review NIT): an out-of-range id must take the
+        // early return, never reach chunk_len's layout math.
+        if chunk_id >= inner.journal.chunk_offsets.len() {
+            return;
+        }
         let completed = downloaded >= inner.journal.chunk_len(chunk_id);
         if let Some(offset) = inner.journal.chunk_offsets.get_mut(chunk_id) {
             // Monotonic: a late zombie record (a task aborted inside a
@@ -383,13 +404,42 @@ mod journal_tests {
     }
 
     #[test]
+    fn validate_skips_etag_when_sha256_proves_identity() {
+        // Both sides carry the SAME LFS oid (content provably identical)
+        // but different ETags (CDN-per-node variance): the journal must
+        // still be trusted — the etag rule never runs (fix-review finding:
+        // varying-CDN ETags would otherwise degrade every cross-run resume
+        // to a spurious restart-from-zero).
+        let mut j = journal();
+        j.etag = Some(concat!('"', "etag-cdn-node-a", '"').to_string());
+        assert!(
+            j.validate(
+                "http://x/a/b/resolve/main/model.gguf",
+                10_000,
+                4_000,
+                Some(concat!('"', "etag-cdn-node-b", '"')),
+                Some("cafebabe"),
+                Some(6_000),
+            ),
+            "sha256 match must override an etag difference: {j:?}"
+        );
+    }
+
+    #[test]
     fn validate_etag_absent_on_either_side_falls_back_to_the_rest() {
         // Journal has an etag, the new probe does not (or vice versa): the
         // etag rule is skipped, the other checks govern.
         assert!(journal().validate(url_of(), 10_000, 4_000, None, Some("cafebabe"), Some(6_000)));
         let mut no_etag = journal();
         no_etag.etag = None;
-        assert!(no_etag.validate(url_of(), 10_000, 4_000, Some("\"v9\""), None, Some(6_000)));
+        assert!(no_etag.validate(
+            url_of(),
+            10_000,
+            4_000,
+            Some(concat!('"', "v9", '"')),
+            None,
+            Some(6_000)
+        ));
     }
 
     #[test]
