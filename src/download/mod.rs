@@ -23,6 +23,7 @@
 //! [`ChunkedDownloadParams`]: chunked::ChunkedDownloadParams
 
 mod chunked;
+mod journal;
 
 use crate::models::{CompleteDownloads, DownloadProgress, FileOutcome, VerificationQueueItem};
 use crate::paths::sanitize::sanitize_path_component;
@@ -103,8 +104,8 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
     }
 
     // Phase 3: the retry loop around `download_chunked` (transient-error
-    // retries with `.incomplete` deletion, 401 handling, registry
-    // completion/failure marking).
+    // retries RESUME from the journal — the `.incomplete` file is kept,
+    // issue #50; 401 handling, registry completion/failure marking).
     let outcome = execute_download_with_retry(&ctx, &prepared).await;
 
     // Clear progress when done
@@ -144,11 +145,13 @@ struct PreparedDownload {
 /// Phase 1 of [`start_download`] (W5.1a): validate the filename against
 /// path traversal, create the base/parent directories, canonicalize the
 /// base for the containment check, build the final/`.incomplete` paths,
-/// and delete any stale `.incomplete` from a previous run
-/// (restart-from-beginning semantics). Every `Err` is one of the original
-/// pre-flight `FileOutcome::Failed` early returns, status message
-/// included; no progress state is cleared on this path (historical
-/// behavior).
+/// and decide the fate of a pre-existing partial download (issue #50): a
+/// `.incomplete` with a resume journal is KEPT for `download_chunked` to
+/// validate and resume; one without a journal is deleted
+/// (restart-from-beginning semantics for orphans and foreign files).
+/// Every `Err` is one of the original pre-flight `FileOutcome::Failed`
+/// early returns, status message included; no progress state is cleared
+/// on this path (historical behavior).
 async fn prepare_download_paths(
     ctx: &DownloadCtx<'_>,
     base_path: &std::path::Path,
@@ -225,6 +228,7 @@ async fn prepare_download_paths(
         "{}.incomplete",
         final_path.file_name().unwrap().to_string_lossy()
     ));
+    let journal_path = journal::journal_path(&incomplete_path);
 
     // Create parent directories for the file (in case filename contains subdirectories like "Q4_K_M/file.gguf")
     if let Some(parent) = final_path.parent() {
@@ -249,15 +253,29 @@ async fn prepare_download_paths(
         }
     }
 
-    // Check for incomplete downloads and delete them to restart from beginning
+    // Partial-download handling (issue #50): a `.incomplete` file WITH a
+    // resume journal next to it is kept — `download_chunked` validates
+    // the journal against the freshly probed file and resumes the missing
+    // byte ranges. An `.incomplete` WITHOUT a journal (orphans from older
+    // versions or foreign files) is deleted as before, as is an orphan
+    // journal whose data file is gone (a journal alone is not progress).
     if incomplete_path.exists() {
-        let _ = status_tx.send(format!(
-            "Found incomplete download for {}, restarting from beginning",
-            filename
-        ));
-        if let Err(e) = tokio::fs::remove_file(&incomplete_path).await {
-            let _ = status_tx.send(format!("Warning: Failed to delete incomplete file: {}", e));
+        if journal_path.exists() {
+            let _ = status_tx.send(format!(
+                "Found incomplete download for {}, resuming",
+                filename
+            ));
+        } else {
+            let _ = status_tx.send(format!(
+                "Found incomplete download for {} without a journal, restarting from beginning",
+                filename
+            ));
+            if let Err(e) = tokio::fs::remove_file(&incomplete_path).await {
+                let _ = status_tx.send(format!("Warning: Failed to delete incomplete file: {}", e));
+            }
         }
+    } else if journal_path.exists() {
+        journal::remove(&journal_path);
     }
 
     Ok(PreparedDownload {
@@ -347,11 +365,12 @@ async fn handle_existing_file(
 
 /// Phase 3 of [`start_download`] (W5.1a): the retry loop around
 /// [`download_chunked`]. Transient errors (timeout/connection) consume a
-/// retry and restart from scratch (the `.incomplete` file is deleted);
-/// 401s map to `AuthRequired`; every other terminal error (and retry
-/// exhaustion) deletes the `.incomplete` file and marks the registry
-/// entry failed before returning. All registry marking and temp-file
-/// cleanup lives here so no extracted `?` can skip it.
+/// retry and RESUME from the journal (`download_chunked` re-validates it
+/// against its fresh probe and skips already-downloaded ranges — issue
+/// #50); 401s map to `AuthRequired`; every other terminal error (and
+/// retry exhaustion) PRESERVES the `.incomplete` file + journal for a
+/// later run while marking the registry entry failed. All registry
+/// marking lives here so no extracted `?` can skip it.
 async fn execute_download_with_retry(
     ctx: &DownloadCtx<'_>,
     prepared: &PreparedDownload,
@@ -446,16 +465,15 @@ async fn execute_download_with_retry(
             Err(e) if retries > 0 && is_transient_error(&e) => {
                 retries -= 1;
                 let _ = status_tx.send(format!(
-                    "Download interrupted: {}. Retrying ({} left)...",
+                    "Download interrupted: {}. Retrying ({} left), resuming from previous progress...",
                     e, retries
                 ));
                 let retry_delay = DOWNLOAD_CONFIG.retry_delay_secs.load(Ordering::Relaxed);
                 tokio::time::sleep(tokio::time::Duration::from_secs(retry_delay)).await;
 
-                // Delete incomplete file to restart from beginning
-                if incomplete_path.exists() {
-                    let _ = tokio::fs::remove_file(incomplete_path).await;
-                }
+                // Issue #50: the `.incomplete` file and its journal are
+                // KEPT — the next attempt resumes the missing byte ranges
+                // instead of restarting from byte 0.
                 continue;
             }
             Err(e) => {
@@ -464,10 +482,9 @@ async fn execute_download_with_retry(
                     if reqwest_err.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
                         let _ = status_tx.send(crate::models::auth_status_message(model_id));
 
-                        // Delete incomplete file
-                        if incomplete_path.exists() {
-                            let _ = tokio::fs::remove_file(incomplete_path).await;
-                        }
+                        // Issue #50: keep `.incomplete` + journal — a
+                        // later authenticated run resumes where this one
+                        // was cut off.
 
                         // Update registry with failed state
                         registry::mark_failed(url);
@@ -481,10 +498,9 @@ async fn execute_download_with_retry(
 
                 let _ = status_tx.send(format!("Error: Download failed after retries: {}", e));
 
-                // Delete incomplete file
-                if incomplete_path.exists() {
-                    let _ = tokio::fs::remove_file(incomplete_path).await;
-                }
+                // Issue #50: keep `.incomplete` + journal so a later run
+                // (retry, re-auth, or full re-run) resumes instead of
+                // restarting from byte 0 — the entire point of the issue.
 
                 // Update registry with failed state
                 registry::mark_failed(url);

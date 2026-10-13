@@ -6,6 +6,7 @@
 //! monolithic `download.rs`; every `crate::download::X` path keeps
 //! compiling through the facade re-exports.
 
+use super::journal::{self, JournalWriter, ResumeJournal};
 use super::{DOWNLOAD_CONFIG, RATE_LIMITER};
 use crate::models::{
     ChunkProgress, CompleteDownloads, DownloadMetadata, DownloadProgress, DownloadStatus,
@@ -68,7 +69,7 @@ pub(super) async fn download_chunked(
     // Phase 1: build the client and probe the file size (with the raw
     // fallback). Every early return in this phase fires BEFORE the
     // `.incomplete` file is created, so the extracted `?` skips no cleanup.
-    let (client, total_size, final_url) =
+    let (client, total_size, final_url, etag) =
         probe_file_size(url, filename, hf_token.as_deref(), status_tx).await?;
 
     // Update metadata entry in registry
@@ -94,42 +95,145 @@ pub(super) async fn download_chunked(
     // Initialize progress with chunk tracking
     let num_chunks = total_size.div_ceil(chunk_size as u64) as usize;
 
+    // Resume decision (issue #50): trust an existing journal only when it
+    // validates against THIS attempt's freshly probed identity (url, size,
+    // layout, validators) and the on-disk `.incomplete` covers every byte
+    // it claims. Any mismatch discards both files and restarts fresh —
+    // fail-safe, never partial trust.
+    let jpath = journal::journal_path(incomplete_path);
+    let incomplete_len = tokio::fs::metadata(incomplete_path)
+        .await
+        .map(|m| m.len())
+        .ok();
+    let foreign_file = incomplete_len.is_some_and(|len| len > total_size);
+    let resume_offsets: Option<Vec<u64>> = if foreign_file {
+        None
+    } else {
+        journal::load(&jpath).and_then(|j| {
+            j.validate(
+                url,
+                total_size,
+                chunk_size as u64,
+                etag.as_deref(),
+                expected_sha256.as_deref(),
+                incomplete_len,
+            )
+            .then_some(j.chunk_offsets)
+        })
+    };
+    let (resume, resumed_bytes) = match resume_offsets {
+        Some(offsets) => {
+            let bytes = offsets.iter().sum();
+            let _ = status_tx.send(format!(
+                "Resuming {filename} at {}/{} bytes ({:.0}%)",
+                bytes,
+                total_size,
+                if total_size > 0 {
+                    bytes as f64 / total_size as f64 * 100.0
+                } else {
+                    0.0
+                }
+            ));
+            (offsets, bytes)
+        }
+        None => {
+            // No journal, invalid journal, or foreign data file: restart
+            // from scratch (delete both, recreate below).
+            let _ = tokio::fs::remove_file(incomplete_path).await;
+            journal::remove(&jpath);
+            (vec![0; num_chunks], 0)
+        }
+    };
+
+    // The journal writer every chunk task records into. The header always
+    // carries THIS attempt's validators (etag/sha256 as probed now), with
+    // the resumed offsets grafted in; persisted eagerly so the journal
+    // exists even for runs that fail before any chunk completes.
+    let revision_field = if revision == crate::api::DEFAULT_REVISION {
+        None
+    } else {
+        Some(revision.to_string())
+    };
+    let mut journal_doc = ResumeJournal::fresh(
+        url,
+        revision_field,
+        total_size,
+        chunk_size as u64,
+        etag.clone(),
+        expected_sha256.clone(),
+        num_chunks,
+    );
+    journal_doc.chunk_offsets = resume.clone();
+    let journal_writer = std::sync::Arc::new(JournalWriter::new(jpath.clone(), journal_doc));
+    journal_writer.flush();
+
     {
         let mut prog = progress.lock().await;
         *prog = Some(DownloadProgress {
             model_id: model_id.to_string(),
             filename: filename.to_string(),
-            downloaded: 0,
+            downloaded: resumed_bytes,
             total: total_size,
             speed_mbps: 0.0,
             chunks: Vec::new(), // Chunks will be added dynamically as they start
             verifying: false,
             num_chunks,
-            chunk_completed: vec![false; num_chunks],
+            chunk_completed: resume
+                .iter()
+                .enumerate()
+                .map(|(i, &off)| {
+                    let start = i as u64 * chunk_size as u64;
+                    off == (total_size - start).min(chunk_size as u64)
+                })
+                .collect(),
         });
     }
 
-    // Phase 2a: create the file with proper size
-    let file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(incomplete_path)
-        .await?;
+    // Phase 2a: create the file with proper size. A resumed download
+    // opens WITHOUT truncate (its bytes are the whole point) and only
+    // ever EXTENDS via set_len; a fresh download truncates any leftover.
+    let file = if resumed_bytes > 0 {
+        // Deliberate no-truncate open: the existing bytes ARE the resume
+        // state (issue #50) — clippy's suspicious_open_options fires on
+        // `create` without an explicit truncate decision, which is exactly
+        // the decision being made here.
+        #[allow(clippy::suspicious_open_options)]
+        {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(incomplete_path)
+                .await?
+        }
+    } else {
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(incomplete_path)
+            .await?
+    };
 
-    // Pre-allocate file space (optional, helps with fragmentation)
+    // Pre-allocate file space (optional, helps with fragmentation); on
+    // resume this is a no-op when the file is already full-length.
     file.set_len(total_size).await?;
     drop(file); // Close to allow multiple handles
 
-    // Phase 2b: spawn the chunk tasks (semaphore + shared counters)
+    // Phase 2b: spawn the chunk tasks (semaphore + shared counters).
+    // Completed chunks (journal says every byte is on disk) are skipped
+    // entirely — no request, no write.
     let tasks = spawn_chunk_tasks(
         client,
         final_url.clone(),
         incomplete_path.clone(),
         progress.clone(),
-        num_chunks,
-        chunk_size,
-        total_size,
+        ChunkPlan {
+            num_chunks,
+            chunk_size,
+            total_size,
+            resume_offsets: resume,
+        },
+        journal_writer,
     );
 
     // Phase 2c: wait for all chunks; first failure aborts the rest
@@ -160,6 +264,11 @@ pub(super) async fn download_chunked(
     )
     .await?;
 
+    // Success consumes the journal (a crash between rename and remove
+    // leaves an orphan, cleaned by the next attempt of this file: a
+    // journal without its `.incomplete` is untrusted and deleted).
+    journal::remove(&jpath);
+
     // Prepare verification data if hash is available
     let verification_item = expected_sha256
         .as_ref()
@@ -182,15 +291,18 @@ type ChunkTaskResult = Result<u64, Box<dyn std::error::Error + Send + Sync>>;
 /// client and determine the total file size with a `bytes=0-0` range
 /// probe, falling back to the `/raw/` endpoint when the primary URL
 /// 404s. Returns the client (reused by every chunk task), the parsed
-/// total (from `Content-Range`, falling back to `Content-Length`), and
-/// the URL that will serve the bytes. Every error here predates file
-/// creation — the caller's `?` skips no cleanup.
+/// total (from `Content-Range`, falling back to `Content-Length`), the
+/// URL that will serve the bytes, and the response's `ETag` (when the
+/// server sent one — a secondary resume validator; the LFS oid is the
+/// primary one). Every error here predates file creation — the caller's
+/// `?` skips no cleanup.
 async fn probe_file_size(
     url: &str,
     filename: &str,
     hf_token: Option<&str>,
     status_tx: &mpsc::UnboundedSender<String>,
-) -> Result<(reqwest::Client, u64, String), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(reqwest::Client, u64, String, Option<String>), Box<dyn std::error::Error + Send + Sync>>
+{
     let timeout_secs = DOWNLOAD_CONFIG
         .download_timeout_secs
         .load(Ordering::Relaxed);
@@ -230,6 +342,12 @@ async fn probe_file_size(
         Err(e) => return Err(Box::new(e)),
     };
 
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let total_size = if let Some(content_range) = response.headers().get("content-range") {
         // Parse "bytes 0-0/TOTAL" to get TOTAL
         if let Ok(range_str) = content_range.to_str() {
@@ -250,7 +368,7 @@ async fn probe_file_size(
         return Err("Could not determine file size".into());
     }
 
-    Ok((client, total_size, final_url))
+    Ok((client, total_size, final_url, etag))
 }
 
 /// Phase 2b of [`download_chunked`] (W5.1b): create the shared
@@ -261,14 +379,26 @@ async fn probe_file_size(
 /// verbatim. The tasks live in a [`JoinSet`] (plan M4/B4) so a failure
 /// in one chunk can abort every still-running sibling (see
 /// [`wait_for_chunks`]).
+/// The chunk layout one `download_chunked` run settles on (W5.1b): the
+/// computed chunking of the probed total plus, since issue #50, the
+/// resume offsets per chunk (all-zero for a fresh download; a validated
+/// journal's offsets otherwise). Bundled so `spawn_chunk_tasks` keeps a
+/// small signature.
+struct ChunkPlan {
+    num_chunks: usize,
+    chunk_size: usize,
+    total_size: u64,
+    /// Per-chunk bytes already on disk (length == num_chunks).
+    resume_offsets: Vec<u64>,
+}
+
 fn spawn_chunk_tasks(
     client: reqwest::Client,
     final_url: String,
     incomplete_path: PathBuf,
     progress: Arc<Mutex<Option<DownloadProgress>>>,
-    num_chunks: usize,
-    chunk_size: usize,
-    total_size: u64,
+    plan: ChunkPlan,
+    journal: Arc<JournalWriter>,
 ) -> JoinSet<ChunkTaskResult> {
     // Step 3: Download chunks in parallel
     let max_concurrent = DOWNLOAD_CONFIG.concurrent_threads.load(Ordering::Relaxed);
@@ -282,16 +412,27 @@ fn spawn_chunk_tasks(
     // speed-pacing mutexes stay mutexed — they are compound state (the
     // Instant gates the global recalculation window; the byte marker and
     // the timestamp update must move as one unit, under exclusion).
-    let progress_downloaded = Arc::new(AtomicU64::new(0));
+    // Seeded with the resumed byte count so speeds/HUD reflect only NEW
+    // bytes (plan-review finding: seeding just the counter would count
+    // all resumed bytes as fresh throughput in the first interval).
+    let resumed_bytes: u64 = plan.resume_offsets.iter().sum();
+    let progress_downloaded = Arc::new(AtomicU64::new(resumed_bytes));
     let start_time = std::time::Instant::now();
     let last_update_time = Arc::new(Mutex::new(start_time));
-    let last_downloaded_bytes = Arc::new(Mutex::new(0u64));
+    let last_downloaded_bytes = Arc::new(Mutex::new(resumed_bytes));
 
     let mut tasks: JoinSet<ChunkTaskResult> = JoinSet::new();
 
-    for chunk_id in 0..num_chunks {
-        let start = chunk_id as u64 * chunk_size as u64;
-        let stop = std::cmp::min(start + chunk_size as u64 - 1, total_size - 1);
+    for chunk_id in 0..plan.num_chunks {
+        let start = chunk_id as u64 * plan.chunk_size as u64;
+        let stop = std::cmp::min(start + plan.chunk_size as u64 - 1, plan.total_size - 1);
+        let chunk_total = stop - start + 1;
+        let resume_offset = plan.resume_offsets[chunk_id];
+        if resume_offset >= chunk_total {
+            // Journaled complete (== chunk_total; > was rejected by
+            // validation): skip entirely — no request, no write.
+            continue;
+        }
         let client = client.clone();
         let download_url = final_url.clone();
         let incomplete_path = incomplete_path.clone();
@@ -300,13 +441,13 @@ fn spawn_chunk_tasks(
         let progress = progress.clone();
         let last_update_time = last_update_time.clone();
         let last_downloaded_bytes = last_downloaded_bytes.clone();
+        let journal = journal.clone();
 
         tasks.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
 
-            let chunk_total = stop - start + 1;
-
-            // Add this chunk to active chunks
+            // Add this chunk to active chunks (a resumed chunk enters with
+            // its already-on-disk bytes as its starting progress).
             {
                 let mut prog = progress.lock().await;
                 if let Some(p) = prog.as_mut() {
@@ -314,7 +455,7 @@ fn spawn_chunk_tasks(
                         chunk_id,
                         start,
                         end: stop,
-                        downloaded: 0,
+                        downloaded: resume_offset,
                         total: chunk_total,
                         speed_mbps: 0.0,
                         is_active: true,
@@ -336,11 +477,13 @@ fn spawn_chunk_tasks(
                 progress_downloaded,
                 last_update_time,
                 last_downloaded_bytes,
+                journal,
                 chunk_id,
                 start,
                 stop,
+                resume_offset,
                 last_update: chunk_start_time,
-                last_bytes: 0,
+                last_bytes: resume_offset,
             };
 
             // Download this chunk with progress tracking
@@ -432,9 +575,16 @@ struct ChunkContext {
     /// recalculation per interval window.
     last_update_time: Arc<Mutex<std::time::Instant>>,
     last_downloaded_bytes: Arc<Mutex<u64>>,
+    /// The resume journal writer (terminal-leaf lock; `record` is called
+    /// OUTSIDE every other lock scope — see `journal.rs` module docs).
+    journal: Arc<JournalWriter>,
     chunk_id: usize,
     start: u64,
     stop: u64,
+    /// Bytes of this chunk already on disk from a previous attempt
+    /// (issue #50): the worker seeks to `start + resume_offset` and asks
+    /// the server for `bytes=(start+resume_offset)-stop`.
+    resume_offset: u64,
     /// This chunk's last speed sample (when/what it last reported).
     last_update: std::time::Instant,
     last_bytes: u64,
@@ -451,14 +601,18 @@ async fn download_chunk_with_progress(
         progress_downloaded,
         last_update_time,
         last_downloaded_bytes,
+        journal,
         chunk_id,
         start,
         stop,
+        resume_offset,
         mut last_update,
         mut last_bytes,
     } = ctx;
 
-    let range = format!("bytes={}-{}", start, stop);
+    let chunk_total = stop - start + 1;
+    // Resume: only the missing tail of the chunk is requested.
+    let range = format!("bytes={}-{}", start + resume_offset, stop);
 
     let response = client
         .get(&download_url)
@@ -467,7 +621,18 @@ async fn download_chunk_with_progress(
         .await?
         .error_for_status()?;
 
-    let mut chunk_downloaded = 0u64;
+    // A server that ignores Range and answers 200 with the FULL body
+    // would be written at the seek offset — silent corruption. Partial
+    // Content is the only acceptable answer to a range request.
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(format!(
+            "server ignored Range request (expected 206, got {})",
+            response.status()
+        )
+        .into());
+    }
+
+    let mut chunk_downloaded = resume_offset;
 
     // Open file for writing at offset
     let mut file = tokio::fs::OpenOptions::new()
@@ -475,7 +640,7 @@ async fn download_chunk_with_progress(
         .open(&incomplete_path)
         .await?;
 
-    file.seek(SeekFrom::Start(start)).await?;
+    file.seek(SeekFrom::Start(start + resume_offset)).await?;
 
     // Stream the response and update progress
     use futures::StreamExt;
@@ -544,12 +709,38 @@ async fn download_chunk_with_progress(
                 }
             }
 
+            // Journal the current offset (coalesced by the writer).
+            // Called OUTSIDE the progress-lock scope: the journal mutex
+            // is a terminal leaf and its sync write must not stall
+            // renders waiting on the progress lock.
+            journal.record(chunk_id, chunk_downloaded);
+
             last_update = now;
             last_bytes = chunk_downloaded;
         }
     }
 
+    // Short-stream detection (plan review): a stream that ends cleanly
+    // BEFORE delivering the requested range (clean-FIN mid-body, a
+    // range-clamping server) used to be miscounted as chunk success —
+    // leaving a hole the file-level size check cannot see (set_len made
+    // the file full-length). That is silent corruption; fail the chunk.
+    if chunk_downloaded < chunk_total {
+        return Err(format!(
+            "chunk {} short read: got {} of {} bytes",
+            chunk_id,
+            chunk_downloaded - resume_offset,
+            chunk_total - resume_offset
+        )
+        .into());
+    }
+
+    // Completion is power-loss safe before it is journaled: flush the
+    // data, fsync it, THEN record (data-before-journal keeps the journal
+    // under-reporting only; see `journal.rs` module docs).
     file.flush().await?;
+    file.sync_all().await?;
+    journal.record(chunk_id, chunk_total);
 
     Ok(())
 }
@@ -691,5 +882,214 @@ mod abort_tests {
         wait_for_chunks(tasks)
             .await
             .expect("all-success chunks must join cleanly");
+    }
+}
+
+#[cfg(test)]
+mod resume_worker_tests {
+    //! Issue #50 core-mechanism coverage (plan review finding): a
+    //! NON-ZERO, NON-COMPLETE `resume_offset` driving the worker's seek +
+    //! Range construction + short-stream detection. The e2e suite's 4 KiB
+    //! loopback chunks finish inside the journal's 1 s coalescing window,
+    //! so mid-chunk resume is invisible there; here the worker runs
+    //! against an in-process hyper server (no registry, no engine).
+    //!
+    //! Layout: a 3_000-byte file with chunk size 1024 splits into chunks
+    //! (0,1023) / (1024,2047) / (2048,2999).
+
+    use super::journal::{journal_path, JournalWriter, ResumeJournal};
+    use super::{download_chunk_with_progress, ChunkContext};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// The server-side knobs the tests read/set: every Range header seen,
+    /// and an optional end-clamp for short-serve injection.
+    #[derive(Clone)]
+    struct ServerKnobs {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+        clamp_end: Arc<std::sync::Mutex<Option<u64>>>,
+    }
+
+    /// A one-path Range-aware hyper server over a fixed buffer.
+    async fn spawn_range_server(content: &'static [u8]) -> (String, ServerKnobs) {
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Request, Response, Server, StatusCode};
+
+        let knobs = ServerKnobs {
+            seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+            clamp_end: Arc::new(std::sync::Mutex::new(None)),
+        };
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let knobs_ret = knobs.clone();
+        let make_service = make_service_fn(move |_| {
+            let knobs = knobs.clone();
+            async move {
+                Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
+                    let knobs = knobs.clone();
+                    async move {
+                        let header = req
+                            .headers()
+                            .get("range")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        if let Some(h) = &header {
+                            knobs.seen.lock().unwrap().push(h.clone());
+                        }
+                        let (start, end) = header
+                            .as_deref()
+                            .and_then(|s| s.strip_prefix("bytes="))
+                            .and_then(|s| s.split_once('-'))
+                            .map(|(s, e)| {
+                                (
+                                    s.parse::<u64>().unwrap_or(0),
+                                    e.parse::<u64>().unwrap_or(content.len() as u64 - 1),
+                                )
+                            })
+                            .unwrap_or((0, content.len() as u64 - 1));
+                        // Short-serve injection: clamp `end` when set.
+                        let end = knobs
+                            .clamp_end
+                            .lock()
+                            .unwrap()
+                            .map(|max| end.min(max))
+                            .unwrap_or(end);
+                        let slice = content[start as usize..=(end as usize)].to_vec();
+                        Ok::<Response<Body>, hyper::Error>(
+                            Response::builder()
+                                .status(StatusCode::PARTIAL_CONTENT)
+                                .header(
+                                    "content-range",
+                                    format!("bytes {}-{}/{}", start, end, content.len()),
+                                )
+                                .body(Body::from(slice))
+                                .unwrap(),
+                        )
+                    }
+                }))
+            }
+        });
+        let server = Server::bind(&addr).serve(make_service);
+        let url = format!("http://{}/a/b/resolve/main/model.gguf", server.local_addr());
+        tokio::spawn(server);
+        (url, knobs_ret)
+    }
+
+    fn content_3000() -> &'static [u8] {
+        Box::leak(
+            (0..3000usize)
+                .map(|i| (i % 251) as u8)
+                .collect::<Vec<u8>>()
+                .into_boxed_slice(),
+        )
+    }
+
+    #[tokio::test]
+    async fn worker_resumes_mid_chunk_from_journal_offset() {
+        let content = content_3000();
+        let (url, knobs) = spawn_range_server(content).await;
+
+        // Chunk 1 = (1024, 2047); the journal says 512 of its bytes are
+        // already on disk (bytes 1024..1536 hold valid content).
+        let dir = std::env::temp_dir().join(format!("rhd-resume-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let incomplete = dir.join("model.gguf.incomplete");
+        let mut disk = vec![0u8; 3000];
+        disk[1024..1536].copy_from_slice(&content[1024..1536]);
+        std::fs::write(&incomplete, &disk).unwrap();
+
+        let jpath = journal_path(&incomplete);
+        let journal = Arc::new(JournalWriter::new(
+            jpath.clone(),
+            ResumeJournal::fresh(&url, None, 3000, 1024, None, None, 3),
+        ));
+
+        let ctx = ChunkContext {
+            client: reqwest::Client::new(),
+            download_url: url,
+            incomplete_path: incomplete.clone(),
+            progress: Arc::new(Mutex::new(None)),
+            progress_downloaded: Arc::new(std::sync::atomic::AtomicU64::new(1536)),
+            last_update_time: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_downloaded_bytes: Arc::new(Mutex::new(1536u64)),
+            journal: journal.clone(),
+            chunk_id: 1,
+            start: 1024,
+            stop: 2047,
+            resume_offset: 512,
+            last_update: std::time::Instant::now(),
+            last_bytes: 512,
+        };
+
+        download_chunk_with_progress(ctx)
+            .await
+            .expect("resumed chunk completes");
+
+        // The wire asked for exactly the missing tail of the chunk.
+        assert_eq!(
+            knobs.seen.lock().unwrap().last().unwrap(),
+            "bytes=1536-2047"
+        );
+        // The file now holds the full chunk-1 bytes; everything else is
+        // untouched (chunk 0/2 are not this worker's business).
+        let after = std::fs::read(&incomplete).unwrap();
+        assert_eq!(&after[1024..2048], &content[1024..2048]);
+        assert_eq!(&after[0..1024], &[0u8; 1024]);
+        // The journal recorded the chunk complete.
+        assert_eq!(
+            super::journal::load(&jpath).unwrap().chunk_offsets,
+            vec![0, 1024, 0]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_errors_on_short_stream_instead_of_faking_success() {
+        let content = content_3000();
+        let (url, knobs) = spawn_range_server(content).await;
+
+        let dir = std::env::temp_dir().join(format!("rhd-short-worker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let incomplete = dir.join("model.gguf.incomplete");
+        std::fs::write(&incomplete, vec![0u8; 3000]).unwrap();
+
+        // Serve only through byte 1800 (clamped end): a clean-FIN short
+        // body the old worker miscounted as chunk success.
+        *knobs.clamp_end.lock().unwrap() = Some(1800);
+
+        let jpath = journal_path(&incomplete);
+        let journal = Arc::new(JournalWriter::new(
+            jpath.clone(),
+            ResumeJournal::fresh(&url, None, 3000, 1024, None, None, 3),
+        ));
+
+        let ctx = ChunkContext {
+            client: reqwest::Client::new(),
+            download_url: url,
+            incomplete_path: incomplete.clone(),
+            progress: Arc::new(Mutex::new(None)),
+            progress_downloaded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_update_time: Arc::new(Mutex::new(std::time::Instant::now())),
+            last_downloaded_bytes: Arc::new(Mutex::new(0u64)),
+            journal,
+            chunk_id: 1,
+            start: 1024,
+            stop: 2047,
+            resume_offset: 0,
+            last_update: std::time::Instant::now(),
+            last_bytes: 0,
+        };
+
+        let err = download_chunk_with_progress(ctx)
+            .await
+            .expect_err("short stream must fail the chunk");
+        assert!(
+            err.to_string().contains("short read"),
+            "error should name the short read: {err}"
+        );
+        assert_eq!(
+            knobs.seen.lock().unwrap().last().unwrap(),
+            "bytes=1024-2047"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

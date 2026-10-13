@@ -31,11 +31,9 @@ mod common;
 
 use common::{
     assert_exit_code, assert_file_content, fixture_bytes, json_lines, sha256_hex,
-    spawn_mock_observed, FileEntry, MockRepo, RangeLog, RangeReq, RangeScript, RangeStall,
-    TestEnv,
+    spawn_mock_observed, FileEntry, MockRepo, RangeLog, RangeReq, RangeScript, RangeStall, TestEnv,
 };
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,17 +65,8 @@ fn chunk_len(i: u64) -> u64 {
 fn read_journal(env: &TestEnv) -> serde_json::Value {
     let text = std::fs::read_to_string(journal_path(env))
         .unwrap_or_else(|e| panic!("journal should exist after a mid-download failure: {e}"));
-    serde_json::from_str(&text).unwrap_or_else(|e| panic!("journal is not valid JSON ({e}): {text}"))
-}
-
-/// Chunk requests (non-probe) from the log.
-fn chunk_requests(log: &RangeLog) -> Vec<RangeReq> {
-    log.lock()
-        .unwrap()
-        .iter()
-        .filter(|r| !(r.start == 0 && r.end == 0))
-        .cloned()
-        .collect()
+    serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("journal is not valid JSON ({e}): {text}"))
 }
 
 /// Non-probe chunk requests belonging to the given CLI run. A run starts
@@ -153,9 +142,7 @@ async fn inrun_transient_retry_resumes_instead_of_restarting() {
     let env = TestEnv::new(&endpoint);
     env.set("concurrent_threads", "2");
     env.set("download_timeout_secs", "1");
-    let (code, stdout, stderr) = env
-        .run(&["download", "a/b", "--file", "model.gguf"])
-        .await;
+    let (code, stdout, stderr) = env.run(&["download", "a/b", "--file", "model.gguf"]).await;
     assert_exit_code(code, 0, &stdout, &stderr);
 
     // The recovered download is byte-exact and verified.
@@ -318,9 +305,7 @@ async fn second_run_resumes_from_journal_and_completes() {
     );
 
     // Run 2: succeeds against the same server.
-    let (code, stdout, stderr) = env
-        .run(&["download", "a/b", "--file", "model.gguf"])
-        .await;
+    let (code, stdout, stderr) = env.run(&["download", "a/b", "--file", "model.gguf"]).await;
     assert_exit_code(code, 0, &stdout, &stderr);
     assert!(
         stderr.contains("✓ verified: model.gguf"),
@@ -360,7 +345,8 @@ async fn server_size_change_discards_journal_and_restarts() {
         seen: std::sync::atomic::AtomicU64::new(0),
     };
     repo.range_scripts = vec![Arc::new(script)];
-    let override_cell: Arc<std::sync::Mutex<Option<FileEntry>>> = Arc::new(std::sync::Mutex::new(None));
+    let override_cell: Arc<std::sync::Mutex<Option<FileEntry>>> =
+        Arc::new(std::sync::Mutex::new(None));
     repo.content_override = Some(override_cell.clone());
     let (endpoint, log) = spawn_mock_observed(repo).await;
 
@@ -384,9 +370,7 @@ async fn server_size_change_discards_journal_and_restarts() {
         content: new_content.clone(),
     });
 
-    let (code, stdout, stderr) = env
-        .run(&["download", "a/b", "--file", "model.gguf"])
-        .await;
+    let (code, stdout, stderr) = env.run(&["download", "a/b", "--file", "model.gguf"]).await;
     assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(&final_path(&env), &new_content);
 
@@ -413,7 +397,8 @@ async fn server_etag_change_discards_journal_and_restarts() {
         seen: std::sync::atomic::AtomicU64::new(0),
     };
     repo.range_scripts = vec![Arc::new(script)];
-    let override_cell: Arc<std::sync::Mutex<Option<FileEntry>>> = Arc::new(std::sync::Mutex::new(None));
+    let override_cell: Arc<std::sync::Mutex<Option<FileEntry>>> =
+        Arc::new(std::sync::Mutex::new(None));
     repo.content_override = Some(override_cell.clone());
     let (endpoint, log) = spawn_mock_observed(repo).await;
 
@@ -438,9 +423,7 @@ async fn server_etag_change_discards_journal_and_restarts() {
         content: new_content.clone(),
     });
 
-    let (code, stdout, stderr) = env
-        .run(&["download", "a/b", "--file", "model.gguf"])
-        .await;
+    let (code, stdout, stderr) = env.run(&["download", "a/b", "--file", "model.gguf"]).await;
     assert_exit_code(code, 0, &stdout, &stderr);
     assert_file_content(&final_path(&env), &new_content);
 

@@ -10,28 +10,25 @@
 //! | scenario                            | mechanism                                    | test |
 //! |-------------------------------------|----------------------------------------------|------|
 //! | 500 mid-chunk (probe OK, chunks 500)| `MockRepo::fail_status_after_first_range`    | `server_500_mid_download_fails_and_marks_registry` |
-//! | size mismatch (advertised LFS size != served bytes) | `FileEntry::advertised_size` (probe Content-Range lies; tail ranges 416) | `advertised_size_mismatch_fails_on_tail_chunk_416` |
+//! | size mismatch (advertised LFS size != served bytes) | `FileEntry::advertised_size` (probe Content-Range lies; tail ranges 416 / straddling ranges short) | `advertised_size_mismatch_fails_on_tail_chunk_416` |
 //! | timeout then terminal 500 (exact attempts) | `sleep_once` + `MockRepo::range_scripts` counter | `timeout_then_terminal_500_attempts_exactly_max_retries_plus_one` |
 //! | timeout then success (retry recovers) | `sleep_once` | `timeout_then_success_retries_and_exits_ok` |
-//! | 416 on resume (wrong If-Range/offset) | —                                          | GAP — see below |
+//! | resume of every flavor (in-run retry, cross-run, server-change discard) | journal + `RangeLog` | `tests/resume.rs` (issue #50 suite) |
 //!
-//! GAP (416 on resume): the transport has NO resume path —
-//! `start_download` deletes any existing `.incomplete` file and always
-//! restarts from byte 0, and no `If-Range` header is ever sent. A
-//! wrong-offset resume request is therefore not constructible against
-//! this codebase (there is no client-side state to be wrong). The
-//! nearest buildable cousin — the server answering 416 to a chunk range
-//! request — IS pinned by the size-mismatch test above (tail chunks
-//! beyond the served length receive real 416 responses) and flows through
-//! the identical `error_for_status()?` → non-transient → `mark_failed`
-//! path as any other status error.
+//! Note (issue #50): the transport RESUMES from the `.incomplete` file +
+//! its journal across transient retries, terminal failures and fresh
+//! runs — mid-download failures now PRESERVE both files on disk (pinned
+//! here and in `tests/resume.rs`). The former "416 on resume" GAP is
+//! closed by construction: resume state exists, is validated against the
+//! fresh probe, and short/416 responses to resumed ranges fail the
+//! chunk (the worker asserts 206 + full delivery).
 //!
-//! Expected behavior pinned (today's, both scenarios): a non-transient
-//! HTTP status error aborts the retry loop without retrying
-//! (`is_transient_error` only passes timeouts/connection errors), the
-//! `.incomplete` file is deleted, `registry::mark_failed` leaves the
-//! entry `Incomplete` with `downloaded_size = 0`, and the CLI exits
-//! `EXIT_FAILURE` (1) with a `download_failed` error event.
+//! Expected behavior pinned: a non-transient HTTP status error aborts the
+//! retry loop without retrying (`is_transient_error` only passes
+//! timeouts/connection errors), the `.incomplete` file + journal are kept
+//! for resume, `registry::mark_failed` leaves the entry `Incomplete` with
+//! `downloaded_size = 0`, and the CLI exits `EXIT_FAILURE` (1) with a
+//! `download_failed` error event.
 
 mod common;
 
@@ -103,10 +100,18 @@ async fn server_500_mid_download_fails_and_marks_registry() {
         registry
     );
 
-    // Neither the final file nor a leftover .incomplete exists
+    // Issue #50 contract: the partial download SURVIVES the terminal
+    // failure for a later resume (registry semantics unchanged above).
     let models = env.models_dir().join("a/b");
     assert!(!models.join("model.gguf").exists());
-    assert!(!models.join("model.gguf.incomplete").exists());
+    assert!(
+        models.join("model.gguf.incomplete").exists(),
+        ".incomplete is kept for resume after a terminal failure"
+    );
+    assert!(
+        models.join("model.gguf.incomplete.state.json").exists(),
+        "the resume journal is kept next to the .incomplete file"
+    );
     // The failure event names the file
     let error = event_of(&events, "error", &stdout);
     assert!(
@@ -177,10 +182,12 @@ async fn advertised_size_mismatch_fails_on_tail_chunk_416() {
         registry
     );
 
-    // Nothing survives on disk (no final file, .incomplete cleaned up)
+    // Issue #50 contract: nothing COMPLETE exists, but the partial state
+    // (preallocated `.incomplete` + journal) survives for a later resume.
     let models = env.models_dir().join("a/b");
     assert!(!models.join("model.gguf").exists());
-    assert!(!models.join("model.gguf.incomplete").exists());
+    assert!(models.join("model.gguf.incomplete").exists());
+    assert!(models.join("model.gguf.incomplete.state.json").exists());
 }
 
 /// G5a — transient-then-terminal, with the EXACT attempt count read off

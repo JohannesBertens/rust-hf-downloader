@@ -320,12 +320,18 @@ impl App {
             .collect();
 
         for metadata in &self.incomplete_downloads {
-            // Try to delete the actual .incomplete file
+            // Try to delete the actual .incomplete file — and, since the
+            // resume fix (issue #50), the journal sidecar next to it, so
+            // the delete flow leaves no orphan state behind.
             let file_path = PathBuf::from(&metadata.local_path);
             let incomplete_path = PathBuf::from(format!("{}.incomplete", file_path.display()));
+            let journal_path = PathBuf::from(format!("{}.state.json", incomplete_path.display()));
 
             match tokio::fs::remove_file(&incomplete_path).await {
-                Ok(_) => deleted += 1,
+                Ok(_) => {
+                    let _ = tokio::fs::remove_file(&journal_path).await;
+                    deleted += 1;
+                }
                 Err(e) => {
                     errors.push(format!("{}: {}", metadata.filename, e));
                 }
@@ -1170,10 +1176,14 @@ mod tests {
         *app.engine.download_registry.lock().await = crate::registry::read_registry();
         app.incomplete_downloads = vec![selected.clone()];
 
-        // The `.incomplete` file the delete flow removes on disk.
+        // The `.incomplete` file the delete flow removes on disk, plus
+        // its resume journal (issue #50): both must go.
         let incomplete_file =
             std::path::PathBuf::from(format!("{}.incomplete", selected.local_path));
         std::fs::write(&incomplete_file, b"partial").expect("write .incomplete fixture");
+        let journal_file =
+            std::path::PathBuf::from(format!("{}.state.json", incomplete_file.display()));
+        std::fs::write(&journal_file, b"{}").expect("write journal fixture");
 
         app.delete_incomplete_downloads().await;
 
@@ -1181,6 +1191,7 @@ mod tests {
         assert_eq!(*app.status.read(), "Deleted 1 incomplete file(s)");
         assert!(app.incomplete_downloads.is_empty());
         assert!(!incomplete_file.exists(), ".incomplete file removed");
+        assert!(!journal_file.exists(), "resume journal removed");
 
         // Disk: exact TOML golden — only the unselected entry survives.
         let disk_bytes =
