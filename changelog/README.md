@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.16.0] - 2026-10-13
+
+### Version 2.16.0 (2026-10-13)
+- **Rate limiter: zero rate is unlimited, not a panic** (resolves the
+  deferred `rate-limiter-zero-rate` item): with limiting enabled and a
+  rate of `0` MiB/s, every chunk task panicked and each file failed
+  five times over ("chunk task failed: task panicked"). The CLI flag
+  rejected `0`, but the config file did not — `download_rate_limit_mbps
+  = 0` (or a negative value, which casts to 0) with
+  `download_rate_limit_enabled = true` reached the panic, including via
+  a bare `--rate-limit`. A rate of `0` now means **unlimited**, as
+  documented, effective on the very next chunk. Tests 487 → 489.
+
 ## [2.15.0] - 2026-10-13
 
 ### Version 2.15.0 (2026-10-13)
