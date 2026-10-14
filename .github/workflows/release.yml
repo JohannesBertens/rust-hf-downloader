@@ -11,6 +11,12 @@
 #   2. `release` downloads all packaged artifacts, generates SHA256SUMS,
 #      and publishes the GitHub Release with the binaries, checksums, and
 #      the install.sh / install.ps1 one-liner installers attached.
+#   3. `publish-crates-io` publishes the crate to crates.io with
+#      `cargo publish --locked` (CARGO_REGISTRY_TOKEN secret). Guarded by
+#      a crates.io check so a workflow re-run of an already-published tag
+#      is a clean skip instead of a red run — but a genuine publish
+#      failure FAILS the workflow loudly: the step must never be missed
+#      again.
 #
 # Release flow stays as-is: bump Cargo.toml version (+lock), changelog
 # entries, merge PR, push `vX.Y.Z` tag. The tag must point at a commit
@@ -156,3 +162,27 @@ jobs:
             dist/latest.json
             install.sh
             install.ps1
+
+  publish-crates-io:
+    name: Publish crate to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Skip if this version is already on crates.io (re-run)
+        id: published
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if curl -fsSL -A "rust-hf-downloader-release-workflow" \
+              "https://crates.io/api/v1/crates/rust-hf-downloader/$VERSION" -o /dev/null; then
+            echo "$VERSION is already on crates.io — skipping publish"
+            echo "already=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: cargo publish
+        if: steps.published.outputs.already == 'false'
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
