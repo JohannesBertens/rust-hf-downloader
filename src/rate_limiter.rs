@@ -87,6 +87,17 @@ impl RateLimiter {
         loop {
             let mut state = self.state.lock().await;
 
+            // A rate of 0 is the documented "unlimited" spelling
+            // (docs/DEFERRED.md#rate-limiter-zero-rate, resolved): never
+            // wait, never divide by zero. Checked under the lock so a
+            // runtime `set_rate(0)` (a config file with
+            // `download_rate_limit_mbps = 0` and limiting enabled — the
+            // CLI flag validates 0 away, the config path does not) takes
+            // effect on the very next acquire.
+            if state.rate <= 0.0 {
+                return Ok(());
+            }
+
             // Refill tokens based on elapsed time
             let now = Instant::now();
             let elapsed = now.duration_since(state.last_refill).as_secs_f64();
@@ -215,6 +226,57 @@ mod tests {
 
         // Total: 8 MB @ 2 MB/s with 4 MB burst should complete in ~2-4 seconds
         assert!((1.5..=4.5).contains(&elapsed), "Elapsed: {}", elapsed);
+    }
+
+    #[tokio::test]
+    async fn test_zero_rate_is_unlimited() {
+        // The documented contract ("0 = unlimited", see `RateLimiter::new`):
+        // a constructor rate of 0 with limiting enabled must not wait —
+        // and must not hit the old divide-by-zero panic in
+        // `Duration::from_secs_f64(inf)` (docs/DEFERRED.md#rate-limiter-zero-rate).
+        let limiter = RateLimiter::new(0, 2.0);
+        limiter.set_enabled(true);
+
+        let start = Instant::now();
+        limiter.acquire(1_000_000).await.unwrap();
+        let elapsed = start.elapsed().as_secs_f64();
+
+        assert!(
+            elapsed < 0.01,
+            "zero rate must not wait, elapsed: {elapsed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_runtime_zero_rate_is_unlimited() {
+        // The reachable panic path: `download_rate_limit_mbps = 0` (or a
+        // negative value, which casts to 0) in a hand-edited config file
+        // with `download_rate_limit_enabled = true` reaches the limiter as
+        // `set_rate(0)` + enabled — the CLI flag parser rejects 0, the
+        // config path does not. Must behave as unlimited, not panic.
+        let limiter = RateLimiter::new(1_048_576, 2.0);
+        limiter.set_enabled(true);
+        limiter.set_rate(0).await;
+
+        let start = Instant::now();
+        limiter.acquire(1_000_000).await.unwrap();
+        let elapsed = start.elapsed().as_secs_f64();
+
+        assert!(
+            elapsed < 0.01,
+            "runtime zero rate must not wait or panic, elapsed: {elapsed}"
+        );
+
+        // A later positive rate re-enables limiting (tokens refill from
+        // the capped 0 — a small acquire must still succeed quickly).
+        limiter.set_rate(1_048_576).await;
+        let start = Instant::now();
+        limiter.acquire(1024).await.unwrap();
+        let elapsed = start.elapsed().as_secs_f64();
+        assert!(
+            elapsed < 1.0,
+            "small acquire under a re-enabled 1 MiB/s rate must complete quickly, elapsed: {elapsed}"
+        );
     }
 
     #[tokio::test]
