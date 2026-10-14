@@ -139,14 +139,19 @@ base URLs — required knowledge for integration tests and mirror users.
 Check `README.md` for more information.
 
 ### CI & Release Builds (v2.8.0)
-- `.github/workflows/release.yml` fires ONLY on `v*` tag pushes and has two
-  phases: (1) a `build` matrix that compiles + tests every supported target
-  and packages each binary with a STABLE asset name
+- `.github/workflows/release.yml` fires ONLY on `v*` tag pushes and has
+  three phases: (1) a `build` matrix that compiles + tests every supported
+  target and packages each binary with a STABLE asset name
   (`rust-hf-downloader-<target-triple>.tar.gz` / `.zip`); (2) a `release`
   job that generates `SHA256SUMS` and publishes the GitHub Release via
-  `softprops/action-gh-release@v2` with the binaries, checksums, and the
-  one-liner installers (`install.sh`, `install.ps1`) attached. No PR/push
-  CI — zero CI load between releases.
+  `softprops/action-gh-release@v2` with the binaries, checksums, and
+  the one-liner installers (`install.sh`, `install.ps1`) attached; (3) a
+  `publish-crates-io` job (needs `release`) running `cargo publish
+  --locked` with the `CARGO_REGISTRY_TOKEN` repo secret — the crates.io
+  step used to be manual and was missed once (v2.16.0, caught same-day).
+  A workflow re-run of an already-published tag skips cleanly via a
+  crates.io API pre-check; a genuine publish failure fails the workflow.
+  No PR/push CI — zero CI load between releases.
 - Targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (cross,
   gcc-aarch64-linux-gnu linker), `aarch64-apple-darwin`,
   `x86_64-apple-darwin` (cross from the arm64 runner),
