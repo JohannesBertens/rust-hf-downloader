@@ -1,5 +1,7 @@
 # Rust HF Downloader v2.17.0
 
+[![Crates.io](https://img.shields.io/crates/v/rust-hf-downloader.svg)](https://crates.io/crates/rust-hf-downloader)
+
 A Terminal User Interface (TUI) application for searching, browsing, and downloading models from the HuggingFace model hub.
 
 ## Quick Install
@@ -114,7 +116,7 @@ Useful variants:
 ```bash
 BASE=https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.sh
 # pin a specific version
-curl -fsSL $BASE | sh -s -- --version v2.8.0
+curl -fsSL $BASE | sh -s -- --version v2.17.0
 # see what would happen without changing anything
 curl -fsSL $BASE | sh -s -- --dry-run
 # install somewhere else / remove it again
@@ -124,7 +126,7 @@ curl -fsSL $BASE | sh -s -- --uninstall
 
 ```powershell
 # Windows, with options
-& ([scriptblock]::Create((irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1))) -Version v2.8.0
+& ([scriptblock]::Create((irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1))) -Version v2.17.0
 ```
 
 ### Prebuilt binaries (GitHub Releases)
@@ -235,6 +237,10 @@ Run:
 ```bash
 rust-hf-downloader
 ```
+
+Every release pipeline publishes the crate automatically as its final
+job (since v2.17.0), so `cargo install` tracks releases with no
+manual lag.
 
 See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-downloader)
 
@@ -781,6 +787,15 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.17.0] | 2026-10-14 | Small-terminal HUD: strip borrows up to 2 rows from the bottom panels instead of vanishing (full strip at 31 rows), status-bar fallback notice below 30, 1-char speed/ETA clip fix; first fully-automated release incl. crates.io publish |
+| [2.16.0] | 2026-10-13 | Rate limiter: rate `0` = unlimited, not a panic (config-file path); crates.io publish automated as a release job (PR #53) |
+| [2.15.0] | 2026-10-13 | Resumable downloads (#50): `.incomplete` file + resume journal survive network errors, 401s and SIGINT; re-validated mid-chunk resume across all frontends; chunk workers assert 206 + full delivery |
+| [2.14.0] | 2026-10-07 | Architecture M0–M6 (PR #49): registry single-writer + atomic saves, invalid-token warn-not-fail, engine DAG (`VerificationHub`), docs truth floor; tree-fetch/chunk-abort/multipart fixes |
+| [2.13.2] | 2026-10-05 | Readability wave complete (PRs #43–47): shared engine facade + sealed `EnqueuePolicy`, module splits, typed registry ops — zero behavior change, byte-pinned; Windows CI green |
+| [2.13.1] | 2026-10-05 | `cli.rs` god-file split into `src/cli/`; `--help` double-default fix; plain-progress heartbeat covered by tests |
+| [2.13.0] | 2026-10-05 | `--progress <MODE>` for `download`/`hf-cache sync`: `plain` tty-independent progress lines + verification heartbeat for docker/CI logs |
+| [2.12.0] | 2026-10-05 | Aggregate multi-file progress line (human mode) + optional `overall` object in `--json` progress events (additive schema) |
+| [2.11.0] | 2026-10-05 | `hf-cache` subcommand: `sync` writes the real HuggingFace hub cache (`blobs`/`snapshots`/`refs`, staging→publish, `--for vllm`), `path` for scripts; k8s/docker recipes |
 | [2.10.0] | 2026-09-28 | `update` subcommand: self-update with SHA256 verification and atomic swap (`latest.json` manifest, `RHD_UPDATE_BASE` mirrors); TUI version badge; docs audit |
 | [2.9.0] | 2026-09-28 | Installers take over `cargo install` copies in `~/.cargo/bin` (in-place upgrade + `cargo uninstall` handoff); cargo-binstall bin convention; shadow detection |
 | [2.8.0] | 2026-09-28 | GitHub Releases with prebuilt binaries for 5 target triples + `SHA256SUMS`; one-liner installers `install.sh` / `install.ps1` (upgrades in place) |

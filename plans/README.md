@@ -21,6 +21,7 @@ header at the top of the file.
 
 | Plan | Shipped in | Summary |
 |---|---|---|
+| [readme-release-visibility.md](readme-release-visibility.md) | 2026-10-14 (docs-only commit) | Reflect release-pipeline outcomes in README.md: filled the 9-version changelog-table gap (2.11.0→2.17.0), added the missing `changelog/README.md` 2.17.0 entry, crates.io auto-publish note + version badge, pin-example bumps; principle = durable outcomes, not run logs; release-flow checklist line in AGENTS.md prevents recurrence |
 | [self-update.md](self-update.md) | v2.10.0 | `rust-hf-downloader update`: `latest.json` manifest via the rate-limit-free `releases/latest/download` CDN redirect, SHA256 verification, `self_replace` atomic swap, `RHD_UPDATE_BASE` mirror override (TUI phase 2 remains future work) |
 | [add-cli.md](add-cli.md) | v2.3.0 | One-shot `download` subcommand (later joined by `search`); shared `engine.rs` extraction — the anti-drift successor to the v1 headless CLI |
 | [cross-platform-paths.md](cross-platform-paths.md) | v2.6.0 | `paths.rs`: env overrides > portable mode > `dirs` defaults > temp fallback; Windows-safe sanitization |

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.17.0] - 2026-10-14
+
+### Version 2.17.0 (2026-10-14)
+- **Activity HUD borrows rows instead of disappearing** on small
+  terminals: the strip may take up to 2 rows from the bottom panels
+  (12 → 10; never from the toolbar, results list or status bar). The
+  full 4-row HUD fits at 31 terminal rows (was 33), at least the
+  current-file download row shows down to 30 rows, and the full
+  11-row HUD fits at 36 rows (was 40).
+- **New fallback notice**: when the terminal is too short for even the
+  borrowed strip (≤ 29 rows) and download activity exists, the status
+  bar's first line shows
+  `[download active — terminal too small for activity HUD]` (line 1 so
+  a wrapping selection line can never clip it on 80-column terminals).
+- **Fixed a 1-character clip** in the HUD download row: the chunk-map
+  label's two literal gaps were budgeted as one, so the rightmost
+  column lost its final character at common widths (`32.8MB/s` →
+  `32.8MB/`, `~2m41s` → `~2m41`).
+- **Internal**: `render_ui` owns the borrow arithmetic (strip clamped
+  to `height − 27`, hidden below a 3-row strip; `HUD_BORROW_ROWS = 2`
+  leaves the bottom-panels `Constraint` explicitly so the layout
+  split stays exact); `download_hud_line` budgets both literal gaps.
+  Tests 489 → 490 (threshold boundaries re-pinned including the
+  independent `Constraint` re-split; new status-notice test at 100 and
+  80 columns; three snapshot goldens regenerated). First release
+  published to crates.io automatically by the pipeline
+  (`publish-crates-io` job, PR #53).
+
 ## [2.16.0] - 2026-10-13
 
 ### Version 2.16.0 (2026-10-13)

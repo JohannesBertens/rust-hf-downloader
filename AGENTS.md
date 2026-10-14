@@ -173,8 +173,10 @@ Check `README.md` for more information.
   generated with jq from SHA256SUMS) — the manifest the `update`
   subcommand consumes via the same CDN redirect. All 5 triples must be
   present or the release job fails.
-- Release flow: bump Cargo.toml (+lock) → changelog entries → merge PR → push
-  `vX.Y.Z` tag → release with binaries + installers appears.
+- Release flow: bump Cargo.toml (+lock) → changelog entries (release
+  notes file **+** `changelog/README.md` index section **+** README
+  changelog-table row — all three in the release commit) → merge PR →
+  push `vX.Y.Z` tag → release with binaries + installers appears.
 - macOS arm64 builds come from `macos-latest`; Intel macs are covered by a
   cross-compiled `x86_64-apple-darwin` build on the same runner.
 - Gotcha: a tag whose workflow file exists only in the tagged commit (not on
