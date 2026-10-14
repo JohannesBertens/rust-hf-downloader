@@ -643,12 +643,14 @@ fn size_matrix_61x23_models_and_quant() {
 
 #[test]
 fn hud_threshold_boundary_full_and_clamped() {
-    // Replicates the App::draw arithmetic (src/ui/app.rs): the HUD
-    // strip is min(natural height, area.height - 29 reserved
-    // base-layout rows), rendered above the 4-row status bar. This
-    // fixture (one download row, nothing else) has natural height 4,
-    // so 33 rows is the exact boundary where the full 4-row HUD fits
-    // and 32 rows is one below it -> clamped to 3 rows.
+    // Replicates the render_ui arithmetic: the HUD strip is
+    // min(natural height, area.height - 27) — the 29 base-layout rows
+    // minus the 2 rows the HUD may borrow from the bottom panels —
+    // rendered above the 4-row status bar, and hidden when the strip
+    // cannot show one content row (< 3). This fixture (one download
+    // row, nothing else) has natural height 4, so 31 rows is the exact
+    // boundary where the full 4-row HUD fits and 30 rows is one below
+    // it -> clamped to 3 rows (download row, footer clipped).
     let dl = DownloadProgress {
         model_id: "meta-llama/Llama-3.1-8B".to_string(),
         filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
@@ -674,9 +676,14 @@ fn hud_threshold_boundary_full_and_clamped() {
     };
     assert_eq!(activity_hud_height(&data), 4);
 
-    for (label, height) in [("full", 33u16), ("clamped", 32u16)] {
-        let hud_height = activity_hud_height(&data).min(height.saturating_sub(29));
-        assert_eq!(hud_height, height.saturating_sub(29));
+    for (label, height) in [("full", 31u16), ("clamped", 30u16)] {
+        let hud_budget = height.saturating_sub(27);
+        let hud_height = if hud_budget >= 3 {
+            activity_hud_height(&data).min(hud_budget)
+        } else {
+            0
+        };
+        assert_eq!(hud_height, height.saturating_sub(27));
         let mut fixture = UiFixture::with_selection();
         let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
         draw_ui_with_overlay(
@@ -703,8 +710,9 @@ fn hud_strip_rect_threshold_agreement() {
     // manual math (base_layout_rows 29; y = height - 4 - hud_height) and
     // render_ui's Constraint list implied the same rect. render_ui now owns
     // the layout and returns the strip rect; this test pins that rect
-    // against the historical formula at the visibility threshold (natural
-    // height 4 fixture -> boundary at 29 + 4 = 33 rows), proving agreement
+    // against the current formula at the visibility threshold (natural
+    // height 4 fixture -> boundary at 27 + 4 = 31 rows, the base layout
+    // minus the 2 rows borrowed from the bottom panels), proving agreement
     // by construction.
     let dl = DownloadProgress {
         model_id: "meta-llama/Llama-3.1-8B".to_string(),
@@ -732,14 +740,20 @@ fn hud_strip_rect_threshold_agreement() {
     assert_eq!(activity_hud_height(&data), 4);
 
     for (label, height, expected_rect) in [
-        ("below threshold", 32u16, Rect::new(0, 25, 100, 3)),
-        ("at threshold", 33, Rect::new(0, 25, 100, 4)),
-        ("above threshold", 34, Rect::new(0, 26, 100, 4)),
+        ("clamped", 30u16, Rect::new(0, 23, 100, 3)),
+        ("at threshold", 31, Rect::new(0, 23, 100, 4)),
+        ("above threshold", 32, Rect::new(0, 24, 100, 4)),
     ] {
-        // Pinned formula (the historical App::draw math, kept here as the
-        // single copy): clamp the natural height against the reserved base
-        // rows, then place the strip manually above the 4-row status bar.
-        let hud_height = activity_hud_height(&data).min(height.saturating_sub(29));
+        // Pinned formula (kept here as the single copy): clamp the
+        // natural height against the base layout minus the 2 borrowable
+        // rows, hide below a 3-row strip (2 borders + 1 content row),
+        // then place the strip manually above the 4-row status bar.
+        let hud_budget = height.saturating_sub(27);
+        let hud_height = if hud_budget >= 3 {
+            activity_hud_height(&data).min(hud_budget)
+        } else {
+            0
+        };
         let pinned = Rect::new(0, height - 4 - hud_height, 100, hud_height);
         assert_eq!(
             pinned, expected_rect,
@@ -747,8 +761,9 @@ fn hud_strip_rect_threshold_agreement() {
         );
 
         // render_ui owns the layout since W4.10: it takes the DESIRED
-        // (uncapped) height, clamps it against the base layout itself and
-        // returns the reserved strip rect — which must match the pin.
+        // (uncapped) height, clamps it against the borrow-augmented base
+        // layout itself and returns the reserved strip rect — which must
+        // match the pin.
         let mut fixture = UiFixture::with_selection();
         let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
         let returned = draw_ui_with_overlay(
@@ -765,14 +780,19 @@ fn hud_strip_rect_threshold_agreement() {
         .hud_strip;
         assert_eq!(returned, pinned, "render_ui rect at {label} (h={height})");
 
-        // And an independent re-split of the historical Constraint list
-        // still lands on the same rect (ratatui geometry re-pin).
+        // And an independent re-split of the production Constraint list
+        // (bottom panels shrinked by the borrowed rows) still lands on
+        // the same rect (ratatui geometry re-pin).
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(10),
-                Constraint::Length(12),
+                Constraint::Length(if returned.height > 0 {
+                    12u16.min(height.saturating_sub(3 + 10 + 4 + returned.height))
+                } else {
+                    12
+                }),
                 Constraint::Length(returned.height),
                 Constraint::Length(4),
             ])
@@ -783,3 +803,64 @@ fn hud_strip_rect_threshold_agreement() {
         );
     }
 }
+
+#[test]
+fn hud_hidden_status_bar_carries_notice() {
+    // Terminal too short for even the borrowed HUD strip (29 rows:
+    // budget 2 < 3): the strip is 0-high and the status line carries
+    // the download-active notice, so download info never fully
+    // disappears. At 31 rows the strip renders and the notice is
+    // absent (the threshold snapshots pin that side).
+    let dl = DownloadProgress {
+        model_id: "meta-llama/Llama-3.1-8B".to_string(),
+        filename: "Llama-3.1-8B-Q4_K_M.gguf".to_string(),
+        downloaded: 1_230_465_024,
+        total: 4_921_860_096,
+        speed_mbps: 32.8,
+        chunks: Vec::new(),
+        verifying: false,
+        num_chunks: 8,
+        chunk_completed: vec![true, true, true, false, false, false, false, false],
+    };
+    let progress = Some(dl);
+    let data = ActivityHudData {
+        download_progress: &progress,
+        queue_size: 0,
+        queue_bytes: 0,
+        queue_items: &[],
+        verification_progress: &[],
+        verification_queue_size: 0,
+        verification_queue_bytes: 0,
+        verified_ok: 0,
+        verified_fail: 0,
+    };
+
+    // 80 columns too: the notice is line 1, so the wrapping selection
+    // line can no longer clip it (the original bug — verified invisible
+    // at 80x26-29 before the fix).
+    for width in [100u16, 80] {
+        let mut fixture = UiFixture::with_selection();
+        let mut terminal = Terminal::new(TestBackend::new(width, 29)).unwrap();
+        let out = draw_ui_with_overlay(
+            &mut terminal,
+            &mut fixture,
+            ModelDisplayMode::Gguf,
+            FocusedPane::Models,
+            None,
+            activity_hud_height(&data), // desired > 0, but no room even borrowed
+            "Downloading Llama-3.1-8B-Q4_K_M.gguf",
+            "",
+            |_, _| {},
+        );
+        assert_eq!(out.hud_strip.height, 0, "strip at {width} cols");
+        let buf = terminal.backend().buffer();
+        let rendered: String = (0..buf.area.area() as usize)
+            .map(|i| buf.content()[i].symbol().to_string())
+            .collect();
+        assert!(
+            rendered.contains("download active"),
+            "status notice missing at {width}x29"
+        );
+    }
+}
+

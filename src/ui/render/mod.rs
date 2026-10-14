@@ -145,17 +145,24 @@ pub struct RenderParams<'a> {
     pub status: StatusCtx<'a>,
     /// Activity HUD: DESIRED strip height above the status bar (the
     /// natural, uncapped activity_hud_height; render_ui clamps it against
-    /// the base layout and returns the reserved strip rect — 0 = hidden)
+    /// the base layout — borrowing up to 2 rows from the bottom panels —
+    /// and returns the reserved strip rect; 0 = hidden)
     pub hud_height: u16,
 }
 
 /// Rows the base layout needs besides the HUD strip: 3 toolbar + 10
 /// main content (Min) + 12 bottom panels + 4 status bar. The desired HUD
-/// height is clamped against this budget so it never steals base-layout
-/// rows — W4.10 single-homed here (next to the Constraint list it
-/// guards); it previously lived in `App::draw` as `base_layout_rows = 29`
-/// with a second, manual strip-rect computation.
+/// height is clamped against this budget (minus [`HUD_BORROW_ROWS`]) so
+/// it never steals toolbar/results/status rows — W4.10 single-homed here
+/// (next to the Constraint list it guards); it previously lived in
+/// `App::draw` as `base_layout_rows = 29` with a second, manual
+/// strip-rect computation.
 const BASE_LAYOUT_ROWS: u16 = 3 + 10 + 12 + 4;
+
+/// Rows the HUD may borrow from the bottom panels (12 → floor 10) on
+/// short terminals, so download information stays visible instead of
+/// the strip vanishing below `BASE_LAYOUT_ROWS`.
+const HUD_BORROW_ROWS: u16 = 2;
 
 /// Render the main UI and return the reserved Activity HUD strip rect
 /// plus this frame's mouse hit-rects (see [`RenderOutput`]; zero strip
@@ -193,18 +200,43 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
         filters: Vec::new(),
     };
 
-    // Clamp the desired HUD strip so it never steals rows the base
-    // layout needs (see BASE_LAYOUT_ROWS); the strip rect is chunks[3].
-    let hud_height = hud_height.min(frame.area().height.saturating_sub(BASE_LAYOUT_ROWS));
+    // Clamp the desired HUD strip against the base layout (see
+    // BASE_LAYOUT_ROWS) but let it borrow HUD_BORROW_ROWS rows from the
+    // bottom panels so download activity stays visible on short
+    // terminals; it hides when it cannot show one content row (2 borders
+    // + 1 line), and the status bar then carries a notice instead.
+    let desired_hud = hud_height;
+    let hud_budget = frame
+        .area()
+        .height
+        .saturating_sub(BASE_LAYOUT_ROWS - HUD_BORROW_ROWS);
+    let hud_height = if desired_hud > 0 && hud_budget >= 3 {
+        desired_hud.min(hud_budget)
+    } else {
+        0
+    };
+    // The borrowed rows leave the bottom panels explicitly (never the
+    // toolbar / results / status bar) so the split stays exact and the
+    // layout solver has no deficit to redistribute.
+    let bottom_rows = if hud_height > 0 {
+        12u16.min(
+            frame
+                .area()
+                .height
+                .saturating_sub(BASE_LAYOUT_ROWS - 12 + hud_height),
+        )
+    } else {
+        12
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),          // Filter toolbar
-            Constraint::Min(10),            // Main content (models list)
-            Constraint::Length(12),         // Bottom panels
-            Constraint::Length(hud_height), // Activity HUD (Option 3 matrix)
-            Constraint::Length(4),          // Status bar
+            Constraint::Length(3),           // Filter toolbar
+            Constraint::Min(10),             // Main content (models list)
+            Constraint::Length(bottom_rows), // Bottom panels
+            Constraint::Length(hud_height),  // Activity HUD (Option 3 matrix)
+            Constraint::Length(4),           // Status bar
         ])
         .split(frame.area());
 
@@ -254,8 +286,13 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
         }
     }
 
-    // Status bar with 2 lines: selection_info and status message
-    let line1 = if !selection_info.is_empty() {
+    // Status bar with 2 lines: selection_info and status message. When
+    // the HUD is hidden the download notice takes line 1 (selection info
+    // stays visible in the Results panel) — a long selection line would
+    // wrap and clip the notice off line 2 on narrow terminals.
+    let line1 = if desired_hud > 0 && hud_height == 0 {
+        "[download active — terminal too small for activity HUD]".to_string()
+    } else if !selection_info.is_empty() {
         selection_info.to_string()
     } else if let Some(selected) = list_state.selected() {
         if selected < models.len() {

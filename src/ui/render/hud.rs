@@ -222,7 +222,7 @@ fn download_hud_line(p: &DownloadProgress, w: usize) -> Line<'static> {
         .filter(|c| c.is_active)
         .map(|c| c.chunk_id)
         .collect();
-    let label_w = label.chars().count() + 1; // + leading gap
+    let label_w = label.chars().count() + 2; // both literal gaps around the label
     let mut bar_w = middle;
     let mut map_cells = 0;
     if p.num_chunks > 0 && middle >= 24 + label_w + 4 {
