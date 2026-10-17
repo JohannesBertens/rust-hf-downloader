@@ -90,6 +90,15 @@ before the path is built — so strict `starts_with` on a canonicalized base
 plus component sanitization fully closes the tail; no string-prefix check
 and no rejoin-with-`..`-rejection step is needed.
 
+**How `canonical_base` is derived (rev 3.1, opus N1):** in
+`validate_and_sanitize_path`, `canonical_base` is `canonicalize(nearest_existing_ancestor(base))`
+when `base` does not exist (an existing base is `canonicalize(base)`) — the
+missing tail is **not** re-joined, so the first existing ancestor of the
+final path is the same anchor and strict `starts_with` passes the
+not-yet-created-base case. This is pinned by an existing sanitize test
+(`validate_accepts_not_yet_created_base_directory`) plus a new explicit
+"base absent, parent exists → Ok" assertion if needed.
+
 **1b. `prepare_download_paths` containment is final-parent-only and skips
 symlinked final components** (`src/download/mod.rs`).
 
@@ -130,6 +139,12 @@ Two gaps:
   before any open/mkdir (a symlinked `.incomplete` or journal is never
   treated as resume state). A `NotFound` from `symlink_metadata` means
   "proceed"; any other error fails closed.
+- Dangling intermediate symlink (rev 3.1, opus N2): if
+  `nearest_existing_ancestor` uses `exists()` (which follows links), a
+  dangling `…/model/Q4_K_M` is skipped and the walk passes at `model/`;
+  rejection then relies on `create_dir_all` failing closed on the symlink
+  (`EEXIST`/`is_dir` false). That fail-closed-by-side-effect path is
+  accepted and noted; the deep-subdir test adds a dangling-target variant.
 - No behavior change for non-symlinked paths (first existing ancestor is
   under the base), so no pinned output changes.
 
@@ -263,11 +278,14 @@ download transport's byte behavior.
 | new: all-invalid `finish_enqueue` characterization | `sent == 0` + non-empty `invalid` → the `PathError` stays visible, not the generic failure |
 | new: download/mod.rs `#[cfg(unix)]` deep-subdir symlink | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink outside and `sub` absent → `FileOutcome::Failed` "path traversal detected" |
 | new: download/mod.rs `#[cfg(unix)]` existing symlinked parent | filename `dir/file.gguf` with `…/model/dir` an existing symlink outside → traversal error (preserved current behavior) |
-| new: download/mod.rs `#[cfg(unix)]` symlink → ancestor of base | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink to the temp root (or `/`) → traversal error (strict predicate; the old ancestor clause would pass it) |
-| new: download/mod.rs `#[cfg(unix)]` symlinked final path | `final_path` (or `.incomplete`) itself a symlink → traversal error, never treated as complete/resume |
+| new: download/mod.rs `#[cfg(unix)]` symlink → ancestor of base | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink to the **temp root** (never `/` — rev 3.1, opus N4, so a predicate regression cannot write outside the test sandbox) → traversal error (strict predicate; the old ancestor clause would pass it) |
+| new: download/mod.rs `#[cfg(unix)]` symlinked final path | `final_path` itself a symlink → traversal error, never treated as complete |
+| new: download/mod.rs `#[cfg(unix)]` symlinked `.incomplete` | the `.incomplete` write target itself a symlink → traversal error (its own case, rev 3.1, opus N3 — the real write target, not covered by the final-path case) |
 | new: download/mod.rs `#[cfg(unix)]` symlinked journal sidecar | the resume-journal sidecar (`journal_sidecar_path`) itself a symlink → traversal error (its own test, rev 3.1 — opus P2-b wants the sidecar covered independently) |
+| new: download/mod.rs `#[cfg(unix)]` dangling intermediate symlink | `…/model/Q4_K_M` a dangling symlink → download fails closed (via `create_dir_all`/`is_dir`), no outside write (rev 3.1, opus N2) |
 | new: download/mod.rs `#[cfg(unix)]` normal nested path | `Q4_K_M/sub/file.gguf` with real dirs → `Ok`, no false rejection |
-| new: paths/sanitize `#[cfg(unix)]` symlink → ancestor of base | `validate_and_sanitize_path` rejects a symlinked subdir pointing at `/` or `$HOME` with `TraversalParentEscape` (regression for the strict predicate) |
+| new: paths/sanitize `#[cfg(unix)]` symlink → ancestor of base | `validate_and_sanitize_path` rejects a symlinked subdir pointing at the temp root (or `$HOME`) with `TraversalParentEscape` (regression for the strict predicate; rev 3.1, opus N4: temp root, not `/`) |
+| existing paths/sanitize fresh-base test | `validate_accepts_not_yet_created_base_directory` already pins the not-yet-created-base Ok case under strict `starts_with` (rev 3.1, opus N1) |
 | new: `normalize_engine_options` clamp matrix | each dangerous zero/out-of-range value → safe floor; in-range values unchanged; `min>max` → `max≥min`; `verification_buffer_size = 0` stays 0 |
 | new: `apply_options` with zero-heavy `AppOptions` | atomics read the safe floors (and `…snapshot_round_trips` still green) |
 | new: events/mod.rs `f`-key with `usize::MAX` and `3` | no panic (debug overflow pre-fix catches `usize::MAX`); field wraps into `0..=2`; status set |
