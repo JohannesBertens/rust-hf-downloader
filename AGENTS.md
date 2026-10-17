@@ -128,9 +128,10 @@ them observably identical) and `SendDiscipline`
 population, and rollback collapsed into the three correlated combinations
 that actually occur). A former third knob `InvalidPolicy` was deleted in
 M5/E4: it was read at exactly one site where its value was constant
-(mirror flavors report invalid files and still queue them; the disk
-flavor's validate-first abort is inherent to `register_pending`; no-write
-flavors never validate). User-facing status/error
+(mirror flavors report invalid files and do NOT queue them — audit fix
+1a made the enqueue-time check the one that stops a path-invalid file; the
+disk flavor's validate-first abort is inherent to `register_pending`;
+no-write flavors never validate). User-facing status/error
 strings stay at the call sites (`EnqueueOutcome`). The CLI signals
 completion by dropping `download_tx` (manager join resolves) and then
 waiting for `EngineState::verification_idle()`; per-file results stream over

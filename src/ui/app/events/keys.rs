@@ -71,13 +71,18 @@ impl App {
                 );
             }
             (_, KeyCode::Char('f')) => {
-                // Cycle focused filter field
-                self.focused_filter_field = (self.focused_filter_field + 1) % 3;
+                // Cycle focused filter field. Normalize BEFORE incrementing
+                // (audit fix 3): `(x + 1) % 3` overflowed `usize` in debug
+                // builds for a hostile/glitched index (`usize::MAX + 1`),
+                // while `% 3` first bounds every `usize` to `0..=2`. The
+                // default arm is defensive — a future 4th filter field must
+                // turn into a wrong label, never an `unreachable!()` panic.
+                self.focused_filter_field = (self.focused_filter_field % 3 + 1) % 3;
                 let field_name = match self.focused_filter_field {
                     0 => "Sort",
                     1 => "Min Downloads",
                     2 => "Min Likes",
-                    _ => unreachable!(),
+                    _ => "Filter",
                 };
                 *self.status.write() = format!("Focused filter: {}", field_name);
             }

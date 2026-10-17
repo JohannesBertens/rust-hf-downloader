@@ -239,7 +239,7 @@ pub mod sanitize {
         /// The sanitized final path resolves outside the base directory.
         TraversalFinalEscape,
         /// The first existing ancestor of the final path resolves outside
-        /// the base directory (and is not an ancestor of it).
+        /// the base directory.
         TraversalParentEscape,
     }
 
@@ -333,7 +333,14 @@ pub mod sanitize {
     /// Canonicalized nearest existing ancestor of `path` (path itself excluded).
     /// Used to keep containment checks symlink-consistent when the base
     /// directory does not exist yet (e.g. a first download into ~/models).
-    fn nearest_existing_ancestor(path: &std::path::Path) -> Option<PathBuf> {
+    /// Shared with the write-time containment check in
+    /// `crate::download::prepare_download_paths`, so both sites perform an
+    /// equivalent first-existing-ancestor walk and apply the same strict
+    /// containment rule (audit fix 1b). `validate_and_sanitize_path` reaches
+    /// that ancestor with its own inline `parent.exists()` loop (equivalent:
+    /// a dangling symlink fails `exists()` and `canonicalize()` alike) and
+    /// calls this helper only to anchor a not-yet-created base.
+    pub(crate) fn nearest_existing_ancestor(path: &std::path::Path) -> Option<PathBuf> {
         let mut current = path;
         loop {
             let parent = current.parent()?;
@@ -409,17 +416,25 @@ pub mod sanitize {
             }
         } else {
             // File doesn't exist yet, check parent directories. The first
-            // existing ancestor of the final path must be under the base — or an
-            // *ancestor of* the base, which is the normal first-download case
-            // where the base directory has not been created yet (no symlink can
-            // exist under a nonexistent path, so containment still holds).
+            // existing ancestor of the final path must be STRICTLY under the
+            // canonical base — no "or an ancestor of the base" allowance.
+            // That allowance (rev 3, P0) accepted a symlinked subdirectory
+            // pointing at an ancestor of the base (`…/model/Q4_K_M` → the
+            // temp root or $HOME): the parent canonicalized to an ancestor,
+            // `base.starts_with(ancestor)` held, and the file was written
+            // outside the base. The case the allowance existed for — a
+            // not-yet-created base directory — is already covered by the
+            // strict rule: `canonical_base` is then the base's own nearest
+            // existing ancestor, so the final path's first existing ancestor
+            // starts with it. The tail can never carry `..` or absolute
+            // components (every component passed `sanitize_path_component`
+            // above), so strict containment on a canonicalized base fully
+            // closes the tail.
             let mut check_path = final_path.clone();
             while let Some(parent) = check_path.parent() {
                 if parent.exists() {
                     if let Ok(canonical_parent) = parent.canonicalize() {
-                        if !canonical_parent.starts_with(&canonical_base)
-                            && !canonical_base.starts_with(&canonical_parent)
-                        {
+                        if !canonical_parent.starts_with(&canonical_base) {
                             return Err(PathError::TraversalParentEscape);
                         }
                     }
@@ -521,6 +536,37 @@ pub mod sanitize {
                     .join("dir")
                     .join("x.gguf")
             );
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        /// Rev-3 P0 regression for the STRICT containment predicate: a
+        /// symlinked subdirectory of the model root that points at an
+        /// *ancestor* of the base used to pass the parent walk (the dropped
+        /// `canonical_base.starts_with(canonical_parent)` clause), so the file
+        /// would have been written outside the chosen base. The link target is
+        /// the temp root — never `/` (rev 3.1, opus N4) — so a predicate
+        /// regression cannot write outside the test sandbox.
+        #[cfg(unix)]
+        #[test]
+        fn validate_rejects_symlink_pointing_at_an_ancestor_of_base() {
+            let home =
+                std::env::temp_dir().join(format!("validate-test-symlink-{}", std::process::id()));
+            let base = home.join("models");
+            std::fs::create_dir_all(base.join("a/b")).unwrap();
+            // <base>/a/b/Q4_K_M -> <temp root>, an ancestor of <base>.
+            std::os::unix::fs::symlink(
+                std::env::temp_dir(),
+                base.join("a").join("b").join("Q4_K_M"),
+            )
+            .expect("create symlink to the temp root");
+
+            let result =
+                validate_and_sanitize_path(base.to_str().unwrap(), "a/b", "Q4_K_M/sub/x.gguf");
+            assert!(
+                matches!(result, Err(PathError::TraversalParentEscape)),
+                "symlink to an ancestor of the base accepted: {result:?}"
+            );
+
             let _ = std::fs::remove_dir_all(&home);
         }
 

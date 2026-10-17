@@ -274,3 +274,35 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
   table automatically.
 - **Pin:** `src/ui/app/options_tests.rs` + the options-dialog snapshots.
 - **Provenance:** readability plan §8 item 13.
+
+## download-author-model-symlink-residual
+
+- **Symbol:** `prepare_download_paths`
+- **Status:** deferred
+- **Finding:** three symlink holes around the write-time containment check
+  stay open after the audit fix (plans/fix-audit-1-2-3.md fix 1b), all of
+  them outside the flows the fix hardened.
+  (a) *Planted author/model link.* `prepare_download_paths` receives an
+  already-pre-built `base_path` (`base/author/model`), so its canonical base
+  is derived **through** a symlink at `base/<author>` (or at `base` itself):
+  a link planted there *after* the first download escapes the user's chosen
+  base. The two enqueue-time checks cannot catch it because the flows that
+  re-queue without validating never run them — `tui_resume` re-queues the
+  registry `local_path`s recorded at first enqueue and `hf-cache sync`
+  downloads into a tool-created staging dir (`EnqueuePolicy::NoWrites`).
+  (b) *Check-then-open TOCTOU.* The symlink/ancestor checks are a stat
+  followed by a later open; a link swapped in during that window is followed.
+  Closing it needs `O_NOFOLLOW` (or `openat2` `RESOLVE_BENEATH`) on every
+  write — a dependency/`OpenOptions` change the fix deliberately declined.
+  (c) *`create_dir_all` blast radius.* `create_dir_all(base_path)` runs
+  before the containment check, so an author symlink can already have
+  created directories outside the base by the time the file itself is
+  rejected.
+- **Remedy:** pass the raw user base into `DownloadParams` (an explicit
+  non-goal of the fix) so the write-time check can validate
+  `base/author/model` against the raw base instead of the pre-built one, and
+  reject the author/model link at the source for the two no-write flows;
+  pair it with `O_NOFOLLOW`-style open flags to close (b). Needs its own
+  sign-off (it changes the transport's path contract).
+- **Provenance:** ponytail-audit finding 1 (2026-10-17); residuals recorded
+  during the plan-gate rounds of plans/fix-audit-1-2-3.md (rev 3/3.1).

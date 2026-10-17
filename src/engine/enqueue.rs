@@ -23,6 +23,12 @@ impl EngineState {
     /// knob, and status/error strings stay at the call sites (see
     /// [`EnqueueOutcome`]).
     ///
+    /// Only the files the policy accepts are accounted, mirrored, and sent:
+    /// the Mirror arm keeps every file whose path validation failed out of
+    /// the queue entirely (audit fix 1a — it used to report them and queue
+    /// them anyway), so `sent` counts exactly the files handed to the
+    /// channel and the queue accounting never charges an invalid file.
+    ///
     /// Lock order (AGENTS.md hierarchy): every lock is acquired in its own
     /// scope, never nested — mirror/queue/items acquisitions only ever
     /// happen sequentially, exactly like the inline code this replaces.
@@ -37,11 +43,18 @@ impl EngineState {
         files: &[QueuedDownload],
         policy: &EnqueuePolicy,
     ) -> EnqueueOutcome {
-        let total_bytes: u64 = files.iter().map(|f| f.total_size).sum();
-
         // --- 1. Registry bookkeeping, before any queue work (the order of
         //         every legacy site) ---------------------------------------
-        let (invalid, aborted) = match &policy.registry {
+        // The same pass also decides what is queueable: the Mirror arm keeps
+        // the path-invalid files out of `queueable` (audit fix 1a), the
+        // no-write and disk arms queue everything they were given. Borrowed
+        // references, so no payload is cloned beyond the per-send clone the
+        // inline sites already did.
+        let (invalid, aborted, queueable): (
+            Vec<(String, crate::paths::sanitize::PathError)>,
+            Option<crate::paths::sanitize::PathError>,
+            Vec<&QueuedDownload>,
+        ) = match &policy.registry {
             // The no-write flavor (E4, M5: the two historical variant
             // names `AlreadyRecorded` + `StagingSweep` merged — an
             // equivalence pin proved them observably identical first):
@@ -50,11 +63,11 @@ impl EngineState {
             // mirrors the local cache layout, and `start_download`
             // sanitizes every filename component before writing
             // regardless.
-            RegistryMode::NoWrites => (Vec::new(), None),
+            RegistryMode::NoWrites => (Vec::new(), None, files.iter().collect()),
             RegistryMode::Mirror { base, entry_size } => {
-                // TUI confirm flows: validate each file (an invalid file
-                // is skipped from the registry and reported, but still
-                // queued) and build its entry; the registry write is the
+                // TUI confirm flows: validate each file (an invalid file is
+                // skipped from the registry, reported, and NOT queued) and
+                // build its entry; the registry write is the
                 // shared `registry::upsert_pending` op under the single
                 // writer (M1 — this arm used to clone the MIRROR, append,
                 // and save the clone, the R2 bypass site). The url-dedup
@@ -63,6 +76,7 @@ impl EngineState {
                 // the op's post-write snapshot after the writer released
                 // (no hand-patching under the lock).
                 let mut skipped = Vec::new();
+                let mut queueable = Vec::with_capacity(files.len());
                 let mut entries = Vec::with_capacity(files.len());
                 for file in files {
                     let validated = match crate::paths::sanitize::validate_and_sanitize_path(
@@ -73,8 +87,11 @@ impl EngineState {
                         Ok(path) => Some(path),
                         Err(e) => {
                             // Mirror flavors report the invalid file and
-                            // keep it out of the registry — the queue work
-                            // below still queues it. (The former
+                            // keep it out of the registry AND out of the
+                            // queue (audit fix 1a: the write-time check
+                            // cannot catch an author/model symlink escape
+                            // once the file is in flight, so this is the
+                            // check that has to stop it). (The former
                             // `InvalidPolicy::ReportAndQueue` knob; the
                             // axis was deleted in M5/E4 — this arm was
                             // its only non-redundant user, so the report
@@ -84,6 +101,7 @@ impl EngineState {
                         }
                     };
                     if let Some(validated) = validated {
+                        queueable.push(file);
                         let url =
                             crate::api::resolve_url(&file.model_id, &file.filename, &file.revision);
                         entries.push(DownloadMetadata {
@@ -113,7 +131,7 @@ impl EngineState {
                 }
                 let snapshot = crate::registry::upsert_pending(&entries);
                 *self.download_registry.lock().await = snapshot;
-                (skipped, None)
+                (skipped, None, queueable)
             }
             RegistryMode::Disk { base } => {
                 // CLI download flow: validate every file first — the
@@ -143,6 +161,7 @@ impl EngineState {
                 (
                     Vec::new(),
                     crate::registry::register_pending(&model_id, &revision, &pending, base).err(),
+                    files.iter().collect(),
                 )
             }
         };
@@ -155,6 +174,11 @@ impl EngineState {
             };
         }
 
+        // Queue accounting covers ONLY the queueable files (audit fix 1a):
+        // an invalid mirror file never entered the totals, so nothing has to
+        // be subtracted from them later.
+        let total_bytes: u64 = queueable.iter().map(|f| f.total_size).sum();
+
         // --- 2. Queue accounting, before the sends for every discipline
         //         but resume --------------------------------------------------
         if policy.discipline != SendDiscipline::Resume {
@@ -162,7 +186,7 @@ impl EngineState {
                 .download_queue_totals
                 .lock()
                 .await
-                .add(files.len(), total_bytes);
+                .add(queueable.len(), total_bytes);
         }
 
         // --- 3. HUD mirror + sends, in the discipline's shape ----------------
@@ -171,7 +195,7 @@ impl EngineState {
             SendDiscipline::Interactive => {
                 // TUI confirm flavors: a summary lands only for files that
                 // made it onto the channel.
-                for file in files {
+                for &file in &queueable {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
                         let mut items = self.queue.download_queue_items.lock().await;
@@ -181,7 +205,7 @@ impl EngineState {
             }
             SendDiscipline::Resume => {
                 // Resume flavor: a summary per file regardless of send result.
-                for file in files {
+                for &file in &queueable {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
                     }
@@ -193,11 +217,11 @@ impl EngineState {
                 // CLI flavors: every summary first (one lock), then sends.
                 {
                     let mut items = self.queue.download_queue_items.lock().await;
-                    for file in files {
+                    for &file in &queueable {
                         items.push(queue_item_summary(file));
                     }
                 }
-                for file in files {
+                for &file in &queueable {
                     if tx.send(file.clone()).is_ok() {
                         sent += 1;
                     }
@@ -212,7 +236,7 @@ impl EngineState {
                 .download_queue_totals
                 .lock()
                 .await
-                .add(files.len(), total_bytes);
+                .add(queueable.len(), total_bytes);
         }
 
         // --- 5. Failed-send rollback (Interactive only): remove the
@@ -222,13 +246,13 @@ impl EngineState {
         //         tail-contiguous, as they are for a closed channel). The
         //         HUD mirror needs no rollback: Interactive only ever
         //         pushed for successful sends.
-        if policy.discipline == SendDiscipline::Interactive && sent < files.len() {
-            let failed_bytes: u64 = files.iter().skip(sent).map(|f| f.total_size).sum();
+        if policy.discipline == SendDiscipline::Interactive && sent < queueable.len() {
+            let failed_bytes: u64 = queueable.iter().skip(sent).map(|f| f.total_size).sum();
             self.queue
                 .download_queue_totals
                 .lock()
                 .await
-                .remove(files.len() - sent, failed_bytes);
+                .remove(queueable.len() - sent, failed_bytes);
         }
 
         EnqueueOutcome {
@@ -257,7 +281,7 @@ pub enum RegistryMode {
     /// `hf_cache_sync`) keep their names and document their intent.
     NoWrites,
     /// TUI confirm flows: validate every file (invalid files are skipped
-    /// from the registry, reported — they are still queued), build an
+    /// from the registry, reported — and NOT queued, audit fix 1a), build an
     /// `Incomplete` entry for each valid one, and upsert the entries on
     /// DISK through the `registry::upsert_pending` single-writer op (the
     /// url-dedup predicate runs against the on-disk registry — the source
@@ -326,7 +350,7 @@ pub enum SendDiscipline {
 /// SkipValidation) was deleted in M5/E4 (bounded re-open, adjudicated in
 /// plans/architecture-simplification-review.md §4 D-policy): it was read
 /// in exactly one place, where its value was always the same — the
-/// Mirror arm's report-and-queue behavior is now unconditional, the Disk
+/// Mirror arm's report-and-drop behavior is now unconditional, the Disk
 /// arm's abort is inherent to `register_pending`, and the no-write arm
 /// never validated.
 #[derive(Debug, Clone)]
@@ -343,7 +367,7 @@ impl EnqueuePolicy {
     /// zero-size entries; interactive sends (queue accounted before the
     /// sends, HUD summary per successful send, failed-send tail
     /// rollback); invalid files are skipped from the registry, reported,
-    /// and still queued.
+    /// and NOT queued.
     pub fn tui_quant(base: impl Into<String>) -> Self {
         Self {
             registry: RegistryMode::Mirror {
@@ -407,9 +431,9 @@ pub struct EnqueueOutcome {
     /// Files successfully handed to the download channel.
     pub sent: usize,
     /// Files whose path validation failed during mirror registry
-    /// bookkeeping, in order — skipped from the registry but STILL queued
-    /// and sent. The last entry is what today's call sites left in the
-    /// error field.
+    /// bookkeeping, in order — skipped from the registry AND never queued
+    /// or sent (audit fix 1a). The last entry is what today's call sites
+    /// left in the error field.
     pub invalid: Vec<(String, crate::paths::sanitize::PathError)>,
     /// Set only by [`RegistryMode::Disk`]'s validate-first abort: nothing
     /// was queued or sent; the caller reports the error and bails.
@@ -587,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn enqueue_mirror_dedupes_by_url_and_skips_invalid_files_but_still_queues_them() {
+    async fn enqueue_mirror_dedupes_by_url_and_skips_invalid_files_from_registry_and_queue() {
         use crate::paths::sanitize::PathError;
 
         let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -644,16 +668,22 @@ mod tests {
         assert_eq!(mirror.downloads[1].filename, "ok.bin");
         drop(mirror);
 
-        // The invalid file is skipped from the registry but STILL queued and
-        // sent, and reported for the call site's error string.
-        assert_eq!(outcome.sent, 4);
+        // The invalid file is reported AND dropped: it never entered the
+        // registry, the queue accounting, the HUD mirror, or the download
+        // channel (audit fix 1a — the write-time check cannot catch an
+        // author/model symlink escape once a file is in flight). The three
+        // valid siblings are queued byte-for-byte as before (assert_queued
+        // pins accounting size/bytes, the HUD summaries, and the exact
+        // channel payloads in order — 3 files, no `../evil.bin`), and the
+        // registry dedup semantics are untouched.
+        assert_eq!(outcome.sent, 3);
         assert_eq!(outcome.invalid.len(), 1);
         assert_eq!(outcome.invalid[0].0, "../evil.bin");
         assert!(matches!(
             outcome.invalid[0].1,
             PathError::InvalidFilenameComponent(ref part) if part == ".."
         ));
-        assert_queued(&state, &files).await;
+        assert_queued(&state, &files[..3]).await;
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -800,6 +830,70 @@ mod tests {
         drop(queue);
         assert!(state.queue.download_queue_items.lock().await.is_empty());
         assert_eq!(state.download_registry.lock().await.downloads.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Audit fix 1a and the failed-send rollback together (impl-gate P2
+    /// pin): an Interactive Mirror enqueue holding BOTH an invalid file and
+    /// a closed download channel. The rollback arithmetic runs over
+    /// `queueable` — `remove(queueable.len() - sent, skip(sent) bytes)` —
+    /// because the invalid file was never charged: an accounting that HAD
+    /// charged it (the pre-fix 1a behavior) cannot come back to (0, 0).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn enqueue_mirror_rollback_with_invalid_file_and_closed_channel() {
+        use crate::paths::sanitize::PathError;
+
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("engine-enq-mix-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let (state, tx) = EngineState::new();
+        close_download_channel(&state).await;
+        let files = vec![queued_file("ok.bin", 10), queued_file("../evil.bin", 30)];
+
+        let outcome = state
+            .enqueue(
+                &tx,
+                &files,
+                &EnqueuePolicy::tui_repository(tmp.to_string_lossy().to_string()),
+            )
+            .await;
+
+        // Every send failed, and the invalid file is reported with its
+        // PathError (the caller's per-file error line, never queued).
+        assert_eq!(outcome.sent, 0);
+        assert_eq!(outcome.invalid.len(), 1);
+        assert_eq!(outcome.invalid[0].0, "../evil.bin");
+        assert!(matches!(
+            outcome.invalid[0].1,
+            PathError::InvalidFilenameComponent(ref part) if part == ".."
+        ));
+
+        // Queue accounting returns to (0, 0): the pre-send `add` charged
+        // ONLY the queueable file (1 / 10 bytes) and the rollback removed
+        // exactly that charge (`queueable.len() - sent` = 1, the `skip(sent)`
+        // tail over `queueable` = 10 bytes). The invalid file's 30 bytes were
+        // never charged, so nothing subtracts them.
+        let queue = state.queue.download_queue_totals.lock().await;
+        assert_eq!((queue.size, queue.bytes), (0, 0));
+        drop(queue);
+
+        // HUD mirror empty: the Interactive discipline pushes a summary per
+        // SUCCESSFUL send only, and there was none.
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
+
+        // The registry keeps ONLY the valid file's entry: ok.bin was upserted
+        // (bookkeeping runs first and is never rolled back, as in the
+        // all-valid rollback pin above) and the invalid file never entered.
+        let mirror = state.download_registry.lock().await;
+        assert_eq!(mirror.downloads.len(), 1);
+        assert_eq!(mirror.downloads[0].filename, "ok.bin");
+        assert_eq!(mirror.downloads[0].total_size, 10);
+        drop(mirror);
+        assert_eq!(crate::registry::read_registry().downloads.len(), 1);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
