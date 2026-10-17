@@ -13,17 +13,21 @@ use tui_input::Input;
 
 impl App {
     /// Shared tail of the three confirm flows: surface every filename the
-    /// enqueue transaction rejected (skipped from the registry but still
-    /// queued and sent), then the per-flow success status or the per-flow
-    /// failure error — identical control flow at every call site, only the
-    /// strings differ.
+    /// enqueue transaction rejected (reported and NOT queued), then the
+    /// per-flow success status or the per-flow failure error — identical
+    /// control flow at every call site, only the strings differ.
+    ///
+    /// When nothing was sent AND at least one file was rejected, the last
+    /// per-file `PathError` stays visible instead of the generic failure:
+    /// invalid files are no longer queued (audit fix 1a), so an all-invalid
+    /// batch would otherwise lose the reason it downloaded nothing.
     fn finish_enqueue(&mut self, outcome: &EnqueueOutcome, success: String, failure: &str) {
         for (filename, err) in &outcome.invalid {
             *self.error.write() = Some(format!("Invalid filename '{}': {}", filename, err));
         }
         if outcome.sent > 0 {
             *self.status.write() = success;
-        } else {
+        } else if outcome.invalid.is_empty() {
             *self.error.write() = Some(failure.to_string());
         }
     }
@@ -228,8 +232,8 @@ impl App {
                 // mirror upsert with zero-size entries, queue accounted
                 // before the sends, HUD mirror per successful send,
                 // failed-send tail rollback. Files whose path fails
-                // validation are skipped from the registry — and still
-                // queued, exactly as before.
+                // validation are skipped from the registry AND never
+                // queued (audit fix 1a).
                 let outcome = self
                     .engine
                     .enqueue(
@@ -442,8 +446,8 @@ impl App {
         // Shared enqueue transaction, repository flavor: registry mirror
         // upsert with queued-size entries, queue accounted before the
         // sends, HUD mirror per successful send, failed-send tail rollback.
-        // Files whose path fails validation are skipped from the registry —
-        // and still queued, exactly as before.
+        // Files whose path fails validation are skipped from the registry
+        // AND never queued (audit fix 1a).
         let outcome = self
             .engine
             .enqueue(
@@ -857,6 +861,69 @@ mod tests {
             Some("lfs-sha")
         );
         drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Audit fix 1a pin (all-invalid batch): an invalid file is now
+    /// reported AND dropped, so a batch whose every file is invalid sends
+    /// nothing. The `sent == 0` tail of `finish_enqueue` must then keep the
+    /// last per-file `PathError` visible instead of overwriting it with the
+    /// generic failure line, and nothing may be queued, mirrored, or sent.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn confirm_repository_with_only_invalid_files_keeps_the_path_error() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-confirm-all-invalid-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_with_model_selected(&tmp);
+        let status_before = app.status.read().clone();
+        *app.display_mode.write() = ModelDisplayMode::Standard;
+        app.focused_pane = FocusedPane::Models;
+        *app.model_metadata.write() = Some(ModelMetadata {
+            model_id: "author/model".to_string(),
+            library_name: None,
+            pipeline_tag: None,
+            card_data: None,
+            siblings: vec![
+                // `..` component and a Windows-reserved device stem.
+                test_repo_file("../evil.bin", Some(10), None),
+                test_repo_file("con.gguf", Some(20), None),
+            ],
+            tags: Vec::new(),
+            sha: None,
+        });
+
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ))
+        .await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        // The LAST invalid file's PathError stays visible — the generic
+        // "Failed to start downloads" line must not replace it, and the
+        // status line is untouched.
+        assert_eq!(
+            app.error.read().as_deref(),
+            Some("Invalid filename 'con.gguf': Invalid filename component: con.gguf")
+        );
+        assert_eq!(*app.status.read(), status_before);
+
+        // Nothing queued, mirrored, or sent; the registry stayed empty.
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
