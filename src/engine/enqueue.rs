@@ -834,6 +834,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Audit fix 1a and the failed-send rollback together (impl-gate P2
+    /// pin): an Interactive Mirror enqueue holding BOTH an invalid file and
+    /// a closed download channel. The rollback arithmetic runs over
+    /// `queueable` — `remove(queueable.len() - sent, skip(sent) bytes)` —
+    /// because the invalid file was never charged: an accounting that HAD
+    /// charged it (the pre-fix 1a behavior) cannot come back to (0, 0).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn enqueue_mirror_rollback_with_invalid_file_and_closed_channel() {
+        use crate::paths::sanitize::PathError;
+
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("engine-enq-mix-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let (state, tx) = EngineState::new();
+        close_download_channel(&state).await;
+        let files = vec![queued_file("ok.bin", 10), queued_file("../evil.bin", 30)];
+
+        let outcome = state
+            .enqueue(
+                &tx,
+                &files,
+                &EnqueuePolicy::tui_repository(tmp.to_string_lossy().to_string()),
+            )
+            .await;
+
+        // Every send failed, and the invalid file is reported with its
+        // PathError (the caller's per-file error line, never queued).
+        assert_eq!(outcome.sent, 0);
+        assert_eq!(outcome.invalid.len(), 1);
+        assert_eq!(outcome.invalid[0].0, "../evil.bin");
+        assert!(matches!(
+            outcome.invalid[0].1,
+            PathError::InvalidFilenameComponent(ref part) if part == ".."
+        ));
+
+        // Queue accounting returns to (0, 0): the pre-send `add` charged
+        // ONLY the queueable file (1 / 10 bytes) and the rollback removed
+        // exactly that charge (`queueable.len() - sent` = 1, the `skip(sent)`
+        // tail over `queueable` = 10 bytes). The invalid file's 30 bytes were
+        // never charged, so nothing subtracts them.
+        let queue = state.queue.download_queue_totals.lock().await;
+        assert_eq!((queue.size, queue.bytes), (0, 0));
+        drop(queue);
+
+        // HUD mirror empty: the Interactive discipline pushes a summary per
+        // SUCCESSFUL send only, and there was none.
+        assert!(state.queue.download_queue_items.lock().await.is_empty());
+
+        // The registry keeps ONLY the valid file's entry: ok.bin was upserted
+        // (bookkeeping runs first and is never rolled back, as in the
+        // all-valid rollback pin above) and the invalid file never entered.
+        let mirror = state.download_registry.lock().await;
+        assert_eq!(mirror.downloads.len(), 1);
+        assert_eq!(mirror.downloads[0].filename, "ok.bin");
+        assert_eq!(mirror.downloads[0].total_size, 10);
+        drop(mirror);
+        assert_eq!(crate::registry::read_registry().downloads.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn enqueue_resume_flavor_accounts_after_sends_and_never_rolls_back() {

@@ -680,18 +680,29 @@ mod tests {
             assert_eq!(*app.status.read(), filter_field_label(want));
         }
 
-        // Hostile indices: bounded, never a panic, status always set.
-        for hostile in [3usize, usize::MAX, usize::MAX - 1, usize::MAX / 2] {
+        // Hostile indices: bounded, never a panic — and the status line must
+        // be the CONCRETE label of the field the index normalized to, not a
+        // helper re-deriving the handler's `match`. Hand-derived from
+        // `(hostile % 3 + 1) % 3`, using 2^even ≡ 1 and 2^odd ≡ 2 (mod 3):
+        //   usize::MAX      = 2^64-1 ≡ 0 → (0+1)%3 = 1 → "Min Downloads"
+        //   3               ≡ 0       → (0+1)%3 = 1 → "Min Downloads"
+        //   usize::MAX - 1  = 2^64-2 ≡ 2 → (2+1)%3 = 0 → "Sort"
+        //   usize::MAX / 2  = 2^63-1 ≡ 1 → (1+1)%3 = 2 → "Min Likes"
+        for (hostile, expected_field, expected_label) in [
+            (usize::MAX, 1usize, "Min Downloads"),
+            (3usize, 1, "Min Downloads"),
+            (usize::MAX - 1, 0, "Sort"),
+            (usize::MAX / 2, 2, "Min Likes"),
+        ] {
             app.focused_filter_field = hostile;
             press_filter_field_key(&mut app).await;
-            assert!(
-                app.focused_filter_field < 3,
-                "index {hostile} escaped 0..=2: {}",
-                app.focused_filter_field
+            assert_eq!(
+                app.focused_filter_field, expected_field,
+                "index {hostile} normalized to the wrong field"
             );
             assert_eq!(
                 *app.status.read(),
-                filter_field_label(app.focused_filter_field),
+                format!("Focused filter: {expected_label}"),
                 "status line for hostile index {hostile}"
             );
         }

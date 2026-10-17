@@ -239,7 +239,7 @@ pub mod sanitize {
         /// The sanitized final path resolves outside the base directory.
         TraversalFinalEscape,
         /// The first existing ancestor of the final path resolves outside
-        /// the base directory (and is not an ancestor of it).
+        /// the base directory.
         TraversalParentEscape,
     }
 
@@ -334,9 +334,12 @@ pub mod sanitize {
     /// Used to keep containment checks symlink-consistent when the base
     /// directory does not exist yet (e.g. a first download into ~/models).
     /// Shared with the write-time containment check in
-    /// `crate::download::prepare_download_paths` so both sites walk to the
-    /// SAME first existing ancestor and apply the SAME strict containment
-    /// rule (audit fix 1b).
+    /// `crate::download::prepare_download_paths`, so both sites perform an
+    /// equivalent first-existing-ancestor walk and apply the same strict
+    /// containment rule (audit fix 1b). `validate_and_sanitize_path` reaches
+    /// that ancestor with its own inline `parent.exists()` loop (equivalent:
+    /// a dangling symlink fails `exists()` and `canonicalize()` alike) and
+    /// calls this helper only to anchor a not-yet-created base.
     pub(crate) fn nearest_existing_ancestor(path: &std::path::Path) -> Option<PathBuf> {
         let mut current = path;
         loop {

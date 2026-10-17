@@ -28,6 +28,12 @@ impl App {
         if outcome.sent > 0 {
             *self.status.write() = success;
         } else if outcome.invalid.is_empty() {
+            // Accepted edge (impl-gate P2): when `sent == 0`, `invalid` is
+            // non-empty, AND valid files existed but failed to send (channel
+            // closed), the per-file PathError above stays visible and this
+            // generic failure is suppressed on purpose — the invalid-file
+            // reason is the actionable message, and a send failure only ever
+            // means the download manager is gone. No behavior change.
             *self.error.write() = Some(failure.to_string());
         }
     }

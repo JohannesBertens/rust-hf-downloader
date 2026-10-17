@@ -164,8 +164,10 @@ struct PreparedDownload {
 /// validate and resume; one without a journal is deleted
 /// (restart-from-beginning semantics for orphans and foreign files).
 /// Every `Err` is one of the original pre-flight `FileOutcome::Failed`
-/// early returns, status message included; no progress state is cleared
-/// on this path (historical behavior).
+/// early returns, status message included — the one addition is the
+/// containment check's fail-closed `None` arm, which reuses the traversal
+/// rejection; no progress state is cleared on this path (historical
+/// behavior).
 async fn prepare_download_paths(
     ctx: &DownloadCtx<'_>,
     base_path: &std::path::Path,
@@ -225,11 +227,11 @@ async fn prepare_download_paths(
     let final_path = canonical_base.join(&sanitized_filename);
 
     // Containment check (audit fix 1b): walk to the FIRST EXISTING ancestor
-    // of the final path — the same rule and the same helper
-    // `sanitize::validate_and_sanitize_path` applies. The helper excludes its
-    // argument, so this starts at `final_path.parent()` (the direct-parent
-    // check it replaces) and keeps walking up while the subdirectories do not
-    // exist yet — which is what a *deep* symlinked subdir used to slip past
+    // of the final path — the same rule `sanitize::validate_and_sanitize_path`
+    // applies with its own equivalent walk. The helper excludes its argument,
+    // so this starts at `final_path.parent()` (the direct-parent check it
+    // replaces) and keeps walking up while the subdirectories do not exist
+    // yet — which is what a *deep* symlinked subdir used to slip past
     // (`Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink elsewhere and
     // `sub` never created).
     //
@@ -244,14 +246,27 @@ async fn prepare_download_paths(
     // Residuals this check cannot reach (a pre-built base_path baked through a
     // planted author/model symlink, the check-then-open TOCTOU, the
     // create_dir_all blast radius): docs/DEFERRED.md#download-author-model-symlink-residual.
-    if let Some(canonical_parent) = crate::paths::sanitize::nearest_existing_ancestor(&final_path) {
-        if !canonical_parent.starts_with(&canonical_base) {
-            let _ = status_tx.send("Error: Path traversal detected".to_string());
-            return Err(FileOutcome::Failed {
-                filename: filename.to_string(),
-                reason: "path traversal detected".to_string(),
-            });
-        }
+    //
+    // A `None` from the walk fails closed too (impl-gate P2): the base was
+    // created and canonicalized above, so the walk must reach at least the
+    // base — finding no existing ancestor at all is an anomaly (the base
+    // vanished underneath us, or no component canonicalizes), not a normal
+    // case. An unproven containment is a rejected one, exactly like the
+    // uninspectable paths in the `symlink_metadata` loop below.
+    let Some(canonical_parent) = crate::paths::sanitize::nearest_existing_ancestor(&final_path)
+    else {
+        let _ = status_tx.send("Error: Path traversal detected".to_string());
+        return Err(FileOutcome::Failed {
+            filename: filename.to_string(),
+            reason: "path traversal detected".to_string(),
+        });
+    };
+    if !canonical_parent.starts_with(&canonical_base) {
+        let _ = status_tx.send("Error: Path traversal detected".to_string());
+        return Err(FileOutcome::Failed {
+            filename: filename.to_string(),
+            reason: "path traversal detected".to_string(),
+        });
     }
 
     // Construct file paths

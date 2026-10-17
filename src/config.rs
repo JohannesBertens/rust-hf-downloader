@@ -142,7 +142,10 @@ fn mbps_to_bytes_per_sec(mbps: f64) -> u64 {
 ///
 /// Only the hang/panic floors are enforced — deliberately NOT the UI's
 /// display ranges (threads ≤ 32, chunks 10–100, …), which would silently
-/// rewrite legitimate hand-configured values. `max_retries` and
+/// rewrite legitimate hand-configured values. These are hang/panic floors,
+/// not sanity floors: a `min_chunk_size = max_chunk_size = 1` config is
+/// accepted and merely pathological (billions of 1-byte chunks) by design —
+/// the UI's display ranges are the sanity guard. `max_retries` and
 /// `retry_delay_secs` keep `0` (meaningful), the rate-limit pair keeps `0`
 /// (`0 = unlimited`, see `docs/DEFERRED.md#rate-limiter-zero-rate`), and
 /// `verification_buffer_size` is NOT clamped: `utils::stream_file_digest`
