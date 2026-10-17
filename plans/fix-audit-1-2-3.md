@@ -4,9 +4,12 @@
 
 **Source:** `ponytail-audit` report on this repo (2026-10-17). Three
 findings, ordered by severity, all small and independent. This plan fixes
-all three in one PR. **Rev 2:** incorporates the plan-gate review round —
-four reviewers (claude-opus, gemini38, copilot, opencode). gemini38 and
-copilot BLOCKed; both blocks and all P1/P2 notes are folded in below.
+all three in one PR. **Rev 3:** incorporates the second plan-gate review
+round. Rev 2 folded the four round-1 reviewers (gemini38 + copilot blocks,
+opus + opencode notes); rev 3 folds the fix-confirmation round — opus
+raised a new P0 (the reused containment predicate accepts a symlink to an
+ancestor of the base) plus three P2s, and opencode one P2 wording fix. All
+are folded in below.
 
 | # | Finding | File(s) | Kind |
 |---|---------|---------|------|
@@ -67,6 +70,21 @@ This is a deliberate behavior change to a byte-pinned transaction: the
 `finish_enqueue` doc-comment contracts all flip to "reported, not queued",
 and the matching line in `AGENTS.md` is updated.
 
+**1a also hardens the validation it relies on (rev 3, P0):** the strong
+check itself — `validate_and_sanitize_path` (`src/paths.rs:416-429`) — uses
+the ancestor allowance `base.starts_with(canonical_parent)`, which accepts a
+symlink pointing at an *ancestor* of the base (e.g. `…/model/Q4_K_M` → `/`
+or `$HOME`): `canonical_parent` canonicalizes to `/`, `base.starts_with("/")`
+is true, and the file is written to `/sub/file.gguf` (arbitrary-location
+write). The ancestor clause exists only for the not-yet-created-base case,
+where the first existing ancestor of the final path **is** `canonical_base`
+itself — so a strict `canonical_parent.starts_with(&canonical_base)` covers
+that case too. Change: make `validate_and_sanitize_path` require strict
+`starts_with(canonical_base)` (drop the ancestor clause), pinned by a new
+`sanitize` test "symlink → ancestor of base → `TraversalParentEscape`". All
+existing `paths::sanitize` tests still pass (traced: the not-yet-created-
+base and existing-base cases both satisfy strict `starts_with`).
+
 **1b. `prepare_download_paths` containment is final-parent-only and skips
 symlinked final components** (`src/download/mod.rs`).
 
@@ -88,16 +106,25 @@ Two gaps:
   it in `prepare_download_paths`. **Pass `final_path` itself** — the helper
   excludes its argument and walks the parents, so passing `final_path`
   checks `final_path.parent()` first (preserving the current direct-parent
-  behavior) and then walks up when the parent does not exist yet. Same
-  containment predicate as `validate_and_sanitize_path`:
-  `!canonical.starts_with(base) && !base.starts_with(canonical)` → traversal
-  error. The check runs **before any `create_dir_all`** for the deep
-  subdirs (the existing code already orders it that way — `create_dir_all(base_path)`
-  happens first, then the check, then the deep-parent mkdirs).
-- Reject a symlink at the **final path or the `.incomplete` path** via
+  behavior) and then walks up when the parent does not exist yet.
+- **Strict containment (rev 3, P0):** require `canonical.starts_with(&canonical_base)`
+  only — **drop the `base.starts_with(canonical)` ancestor clause**. In
+  `prepare_download_paths` the `base_path` is always created
+  (`create_dir_all(base_path)`) before the check, so `canonical_base` is a
+  real, existing base; the ancestor clause would then be reachable only by
+  an escape (a symlink to `/` or `$HOME` canonicalizes to an ancestor of the
+  base and `base.starts_with(ancestor)` is true → arbitrary-location
+  write). The legit not-yet-created-base case needs no clause (traced
+  above). The check runs **before any `create_dir_all`** for the deep
+  subdirs (the existing code already orders it that way —
+  `create_dir_all(base_path)` happens first, then the check, then the
+  deep-parent mkdirs).
+- Reject a symlink at the **final path, the `.incomplete` path, or the
+  resume-journal sidecar** (`journal_sidecar_path`) via
   `symlink_metadata(...).file_type().is_symlink()` → same traversal error,
-  before any open/mkdir (a symlinked `.incomplete` is never treated as
-  resume state).
+  before any open/mkdir (a symlinked `.incomplete` or journal is never
+  treated as resume state). A `NotFound` from `symlink_metadata` means
+  "proceed"; any other error fails closed.
 - No behavior change for non-symlinked paths (first existing ancestor is
   under the base), so no pinned output changes.
 
@@ -106,11 +133,14 @@ enqueue-time validation — `tui_resume` (re-queues from registry
 `local_path`s recorded at first enqueue) and `hf-cache sync` (downloads into
 a tool-created staging dir) — a symlink planted at `base/<author>` (or
 `base`) *after* the first download would still be baked into the
-pre-built `base/author/model` `canonical_base` and escape. This is a
-planted-after-the-fact TOCTOU edge on already-validated paths; it is
-recorded in `docs/DEFERRED.md#download-author-model-symlink-residual`
-rather than expanded here (closing it needs passing the raw base into
-`DownloadParams` — an explicit non-goal, see §5).
+pre-built `base/author/model` `canonical_base` and escape. Two further
+residuals are recorded in the same `docs/DEFERRED.md` entry (rev 3): (a) a
+check-then-open TOCTOU — a symlink swapped in between `symlink_metadata`
+and the open still escapes (closing it needs `O_NOFOLLOW`, a dependency
+change the plan avoids); (b) `create_dir_all(base_path)` can itself create
+directories outside the base via an author symlink before the residual
+escape happens. Closing the author/model residual needs passing the raw
+base into `DownloadParams` — an explicit non-goal, see §5.
 
 ### Fix 2 — config tuning values are applied unbounded
 
@@ -151,6 +181,9 @@ prevent hang/panic only and never to silently override legitimate values:
 (`src/utils.rs:34-36`) explicitly supports `buffer_size = 0` as a
 one-byte-at-a-time read mode, so zero is safe and meaningful — clamping it
 would conflict with preserving legitimate values (test: zero stays zero).
+The direct `buffer_size = 0` digest behavior is already pinned by the
+existing `utils::tests::stream_digest_zero_inner_buffer_is_still_exact`
+(rev 3 note — no new test needed there).
 `max_retries`, `retry_delay_secs` and the rate-limit pair are already safe
 (0 is meaningful for the first two; 0 rate = unlimited is the documented
 contract) and are **not** clamped. Deliberately **not** enforcing the UI's
@@ -164,10 +197,11 @@ the display-only table (`ui/app/options.rs`). Every engine consumer
 (semaphores, timeouts, chunk math) reads the `DOWNLOAD_CONFIG` /
 `VERIFICATION_CONFIG` atomics that `apply_options` fills, and both frontends
 call `apply_options` before any download/verification runs (CLI
-`run::load_run_config`; TUI `App::new` → `sync_options_to_config`). So
-normalizing inside `apply_options` reaches every reachable engine path. The
-zero-heavy test asserts the atomics hold the floors — the exact values the
-semaphores/timeouts are built from at use time.
+`run::load_run_config`; TUI `App::run` → `sync_options_to_config`, which
+delegates to `apply_options` — `App::new` itself does not call it, rev 3
+wording fix). So normalizing inside `apply_options` reaches every reachable
+engine path. The zero-heavy test asserts the atomics hold the floors — the
+exact values the semaphores/timeouts are built from at use time.
 
 `normalize_engine_options` is a `pub(crate)` pure fn so the clamp matrix is
 unit-testable directly, and `apply_options_maps_every_field_and_snapshot_round_trips`
@@ -203,9 +237,9 @@ filter):
 |---|---|
 | `src/engine/enqueue.rs` | Mirror arm builds `queueable: Vec<&QueuedDownload>` (valid files only); accounting/sends/HUD/rollback use it; docs on `EnqueueOutcome::invalid`, `RegistryMode::Mirror`, `EnqueuePolicy` constructors; rename + re-pin the still-queues characterization test |
 | `src/ui/app/downloads.rs` | `finish_enqueue`: `sent == 0` branch only writes the generic failure when `invalid.is_empty()`; update the stale "still queued and sent" comments (lines ~16-17 and ~230-232); all-invalid characterization case |
-| `src/paths.rs` | `sanitize::nearest_existing_ancestor` → `pub(crate)` (no body change) |
-| `src/download/mod.rs` | `prepare_download_paths`: reuse `nearest_existing_ancestor(final_path)` with the shared containment predicate; reject symlinked `final_path`/`.incomplete` via `symlink_metadata`; add `#[cfg(unix)]` containment tests |
-| `docs/DEFERRED.md` | new entry `download-author-model-symlink-residual` (anchor `prepare_download_paths`, status deferred) — the planted-after-the-fact author/model symlink residual for `tui_resume`/`hf-cache sync` |
+| `src/paths.rs` | `sanitize::nearest_existing_ancestor` → `pub(crate)` (no body change); `validate_and_sanitize_path` drops the ancestor clause and requires strict `starts_with(canonical_base)`; new `#[cfg(unix)]` symlink-to-ancestor-of-base test (`TraversalParentEscape`) |
+| `src/download/mod.rs` | `prepare_download_paths`: reuse `nearest_existing_ancestor(final_path)` with strict `starts_with(canonical_base)` containment; reject symlinked `final_path`/`.incomplete`/journal sidecar via `symlink_metadata`; add `#[cfg(unix)]` containment tests |
+| `docs/DEFERRED.md` | new entry `download-author-model-symlink-residual` (anchor `prepare_download_paths`, status deferred) — the planted-after-the-fact author/model symlink residual for `tui_resume`/`hf-cache sync`, **plus the check-then-open TOCTOU and the `create_dir_all` blast radius** (rev 3) |
 | `src/config.rs` | `normalize_engine_options` (pub(crate) pure fn) + call it at the top of `apply_options`; clamp matrix tests + zero-heavy apply test |
 | `src/ui/app/events/keys.rs` | normalize-before-increment `(x % 3 + 1) % 3`; `_ => "Filter"` default arm; update the contract comment |
 | `src/ui/app/events/mod.rs` | advance-contract test: `focused_filter_field = usize::MAX` (and `3`) + `f` press → no panic, field in `0..=2`, status set |
@@ -224,8 +258,10 @@ download transport's byte behavior.
 | new: all-invalid `finish_enqueue` characterization | `sent == 0` + non-empty `invalid` → the `PathError` stays visible, not the generic failure |
 | new: download/mod.rs `#[cfg(unix)]` deep-subdir symlink | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink outside and `sub` absent → `FileOutcome::Failed` "path traversal detected" |
 | new: download/mod.rs `#[cfg(unix)]` existing symlinked parent | filename `dir/file.gguf` with `…/model/dir` an existing symlink outside → traversal error (preserved current behavior) |
-| new: download/mod.rs `#[cfg(unix)]` symlinked final path | `final_path` (or `.incomplete`) itself a symlink → traversal error, never treated as complete/resume |
+| new: download/mod.rs `#[cfg(unix)]` symlink → ancestor of base | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink to the temp root (or `/`) → traversal error (strict predicate; the old ancestor clause would pass it) |
+| new: download/mod.rs `#[cfg(unix)]` symlinked final path | `final_path` (or `.incomplete`, or the journal sidecar) itself a symlink → traversal error, never treated as complete/resume |
 | new: download/mod.rs `#[cfg(unix)]` normal nested path | `Q4_K_M/sub/file.gguf` with real dirs → `Ok`, no false rejection |
+| new: paths/sanitize `#[cfg(unix)]` symlink → ancestor of base | `validate_and_sanitize_path` rejects a symlinked subdir pointing at `/` or `$HOME` with `TraversalParentEscape` (regression for the strict predicate) |
 | new: `normalize_engine_options` clamp matrix | each dangerous zero/out-of-range value → safe floor; in-range values unchanged; `min>max` → `max≥min`; `verification_buffer_size = 0` stays 0 |
 | new: `apply_options` with zero-heavy `AppOptions` | atomics read the safe floors (and `…snapshot_round_trips` still green) |
 | new: events/mod.rs `f`-key with `usize::MAX` and `3` | no panic (debug overflow pre-fix catches `usize::MAX`); field wraps into `0..=2`; status set |
@@ -260,6 +296,10 @@ the in-process mock HF server.)
 - **Not** fixing the audit's nice-to-haves (4–6) — separate change.
 - **Not** touching `registry` bytes, NDJSON event schema, or TUI snapshot
   golden output.
+- The release version bump + CHANGELOG/README changelog-table row are **not**
+  part of this PR — this repo bumps versions at release time (a separate
+  release commit, per `changelog/README.md` and the README table); this
+  branch ships the code + plan + tests only.
 
 ## 6. Risks / review notes
 
@@ -270,5 +310,11 @@ the in-process mock HF server.)
 - Fix 1b and 3 are behavior-preserving for non-degenerate inputs; guarded by
   new tests. Fix 3's implementation (normalize-before-increment, no mouse
   clamps, defensive default arm) addresses both plan-gate blocks.
+- Fix 1's strict-predicate change (rev 3, P0) hardens both
+  `validate_and_sanitize_path` and `prepare_download_paths`; it preserves
+the not-yet-created-base and existing-base cases (traced in §1), pinned by
+the new symlink-to-ancestor tests. The remaining symlink residuals
+(check-then-open TOCTOU, `create_dir_all` blast radius, author/model for
+the two no-write flows) are recorded in `docs/DEFERRED.md`.
 - Fix 2 changes no pinned bytes (engine atomics are runtime state); the
   `…_snapshot_round_trips` test re-verifies the in-range path is untouched.
