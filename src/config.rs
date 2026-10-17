@@ -128,6 +128,40 @@ fn mbps_to_bytes_per_sec(mbps: f64) -> u64 {
     (mbps * 1_048_576.0) as u64
 }
 
+/// Clamp the engine-tuning options to the safety floors that keep the
+/// engine from hanging or panicking (audit fix 2). A hand-edited
+/// `config.toml` never passes the options screen's clamps, and every
+/// dangerous value here is a hang or a divide-by-zero/`clamp` panic in the
+/// engine: `concurrent_threads = 0` builds a zero-permit semaphore (every
+/// chunk task blocks forever), `num_chunks = 0` divides by zero in the
+/// chunk-size math, `min_chunk_size > max_chunk_size` panics `Ord::clamp`,
+/// a zero chunk size panics `div_ceil`, `concurrent_verifications = 0`
+/// wedges the verification drain, `verification_update_interval = 0`
+/// panics the hash task on `iteration % 0`, and `download_timeout_secs = 0`
+/// times out every request.
+///
+/// Only the hang/panic floors are enforced — deliberately NOT the UI's
+/// display ranges (threads ≤ 32, chunks 10–100, …), which would silently
+/// rewrite legitimate hand-configured values. `max_retries` and
+/// `retry_delay_secs` keep `0` (meaningful), the rate-limit pair keeps `0`
+/// (`0 = unlimited`, see `docs/DEFERRED.md#rate-limiter-zero-rate`), and
+/// `verification_buffer_size` is NOT clamped: `utils::stream_file_digest`
+/// documents a zero inner buffer as its one-byte-at-a-time read mode, so
+/// zero is safe and meaningful there.
+pub(crate) fn normalize_engine_options(options: &mut AppOptions) {
+    options.concurrent_threads = options.concurrent_threads.max(1);
+    options.num_chunks = options.num_chunks.max(1);
+    // min first, then the max floor: `max_chunk_size >= max(min, 1)` (the
+    // clamp above already guarantees `min >= 1`), which is exactly the
+    // `Ord::clamp` precondition the chunk-size math needs.
+    options.min_chunk_size = options.min_chunk_size.max(1);
+    options.max_chunk_size = options.max_chunk_size.max(options.min_chunk_size);
+    options.concurrent_verifications = options.concurrent_verifications.max(1);
+    options.verification_update_interval = options.verification_update_interval.max(1);
+    options.download_timeout_secs = options.download_timeout_secs.max(1);
+    options.progress_update_interval_ms = options.progress_update_interval_ms.max(1);
+}
+
 /// All 14 engine-tunable options: download chunking/retries/timeout/cadence
 /// (11 rows onto `DOWNLOAD_CONFIG`, including the two rate-limit fields)
 /// and verification tuning (3 rows onto `VERIFICATION_CONFIG`).
@@ -201,12 +235,21 @@ const ENGINE_OPTIONS: &[EngineOptionRow] = &[
 /// [`ENGINE_OPTIONS`] in table order, `Relaxed` like the historical
 /// hand-written stores.
 ///
+/// The values are pushed through [`normalize_engine_options`] first (audit
+/// fix 2) so a hand-edited config cannot hand the engine a hang- or
+/// panic-inducing tuning value. The normalization runs on a local clone:
+/// the persisted [`AppOptions`] keeps the user's raw values, only the
+/// engine atomics see the floors.
+///
 /// Shared by the TUI (`App::sync_options_to_config` delegates here) and the
 /// CLI so both frontends tune the engine identically. Must be called from
 /// within a tokio runtime (it spawns the rate-limiter update task).
 pub fn apply_options(options: &AppOptions) {
+    let mut options = options.clone();
+    normalize_engine_options(&mut options);
+
     for row in ENGINE_OPTIONS {
-        (row.atomic)().store((row.read)(options), Ordering::Relaxed);
+        (row.atomic)().store((row.read)(&options), Ordering::Relaxed);
     }
 
     // The rate limiter is updated asynchronously from the same two values
@@ -304,6 +347,163 @@ mod tests {
 
         // Should return defaults without panicking
         assert_eq!(options.concurrent_threads, 8);
+    }
+
+    /// Audit fix 2 (clamp matrix): every value that hangs or panics the
+    /// engine lands on its safety floor, in-range values pass through
+    /// untouched, and the deliberately-unclamped fields keep their value
+    /// (`verification_buffer_size = 0` is a supported read mode; `0` is
+    /// meaningful for retries/retry delay and for the rate-limit pair).
+    #[test]
+    fn normalize_engine_options_clamps_dangerous_values_to_the_safe_floors() {
+        // Every hang/panic value of the audit table at once.
+        let mut options = crate::models::AppOptions {
+            concurrent_threads: 0,
+            num_chunks: 0,
+            min_chunk_size: 0,
+            max_chunk_size: 0,
+            concurrent_verifications: 0,
+            verification_update_interval: 0,
+            download_timeout_secs: 0,
+            progress_update_interval_ms: 0,
+            verification_buffer_size: 0,
+            max_retries: 0,
+            retry_delay_secs: 0,
+            download_rate_limit_enabled: true,
+            download_rate_limit_mbps: 0.0,
+            ..Default::default()
+        };
+        normalize_engine_options(&mut options);
+
+        assert_eq!(options.concurrent_threads, 1, "Semaphore::new(0)");
+        assert_eq!(options.num_chunks, 1, "file_size / 0 panic");
+        assert_eq!(options.min_chunk_size, 1, "div_ceil(0) panic");
+        assert_eq!(options.max_chunk_size, 1, "max floor follows min");
+        assert_eq!(
+            options.concurrent_verifications, 1,
+            "zero-permit verify semaphore"
+        );
+        assert_eq!(
+            options.verification_update_interval, 1,
+            "iteration % 0 panic"
+        );
+        assert_eq!(options.download_timeout_secs, 1, "instant timeout");
+        assert_eq!(
+            options.progress_update_interval_ms, 1,
+            "zero progress cadence"
+        );
+
+        // Deliberately NOT clamped.
+        assert_eq!(
+            options.verification_buffer_size, 0,
+            "zero buffer is stream_file_digest's one-byte read mode"
+        );
+        assert_eq!(options.max_retries, 0, "0 retries is meaningful");
+        assert_eq!(options.retry_delay_secs, 0, "0 delay is meaningful");
+        assert!(options.download_rate_limit_enabled);
+        assert_eq!(
+            options.download_rate_limit_mbps, 0.0,
+            "0 rate = unlimited (docs/DEFERRED.md#rate-limiter-zero-rate)"
+        );
+
+        // Reversed chunk bounds: `Ord::clamp(min > max)` panics, so the max
+        // floor follows the (already clamped) min.
+        let mut reversed = crate::models::AppOptions {
+            min_chunk_size: 10 << 20,
+            max_chunk_size: 1 << 20,
+            ..Default::default()
+        };
+        normalize_engine_options(&mut reversed);
+        assert!(
+            reversed.max_chunk_size >= reversed.min_chunk_size,
+            "min > max survived normalization: {:?}",
+            (reversed.min_chunk_size, reversed.max_chunk_size)
+        );
+        assert_eq!(reversed.min_chunk_size, 10 << 20, "min is not lowered");
+        assert_eq!(reversed.max_chunk_size, 10 << 20, "max raised to the min");
+
+        // In-range values pass through untouched (no silent override of
+        // legitimate hand-configured values — the UI's display ranges are
+        // NOT enforced here).
+        let mut in_range = crate::models::AppOptions {
+            concurrent_threads: 64,
+            num_chunks: 1,
+            min_chunk_size: 1,
+            max_chunk_size: 1 << 30,
+            concurrent_verifications: 99,
+            verification_update_interval: 7,
+            download_timeout_secs: 600,
+            progress_update_interval_ms: 1000,
+            verification_buffer_size: 4096,
+            ..Default::default()
+        };
+        normalize_engine_options(&mut in_range);
+        assert_eq!(in_range.concurrent_threads, 64, "threads > 32 kept");
+        assert_eq!(in_range.num_chunks, 1);
+        assert_eq!(in_range.min_chunk_size, 1);
+        assert_eq!(in_range.max_chunk_size, 1 << 30);
+        assert_eq!(
+            in_range.concurrent_verifications, 99,
+            "verifications > 8 kept"
+        );
+        assert_eq!(in_range.verification_update_interval, 7);
+        assert_eq!(in_range.download_timeout_secs, 600);
+        assert_eq!(in_range.progress_update_interval_ms, 1000);
+        assert_eq!(in_range.verification_buffer_size, 4096);
+    }
+
+    /// Audit fix 2 (end-to-end): a zero-heavy `AppOptions` — what a
+    /// hand-edited `config.toml` produces — reaches the engine atomics as
+    /// the safe floors, i.e. the exact values the semaphores, timeouts, and
+    /// chunk math are built from at use time. The caller's options keep the
+    /// raw values (normalization runs on a clone, so the persisted config is
+    /// never rewritten). Serializes on `ENV_MUTEX` like every
+    /// atomics-mutating test; the rate-limiter spawn needs a tokio runtime.
+    #[tokio::test]
+    async fn apply_options_with_zero_heavy_config_lands_on_the_safe_floors() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _env = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let globals = EngineGlobalsSnapshot::capture();
+
+        let options = crate::models::AppOptions {
+            concurrent_threads: 0,
+            num_chunks: 0,
+            min_chunk_size: 0,
+            max_chunk_size: 0,
+            max_retries: 0,
+            download_timeout_secs: 0,
+            retry_delay_secs: 0,
+            progress_update_interval_ms: 0,
+            concurrent_verifications: 0,
+            verification_buffer_size: 0,
+            verification_update_interval: 0,
+            ..Default::default()
+        };
+        apply_options(&options);
+
+        let d = &crate::download::DOWNLOAD_CONFIG;
+        let v = &crate::verification::VERIFICATION_CONFIG;
+        assert_eq!(d.concurrent_threads.load(Relaxed), 1);
+        assert_eq!(d.target_chunks.load(Relaxed), 1);
+        assert_eq!(d.min_chunk_size.load(Relaxed), 1);
+        assert_eq!(d.max_chunk_size.load(Relaxed), 1);
+        assert_eq!(d.download_timeout_secs.load(Relaxed), 1);
+        assert_eq!(d.progress_update_interval_ms.load(Relaxed), 1);
+        assert_eq!(v.concurrent_verifications.load(Relaxed), 1);
+        assert_eq!(v.update_interval_iterations.load(Relaxed), 1);
+        // Not clamped by design.
+        assert_eq!(d.max_retries.load(Relaxed), 0);
+        assert_eq!(d.retry_delay_secs.load(Relaxed), 0);
+        assert_eq!(v.buffer_size.load(Relaxed), 0);
+
+        assert_eq!(
+            options.concurrent_threads, 0,
+            "the caller's (persisted) options keep the raw values"
+        );
+
+        globals.restore();
     }
 
     /// C4 pin (validation-first, written before the declarative-table
