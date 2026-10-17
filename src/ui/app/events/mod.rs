@@ -634,4 +634,66 @@ mod tests {
     // was deleted: post-W4.6 all three drive the ONE `advance()`, so the
     // comparison pinned nothing the per-family literal tables above
     // don't already pin.)
+
+    // ---------------------------------------------------------------------
+    // Audit fix 3: the `f` key's filter-field cycle (advance contract).
+    // ---------------------------------------------------------------------
+
+    /// Press `f` through the real dispatcher (Normal mode, no popup).
+    async fn press_filter_field_key(app: &mut App) {
+        app.on_key_event(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('f'),
+        ))
+        .await;
+    }
+
+    /// The status label the `f` handler writes for a field index (the
+    /// defensive default arm covers an index the match cannot currently
+    /// produce after normalization — see `keys.rs`).
+    fn filter_field_label(field: usize) -> String {
+        format!(
+            "Focused filter: {}",
+            match field {
+                0 => "Sort",
+                1 => "Min Downloads",
+                2 => "Min Likes",
+                _ => "Filter",
+            }
+        )
+    }
+
+    /// The cycle contract, pinned through the key path: `0 → 1 → 2 → 0`, and
+    /// for ANY `usize` index the field lands inside `0..=2` with the status
+    /// line written — no panic. Pre-fix the handler computed
+    /// `(focused_filter_field + 1) % 3`, which overflows `usize` in debug
+    /// builds at `usize::MAX` (this test fails there), and its
+    /// `_ => unreachable!()` arm was a landmine for a future modulus change.
+    #[tokio::test]
+    async fn f_key_cycles_the_filter_field_and_survives_a_hostile_index() {
+        let mut app = App::new();
+
+        // The ordinary cycle (unchanged behavior).
+        for (initial, want) in [(0usize, 1usize), (1, 2), (2, 0)] {
+            app.focused_filter_field = initial;
+            press_filter_field_key(&mut app).await;
+            assert_eq!(app.focused_filter_field, want, "cycle from {initial}");
+            assert_eq!(*app.status.read(), filter_field_label(want));
+        }
+
+        // Hostile indices: bounded, never a panic, status always set.
+        for hostile in [3usize, usize::MAX, usize::MAX - 1, usize::MAX / 2] {
+            app.focused_filter_field = hostile;
+            press_filter_field_key(&mut app).await;
+            assert!(
+                app.focused_filter_field < 3,
+                "index {hostile} escaped 0..=2: {}",
+                app.focused_filter_field
+            );
+            assert_eq!(
+                *app.status.read(),
+                filter_field_label(app.focused_filter_field),
+                "status line for hostile index {hostile}"
+            );
+        }
+    }
 }
