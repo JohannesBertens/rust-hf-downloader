@@ -83,7 +83,12 @@ that case too. Change: make `validate_and_sanitize_path` require strict
 `starts_with(canonical_base)` (drop the ancestor clause), pinned by a new
 `sanitize` test "symlink → ancestor of base → `TraversalParentEscape`". All
 existing `paths::sanitize` tests still pass (traced: the not-yet-created-
-base and existing-base cases both satisfy strict `starts_with`).
+base and existing-base cases both satisfy strict `starts_with`). The
+final-path tail can never contain `..` or absolute components — every
+component (author, model, filename parts) passes `sanitize_path_component`
+before the path is built — so strict `starts_with` on a canonicalized base
+plus component sanitization fully closes the tail; no string-prefix check
+and no rejoin-with-`..`-rejection step is needed.
 
 **1b. `prepare_download_paths` containment is final-parent-only and skips
 symlinked final components** (`src/download/mod.rs`).
@@ -259,7 +264,8 @@ download transport's byte behavior.
 | new: download/mod.rs `#[cfg(unix)]` deep-subdir symlink | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink outside and `sub` absent → `FileOutcome::Failed` "path traversal detected" |
 | new: download/mod.rs `#[cfg(unix)]` existing symlinked parent | filename `dir/file.gguf` with `…/model/dir` an existing symlink outside → traversal error (preserved current behavior) |
 | new: download/mod.rs `#[cfg(unix)]` symlink → ancestor of base | filename `Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink to the temp root (or `/`) → traversal error (strict predicate; the old ancestor clause would pass it) |
-| new: download/mod.rs `#[cfg(unix)]` symlinked final path | `final_path` (or `.incomplete`, or the journal sidecar) itself a symlink → traversal error, never treated as complete/resume |
+| new: download/mod.rs `#[cfg(unix)]` symlinked final path | `final_path` (or `.incomplete`) itself a symlink → traversal error, never treated as complete/resume |
+| new: download/mod.rs `#[cfg(unix)]` symlinked journal sidecar | the resume-journal sidecar (`journal_sidecar_path`) itself a symlink → traversal error (its own test, rev 3.1 — opus P2-b wants the sidecar covered independently) |
 | new: download/mod.rs `#[cfg(unix)]` normal nested path | `Q4_K_M/sub/file.gguf` with real dirs → `Ok`, no false rejection |
 | new: paths/sanitize `#[cfg(unix)]` symlink → ancestor of base | `validate_and_sanitize_path` rejects a symlinked subdir pointing at `/` or `$HOME` with `TraversalParentEscape` (regression for the strict predicate) |
 | new: `normalize_engine_options` clamp matrix | each dangerous zero/out-of-range value → safe floor; in-range values unchanged; `min>max` → `max≥min`; `verification_buffer_size = 0` stays 0 |
