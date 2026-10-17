@@ -158,7 +158,8 @@ struct PreparedDownload {
 /// Phase 1 of [`start_download`] (W5.1a): validate the filename against
 /// path traversal, create the base/parent directories, canonicalize the
 /// base for the containment check, build the final/`.incomplete` paths,
-/// and decide the fate of a pre-existing partial download (issue #50): a
+/// reject a symlinked write target, and decide the fate of a pre-existing
+/// partial download (issue #50): a
 /// `.incomplete` with a resume journal is KEPT for `download_chunked` to
 /// validate and resume; one without a journal is deleted
 /// (restart-from-beginning semantics for orphans and foreign files).
@@ -223,16 +224,33 @@ async fn prepare_download_paths(
     // The filename may contain subdirectories (e.g., "tokenizer/config.json", "Q2_K_L/model.gguf")
     let final_path = canonical_base.join(&sanitized_filename);
 
-    // Ensure final path is still under base directory
-    if let Some(parent) = final_path.parent() {
-        if let Ok(canonical_final_parent) = parent.canonicalize() {
-            if !canonical_final_parent.starts_with(&canonical_base) {
-                let _ = status_tx.send("Error: Path traversal detected".to_string());
-                return Err(FileOutcome::Failed {
-                    filename: filename.to_string(),
-                    reason: "path traversal detected".to_string(),
-                });
-            }
+    // Containment check (audit fix 1b): walk to the FIRST EXISTING ancestor
+    // of the final path — the same rule and the same helper
+    // `sanitize::validate_and_sanitize_path` applies. The helper excludes its
+    // argument, so this starts at `final_path.parent()` (the direct-parent
+    // check it replaces) and keeps walking up while the subdirectories do not
+    // exist yet — which is what a *deep* symlinked subdir used to slip past
+    // (`Q4_K_M/sub/file.gguf` with `…/model/Q4_K_M` a symlink elsewhere and
+    // `sub` never created).
+    //
+    // STRICT containment: the ancestor must be under the canonical base, full
+    // stop. The `base.starts_with(ancestor)` allowance the sanitize side
+    // carried (rev 3, P0) is not needed here — `base_path` was created above,
+    // so the base really exists — and it would accept a symlink pointing at
+    // an ancestor of the base (`…/model/Q4_K_M` → the temp root), i.e. an
+    // arbitrary-location write. A dangling intermediate symlink cannot be
+    // canonicalized, so the walk passes at its parent and the rejection
+    // happens on the `create_dir_all` below (fail closed, no outside write).
+    // Residuals this check cannot reach (a pre-built base_path baked through a
+    // planted author/model symlink, the check-then-open TOCTOU, the
+    // create_dir_all blast radius): docs/DEFERRED.md#download-author-model-symlink-residual.
+    if let Some(canonical_parent) = crate::paths::sanitize::nearest_existing_ancestor(&final_path) {
+        if !canonical_parent.starts_with(&canonical_base) {
+            let _ = status_tx.send("Error: Path traversal detected".to_string());
+            return Err(FileOutcome::Failed {
+                filename: filename.to_string(),
+                reason: "path traversal detected".to_string(),
+            });
         }
     }
 
@@ -242,6 +260,34 @@ async fn prepare_download_paths(
         final_path.file_name().unwrap().to_string_lossy()
     ));
     let journal_path = journal::journal_path(&incomplete_path);
+
+    // A symlink AT one of the three write targets escapes the base even when
+    // every ancestor check passes (audit fix 1b): the final path would be
+    // mistaken for a completed file, the `.incomplete` is the real write
+    // target, and a symlinked journal would be treated as resume state.
+    // Checked before any mkdir/open. `NotFound` means "nothing there,
+    // proceed"; any other error fails closed (an uninspectable path is not a
+    // proven-safe one).
+    for target in [&final_path, &incomplete_path, &journal_path] {
+        match std::fs::symlink_metadata(target) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let _ = status_tx.send("Error: Path traversal detected".to_string());
+                return Err(FileOutcome::Failed {
+                    filename: filename.to_string(),
+                    reason: "path traversal detected".to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let _ = status_tx.send(format!("Error: Cannot inspect download path: {}", e));
+                return Err(FileOutcome::Failed {
+                    filename: filename.to_string(),
+                    reason: format!("cannot inspect download path: {}", e),
+                });
+            }
+        }
+    }
 
     // Create parent directories for the file (in case filename contains subdirectories like "Q4_K_M/file.gguf")
     if let Some(parent) = final_path.parent() {
@@ -594,3 +640,242 @@ pub static RATE_LIMITER: Lazy<RateLimiter> = Lazy::new(|| {
         .load(Ordering::Relaxed);
     RateLimiter::new(rate, 2.0) // 2 second burst window (fixed)
 });
+
+#[cfg(all(test, unix))]
+mod containment_tests {
+    //! Audit fix 1b: the write-time containment of [`prepare_download_paths`].
+    //! The first existing ancestor of the final path must be STRICTLY under
+    //! the canonical base (a symlink to an ancestor of the base is an escape,
+    //! not the not-yet-created-base case), and a symlink at the final path,
+    //! the `.incomplete` write target, or the resume-journal sidecar is
+    //! rejected before any mkdir/open.
+    //!
+    //! Unix-only (symlinks). No env vars are touched and the registry is
+    //! never written (phase 1 only), so no `ENV_MUTEX` is needed; temp dirs
+    //! follow the crate convention (`std::env::temp_dir()` + pid + counter).
+    use super::{prepare_download_paths, DownloadCtx, PreparedDownload};
+    use crate::models::{CompleteDownloads, DownloadProgress, FileOutcome};
+    use crate::verification::{VerificationHub, VerificationResultCounters};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// Fresh temp root for one test run.
+    fn temp_root(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "rhd-dl-contain-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ))
+    }
+
+    /// Run phase 1 with a throwaway context (only `filename` + `base_path`
+    /// matter for containment; the channels and mirrors are discarded).
+    async fn prepare(filename: &str, base_path: &Path) -> Result<PreparedDownload, FileOutcome> {
+        let (status_tx, _status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let progress = Arc::new(Mutex::new(None::<DownloadProgress>));
+        let complete = Arc::new(Mutex::new(CompleteDownloads::default()));
+        let (hub_status_tx, _hub_status_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (verify_tx, _verify_rx) = tokio::sync::mpsc::unbounded_channel();
+        let verification = VerificationHub {
+            queue: Arc::new(Mutex::new(Vec::new())),
+            size: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            progress: Arc::new(Mutex::new(Vec::new())),
+            results: VerificationResultCounters::default(),
+            status_tx: hub_status_tx,
+            verify_tx,
+            registry_mirror: Arc::new(Mutex::new(crate::models::DownloadRegistry::default())),
+        };
+        let expected_sha256: Option<String> = None;
+        let hf_token: Option<String> = None;
+        let ctx = DownloadCtx {
+            model_id: "a/b",
+            revision: crate::api::DEFAULT_REVISION,
+            filename,
+            progress: &progress,
+            status_tx: &status_tx,
+            complete_downloads: &complete,
+            expected_sha256: &expected_sha256,
+            verification: &verification,
+            hf_token: &hf_token,
+        };
+        prepare_download_paths(&ctx, base_path).await
+    }
+
+    /// Assert the phase-1 failure is the traversal outcome (the same
+    /// `FileOutcome::Failed` shape the pre-existing checks produce).
+    fn assert_traversal(result: Result<PreparedDownload, FileOutcome>) {
+        match result {
+            Err(FileOutcome::Failed { reason, .. }) => {
+                assert_eq!(reason, "path traversal detected", "traversal reason")
+            }
+            Err(other) => panic!("expected a path-traversal failure, got {other:?}"),
+            Ok(_) => panic!("expected a path-traversal failure, prepare succeeded"),
+        }
+    }
+
+    /// `<root>/dl/author/model` — the pre-built base the TUI/CLI hand the
+    /// transport (author/model already appended).
+    fn base(root: &Path) -> PathBuf {
+        root.join("dl").join("author").join("model")
+    }
+
+    #[tokio::test]
+    async fn deep_symlinked_subdir_is_rejected() {
+        // `…/model/Q4_K_M` is a symlink OUTSIDE the base and `sub` does not
+        // exist yet: the old final-parent-only check canonicalized nothing
+        // (the parent was missing) and the file landed outside the base.
+        let root = temp_root("deep");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("Q4_K_M")).unwrap();
+
+        assert_traversal(prepare("Q4_K_M/sub/file.gguf", &base).await);
+        assert!(
+            !outside.join("sub").exists(),
+            "no directory may be created through the symlink"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn existing_symlinked_parent_is_rejected() {
+        // The case the pre-fix check already caught (the direct parent
+        // exists): preserved, not regressed.
+        let root = temp_root("exists");
+        let base = base(&root);
+        let outside = root.join("outside");
+        std::fs::create_dir_all(base.join("dir")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::remove_dir(base.join("dir")).unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("dir")).unwrap();
+
+        assert_traversal(prepare("dir/file.gguf", &base).await);
+        assert!(!outside.join("file.gguf").exists(), "no outside write");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn symlink_pointing_at_an_ancestor_of_the_base_is_rejected() {
+        // Rev-3 P0: the dropped `base.starts_with(ancestor)` clause accepted
+        // this (the link canonicalized to an ANCESTOR of the base). The
+        // target is the temp root, never `/` (rev 3.1, opus N4), so a
+        // predicate regression cannot write outside the test sandbox.
+        let root = temp_root("ancestor");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+        std::os::unix::fs::symlink(std::env::temp_dir(), base.join("Q4_K_M")).unwrap();
+
+        assert_traversal(prepare("Q4_K_M/sub/file.gguf", &base).await);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn symlinked_final_path_is_rejected_and_never_treated_as_complete() {
+        // Every ancestor check passes — the escape is the last component.
+        let root = temp_root("final");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = root.join("outside.bin");
+        std::fs::write(&outside, b"elsewhere").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("file.gguf")).unwrap();
+
+        assert_traversal(prepare("file.gguf", &base).await);
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"elsewhere",
+            "the link target was neither written nor treated as the download"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn symlinked_incomplete_target_is_rejected() {
+        // The `.incomplete` path is the real write target — its own case
+        // (rev 3.1, opus N3), not covered by the final-path check.
+        let root = temp_root("incomplete");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = root.join("outside.bin");
+        std::fs::write(&outside, b"elsewhere").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("file.gguf.incomplete")).unwrap();
+
+        assert_traversal(prepare("file.gguf", &base).await);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"elsewhere", "no write");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn symlinked_journal_sidecar_is_rejected() {
+        // A symlinked resume journal is never trusted as resume state
+        // (rev 3.1: its own test, independent of the `.incomplete` case).
+        let root = temp_root("journal");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+        let outside = root.join("outside.json");
+        std::fs::write(&outside, b"{}").unwrap();
+        std::os::unix::fs::symlink(&outside, base.join("file.gguf.incomplete.state.json")).unwrap();
+
+        assert_traversal(prepare("file.gguf", &base).await);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"{}", "no write");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn dangling_intermediate_symlink_fails_closed() {
+        // Rev 3.1, opus N2: a dangling link cannot be canonicalized, so the
+        // ancestor walk passes at its parent and the rejection comes from
+        // `create_dir_all` failing on the symlink (fail closed by side
+        // effect — accepted, pinned here). No outside write happens.
+        let root = temp_root("dangling");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+        let missing = root.join("nowhere");
+        std::os::unix::fs::symlink(&missing, base.join("Q4_K_M")).unwrap();
+
+        let result = prepare("Q4_K_M/file.gguf", &base).await;
+        match result {
+            Err(FileOutcome::Failed { reason, .. }) => assert!(
+                reason.contains("failed to create parent directory"),
+                "expected the fail-closed mkdir error, got {reason:?}"
+            ),
+            Ok(_) => panic!("dangling symlink must fail closed, prepare succeeded"),
+            Err(other) => panic!("dangling symlink must fail closed, got {other:?}"),
+        }
+        assert!(!missing.exists(), "nothing was created at the link target");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn plain_nested_path_is_still_accepted() {
+        // No false rejection: the same deep layout with real directories
+        // prepares exactly as before (subdirs created under the base).
+        let root = temp_root("plain");
+        let base = base(&root);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let prepared = match prepare("Q4_K_M/sub/file.gguf", &base).await {
+            Ok(prepared) => prepared,
+            Err(e) => panic!("a plain nested path must not be rejected, got {e:?}"),
+        };
+        let canonical_base = base.canonicalize().unwrap();
+        assert_eq!(
+            prepared.final_path,
+            canonical_base.join("Q4_K_M").join("sub").join("file.gguf")
+        );
+        assert!(prepared.final_path.parent().unwrap().is_dir());
+        assert_eq!(
+            prepared.incomplete_path.parent().unwrap(),
+            prepared.final_path.parent().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
