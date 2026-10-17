@@ -863,4 +863,3 @@ fn hud_hidden_status_bar_carries_notice() {
         );
     }
 }
-
