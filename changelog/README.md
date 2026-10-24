@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.18.0] - 2026-10-24
+
+### Version 2.18.0 (2026-10-24)
+- **Download-channel trust rule** (finding 10): `RHD_DOWNLOAD_BASE`
+  accepts `https://` and `file://` only, plain `http://` for loopback
+  hosts alone — a plain-http mirror serves a self-consistent
+  `SHA256SUMS` and asset, so the checksum cannot detect a substitution.
+  Enforced in both installers and the `update` subcommand (behavior
+  change: non-loopback http mirrors are now rejected with a clear
+  error).
+- **Oversized hub directories are no longer silently truncated**: the
+  recursive tree walk follows `Link: rel="next"` pagination
+  (huggingface_hub parity; server caps ~1000 entries per page) with a
+  loud warning at the per-directory page bound — before, larger
+  directories yielded early-stopping file lists (missing downloads,
+  incomplete `hf-cache` snapshots).
+- **A corrupt registry file is archived, not wiped**: an unparseable
+  registry is moved to `<registry>.corrupt` (with a warning naming both
+  paths) before the empty default takes over — the next save can no
+  longer silently destroy the download history.
+- **`update --force` no longer reinstalls an identical version**
+  ("up to date"); force now means downgrade-allowed.
+- **Installer robustness**: `install.ps1` rolls the old binary back if
+  the move-in fails (AV handle) and never strips the shared cargo bin
+  dir from `PATH` on uninstall; `install.sh` pre-checks a writable
+  `INSTALL_DIR`.
+- **Security**: manifest asset names validated as one plain file
+  component (no temp-dir escape); tar/zip members restricted to plain
+  files; private 0700 staging dir; failed updates clean their staging
+  tree; hf-cache tree oids / commit SHAs / blob oids must be plain hex
+  (40/64) — hostile-mirror path steering rejected; truncated snapshot
+  entries re-copied.
+- **Internal**: `verification_buffer_size` capped at 16 MiB (allocated
+  verbatim; zero keeps the one-byte read mode); TUI finding 7 (Enter on
+  an empty query after `clear_search_results` no longer sticks the
+  spinner); char-safe blob short-name truncation; `url` promoted to a
+  direct dependency (same `=2.4.1` pin, lockfile unchanged). Tests
+  490 → 532.
+
 ## [2.17.0] - 2026-10-14
 
 ### Version 2.17.0 (2026-10-14)

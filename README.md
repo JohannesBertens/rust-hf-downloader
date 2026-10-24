@@ -1,4 +1,4 @@
-# Rust HF Downloader v2.17.0
+# Rust HF Downloader v2.18.0
 
 [![Crates.io](https://img.shields.io/crates/v/rust-hf-downloader.svg)](https://crates.io/crates/rust-hf-downloader)
 
@@ -116,7 +116,7 @@ Useful variants:
 ```bash
 BASE=https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.sh
 # pin a specific version
-curl -fsSL $BASE | sh -s -- --version v2.17.0
+curl -fsSL $BASE | sh -s -- --version v2.18.0
 # see what would happen without changing anything
 curl -fsSL $BASE | sh -s -- --dry-run
 # install somewhere else / remove it again
@@ -126,7 +126,7 @@ curl -fsSL $BASE | sh -s -- --uninstall
 
 ```powershell
 # Windows, with options
-& ([scriptblock]::Create((irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1))) -Version v2.17.0
+& ([scriptblock]::Create((irm https://github.com/JohannesBertens/rust-hf-downloader/releases/latest/download/install.ps1))) -Version v2.18.0
 ```
 
 ### Prebuilt binaries (GitHub Releases)
@@ -787,6 +787,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.18.0] | 2026-10-24 | Audit hardening: download-channel trust rule (https/file + loopback-http only) in installers + `update`, Link-header tree pagination (no more silent truncation of >1000-entry dirs), corrupt registry archived not wiped, manifest asset-name/hex-oid validation, installer rollback + PATH guard |
 | [2.17.0] | 2026-10-14 | Small-terminal HUD: strip borrows up to 2 rows from the bottom panels instead of vanishing (full strip at 31 rows), status-bar fallback notice below 30, 1-char speed/ETA clip fix; first fully-automated release incl. crates.io publish |
 | [2.16.0] | 2026-10-13 | Rate limiter: rate `0` = unlimited, not a panic (config-file path); crates.io publish automated as a release job (PR #53) |
 | [2.15.0] | 2026-10-13 | Resumable downloads (#50): `.incomplete` file + resume journal survive network errors, 401s and SIGINT; re-validated mid-chunk resume across all frontends; chunk workers assert 206 + full delivery |
