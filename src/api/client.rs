@@ -56,6 +56,10 @@ pub async fn fetch_models_filtered(
     );
 
     let response = crate::http_client::get_with_optional_token(client, &url).await?;
+    // Surface HTTP errors (bad token 401, rate limit 429) as status errors
+    // so callers see the real status instead of a body-decode failure —
+    // same contract as the sibling fetchers below.
+    let response = response.error_for_status()?;
     let mut models: Vec<ModelInfo> = response.json().await?;
 
     // Client-side filtering (API doesn't support these filters)
@@ -196,7 +200,80 @@ pub async fn resolve_revision_sha(
     Ok(info.sha)
 }
 
+/// Hard bound on Link-header pages followed PER DIRECTORY by
+/// [`fetch_recursive_tree`]. A server that keeps advertising a next page
+/// forever must not hang the run; hitting the bound is a loud `eprintln!`
+/// warning, never a silently truncated file list.
+const MAX_TREE_PAGES_PER_DIRECTORY: usize = 1000;
+
+/// Extract the next-page URL from an HTTP `Link` response header
+/// (RFC 8288: comma-separated `<url>; rel="…"` segments), or `None` when
+/// the header advertises no next page.
+///
+/// The `rel` value may be quoted (`rel="next"`), unquoted (`rel=next`) or a
+/// space-separated list (`rel="prev next"`); the FIRST segment whose rel
+/// list contains `next` wins — that is the page huggingface_hub follows.
+/// Segments without an angle-bracketed target or without a matching rel are
+/// skipped; comparison is case-insensitive per RFC.
+fn parse_next_link(link_header: &str) -> Option<String> {
+    for segment in link_header.split(',') {
+        let mut parts = segment.split(';');
+        // The first part is the angle-bracketed target URI.
+        let Some(target) = parts.next() else { continue };
+        let Some(target) = target.trim().strip_prefix('<') else {
+            continue;
+        };
+        let Some(target) = target.strip_suffix('>') else {
+            continue;
+        };
+        let target = target.trim();
+        if target.is_empty() {
+            continue;
+        }
+        for param in parts {
+            let mut kv = param.splitn(2, '=');
+            let Some(name) = kv.next() else { continue };
+            if !name.trim().eq_ignore_ascii_case("rel") {
+                continue;
+            }
+            let value = kv.next().unwrap_or("").trim().trim_matches('"');
+            if value
+                .split_whitespace()
+                .any(|rel| rel.eq_ignore_ascii_case("next"))
+            {
+                return Some(target.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a `Link` next-page target against the URL of the page that
+/// carried it: the hub sends absolute URLs, but relative targets must work
+/// too (huggingface_hub resolves them the same way). A target or base that
+/// cannot be parsed/joined yields `None`; the call site turns that into a
+/// LOUD warning — truncation is never silent.
+///
+/// `reqwest::Url` is the re-export of the pinned `url` crate (Cargo.toml
+/// pins it to 2.4.1 for the Rust 1.75 floor); going through reqwest keeps
+/// the direct-crate path off the unix build, where the pin currently only
+/// lands on the windows target.
+fn resolve_next_url(current_url: &str, next_target: &str) -> Option<String> {
+    reqwest::Url::parse(current_url)
+        .ok()?
+        .join(next_target)
+        .ok()
+        .map(|u| u.to_string())
+}
+
 /// Recursively fetch all files from a repository, including subdirectories
+/// AND Link-header pages: the hub tree API serves ONE page per directory
+/// (server cap ~1000 entries) and points at the next page via a
+/// `Link: <url>; rel="next"` response header — which huggingface_hub
+/// follows and this walk must too, or an oversized directory yields a
+/// silently truncated file list (missing downloads, incomplete hf-cache
+/// snapshots). Every page of every directory is followed, bounded by
+/// [`MAX_TREE_PAGES_PER_DIRECTORY`] with a loud warning at the bound.
 fn fetch_recursive_tree<'a>(
     client: &'a reqwest::Client,
     model_id: &'a str,
@@ -218,26 +295,65 @@ fn fetch_recursive_tree<'a>(
             )
         };
 
-        let response = crate::http_client::get_with_optional_token(client, &tree_url).await?;
-        // Unknown revision → 404 → not_found for the caller (issue #28).
-        let response = response.error_for_status()?;
-        let items: Vec<ModelFile> = response.json().await?;
-
         let mut all_files = Vec::new();
+        let path_label = if path.is_empty() { "<root>" } else { path };
 
-        for item in items {
-            if item.file_type == "directory" {
-                // Recursively fetch contents of this directory. A failed
-                // subdirectory fetch fails the WHOLE tree fetch (plan
-                // M4/B3): swallowing it here produced silently truncated
-                // trees that later died as misleading selection errors —
-                // the caller must see the underlying transport error.
-                let subdir_files =
-                    fetch_recursive_tree(client, model_id, &item.path, revision).await?;
-                all_files.extend(subdir_files);
-            } else {
-                // It's a file, add it to the list
-                all_files.push(item);
+        // Link-header pagination: keep fetching while the page advertises a
+        // successor (both the root call and every recursive subdirectory
+        // call go through this same loop).
+        let mut page_url = Some(tree_url);
+        let mut pages_fetched: usize = 0;
+        while let Some(url) = page_url.take() {
+            let response = crate::http_client::get_with_optional_token(client, &url).await?;
+            // Unknown revision → 404 → not_found for the caller (issue #28).
+            let response = response.error_for_status()?;
+            // The Link header must be read before the body is consumed.
+            let link_header = response
+                .headers()
+                .get(reqwest::header::LINK)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let items: Vec<ModelFile> = response.json().await?;
+
+            for item in items {
+                if item.file_type == "directory" {
+                    // Recursively fetch contents of this directory. A failed
+                    // subdirectory fetch fails the WHOLE tree fetch (plan
+                    // M4/B3): swallowing it here produced silently truncated
+                    // trees that later died as misleading selection errors —
+                    // the caller must see the underlying transport error.
+                    let subdir_files =
+                        fetch_recursive_tree(client, model_id, &item.path, revision).await?;
+                    all_files.extend(subdir_files);
+                } else {
+                    // It's a file, add it to the list
+                    all_files.push(item);
+                }
+            }
+
+            pages_fetched += 1;
+            let Some(target) = link_header.as_deref().and_then(parse_next_link) else {
+                break;
+            };
+            if pages_fetched >= MAX_TREE_PAGES_PER_DIRECTORY {
+                // Bounded but NEVER silent: an incomplete tree is the exact
+                // failure mode this pagination support exists to prevent.
+                eprintln!(
+                    "warning: tree pagination bound ({MAX_TREE_PAGES_PER_DIRECTORY} pages) \
+                     exceeded for '{model_id}' at '{path_label}' — the file list is \
+                     INCOMPLETE after {pages_fetched} pages"
+                );
+                break;
+            }
+            match resolve_next_url(&url, &target) {
+                Some(next) => page_url = Some(next),
+                None => {
+                    eprintln!(
+                        "warning: unusable Link next-page target {target:?} for '{model_id}' \
+                         at '{path_label}' — the file list is INCOMPLETE"
+                    );
+                    break;
+                }
             }
         }
 
@@ -291,6 +407,86 @@ mod tests {
         }"#;
         let info: RevisionInfo = serde_json::from_str(payload).unwrap();
         assert_eq!(info.sha, "f6e3ba1a0b7d54e967a20e8dccd1e42e7e9b1234");
+    }
+
+    // ---- Link-header tree pagination ----
+    //
+    // Pure-parser tests for `parse_next_link` (the tree API's per-directory
+    // page cursor) plus `resolve_next_url` (relative targets via Url::join).
+
+    #[test]
+    fn parse_next_link_extracts_quoted_rel_next() {
+        assert_eq!(
+            parse_next_link(
+                r#"<https://huggingface.co/api/models/a/b/tree/main?cursor=abc>; rel="next""#
+            )
+            .as_deref(),
+            Some("https://huggingface.co/api/models/a/b/tree/main?cursor=abc")
+        );
+    }
+
+    #[test]
+    fn parse_next_link_accepts_unquoted_rel() {
+        assert_eq!(
+            parse_next_link("<./tree?cursor=2>; rel=next").as_deref(),
+            Some("./tree?cursor=2")
+        );
+    }
+
+    #[test]
+    fn parse_next_link_matches_next_inside_a_rel_list() {
+        // rel is a space-separated set: `next` matches wherever it sits.
+        assert_eq!(
+            parse_next_link(r#"</api/tree?cursor=2>; rel="prev next""#).as_deref(),
+            Some("/api/tree?cursor=2")
+        );
+        assert_eq!(
+            parse_next_link(r#"</api/tree?cursor=2>; rel="next prev""#).as_deref(),
+            Some("/api/tree?cursor=2")
+        );
+    }
+
+    #[test]
+    fn parse_next_link_returns_none_without_a_next_rel() {
+        assert_eq!(parse_next_link(r#"</api/tree>; rel="prev""#), None);
+        assert_eq!(parse_next_link(r#"</api/tree>; rel="last""#), None);
+        assert_eq!(parse_next_link(""), None);
+        // Segments without the angle-bracketed target are not targets.
+        assert_eq!(parse_next_link("api/tree; rel=next"), None);
+        // A segment without any rel parameter advertises nothing.
+        assert_eq!(parse_next_link("</api/tree?cursor=2>"), None);
+    }
+
+    #[test]
+    fn parse_next_link_first_matching_segment_wins_when_a_non_next_comes_first() {
+        assert_eq!(
+            parse_next_link(
+                r#"</api/tree>; rel="prev", </api/tree?cursor=2>; rel="next", </api/tree?cursor=3>; rel="next""#
+            )
+            .as_deref(),
+            Some("/api/tree?cursor=2")
+        );
+    }
+
+    #[test]
+    fn resolve_next_url_joins_relative_targets_and_passes_absolute_ones() {
+        let current = "http://127.0.0.1:8080/api/models/a/b/tree/main";
+        // Relative targets resolve against the page that carried the header.
+        assert_eq!(
+            resolve_next_url(current, "?cursor=2").as_deref(),
+            Some("http://127.0.0.1:8080/api/models/a/b/tree/main?cursor=2")
+        );
+        assert_eq!(
+            resolve_next_url(current, "/api/models/a/b/tree/main?cursor=2").as_deref(),
+            Some("http://127.0.0.1:8080/api/models/a/b/tree/main?cursor=2")
+        );
+        assert_eq!(
+            resolve_next_url(current, "https://other.example/tree?cursor=3").as_deref(),
+            Some("https://other.example/tree?cursor=3")
+        );
+        // Junk surfaces as None — the call site warns loudly instead of
+        // truncating silently.
+        assert_eq!(resolve_next_url("not a url", "?cursor=2"), None);
     }
 
     // ---- client-side filter/sort pass (W3.3) ----

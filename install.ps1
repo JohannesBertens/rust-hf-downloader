@@ -9,6 +9,9 @@
 # Equivalent env overrides: RHD_VERSION, RHD_INSTALL_DIR, RHD_DOWNLOAD_BASE.
 # RHD_DOWNLOAD_BASE replaces the GitHub release base URL entirely - useful
 # for mirrors and testing.
+# Scheme rule: https:// and file:// only; http:// is accepted for loopback
+# hosts (127.0.0.1, localhost, [::1]) alone - a plain-http mirror also serves
+# SHA256SUMS, so the checksum cannot detect a substitution.
 #
 # Design notes:
 # - Uses stable asset names published by CI; releases/latest/download/<asset>
@@ -82,6 +85,14 @@ $Asset = "rust-hf-downloader-$Triple.zip"
 # --- Resolve the release download base --------------------------------------------
 if ($env:RHD_DOWNLOAD_BASE) {
     $Base = $env:RHD_DOWNLOAD_BASE
+    # Trust rule (finding 10): a plain-http mirror serves both the asset and
+    # its SHA256SUMS, so a matching checksum proves nothing about the channel
+    # and the installer would run the mirror's binary. https:// and file://
+    # (offline/test dir) are accepted; http:// only for loopback hosts (the
+    # local mock servers the test suite uses). -match is case-insensitive.
+    if (($Base -notmatch '^(https|file)://') -and ($Base -notmatch '^http://(127\.0\.0\.1|localhost|\[::1\])([/:]|$)')) {
+        Fail "unsafe download base '$Base': only https:// and file:// are accepted, plus http:// for loopback hosts (127.0.0.1, localhost, [::1]) only - a plain-http mirror can serve a self-consistent SHA256SUMS and asset, which the checksum check cannot detect"
+    }
 } elseif ($Version) {
     if ($Version -notmatch '^v') { $Version = "v$Version" }
     $Base = "https://github.com/$Repo/releases/download/$Version"
@@ -141,7 +152,16 @@ if ($Uninstall) {
         if ($DryRun) { Write-Host "dry-run: would remove $Dest"; return }
         Remove-Item -LiteralPath $Dest -Force
         Write-Host "removed $Dest"
-        Remove-FromUserPath $InstallDir
+        # Never strip $CARGO_HOME\bin from the user PATH: rustup put it there
+        # for every cargo/rustup tool, and the InstallDir heuristic above can
+        # pick it (cargo takeover / cargo-binstall convention). Only undo a
+        # PATH entry this installer itself may have added.
+        $TrimmedInstall = if ($InstallDir) { $InstallDir.TrimEnd('\') } else { $null }
+        if ($TrimmedInstall -and $CargoBinTrimmed -and ($TrimmedInstall -eq $CargoBinTrimmed)) {
+            Write-Host "keeping $TrimmedInstall on your user PATH (cargo bin dir, shared with other tools)"
+        } else {
+            Remove-FromUserPath $InstallDir
+        }
     } else {
         Write-Host "nothing to uninstall: $Dest does not exist"
     }
@@ -210,10 +230,20 @@ try {
     # Windows locks a running exe: rename the old one aside, then move the new
     # one in. If the old exe is still locked, the rename fails with a clear
     # error instead of a half-written binary.
-    if (Test-Path -LiteralPath $Dest) {
-        Move-Item -LiteralPath $Dest -Destination "$Dest.old" -Force
+    try {
+        if (Test-Path -LiteralPath $Dest) {
+            Move-Item -LiteralPath $Dest -Destination "$Dest.old" -Force
+        }
+        Move-Item -LiteralPath $Exe -Destination $Dest -Force
+    } catch {
+        # The move-in can fail transiently (Defender/AV scanning the fresh exe
+        # holds a handle). $Tmp - the only copy of the new binary - is about to
+        # be deleted by the finally block, so put the old exe back first.
+        if ((Test-Path -LiteralPath "$Dest.old") -and (-not (Test-Path -LiteralPath $Dest))) {
+            Move-Item -LiteralPath "$Dest.old" -Destination $Dest -Force
+        }
+        throw
     }
-    Move-Item -LiteralPath $Exe -Destination $Dest -Force
     Remove-Item -LiteralPath "$Dest.old" -Force -ErrorAction SilentlyContinue
 
     $TrimmedDir = $InstallDir.TrimEnd('\')

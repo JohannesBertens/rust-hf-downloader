@@ -6,10 +6,11 @@
 //! cargo-built binary is never modified.
 //!
 //! Cross-platform trick for the swap tests: the served asset contains the
-//! *same* real binary, and `--force` drives the full download → verify →
-//! extract → swap path even though the version does not change. The
-//! version-compare path is covered separately with a 99.0.0 manifest and
-//! `--check` (no swap needed).
+//! *same* real binary, so the swap is byte-neutral. `--force` drives the full
+//! download → verify → extract → swap path on an *older* manifest (its one
+//! remaining purpose: reinstall/downgrade — a same-version manifest is simply
+//! up to date, force or not). The newer-version compare path is covered with a
+//! 99.0.0 manifest and `--check` (no swap needed).
 
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server, StatusCode};
@@ -262,13 +263,15 @@ async fn update_check_exits_70_when_newer_available() {
     assert_eq!(before, after, "--check must not touch the binary");
 }
 
-/// Full path with `--force`: same-version asset is downloaded, verified,
-/// extracted, and swapped in; the copy still runs afterwards.
+/// Full path with `--force` on an older manifest: the asset is downloaded,
+/// verified, extracted, and swapped in; the copy still runs afterwards.
+/// (`--force` is the only way past the up-to-date gate when the newest
+/// release is not newer than the installed one.)
 #[tokio::test]
 async fn update_force_swaps_binary_in_place() {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let base = spawn_release_server(ReleaseFixture {
-        version: current.clone(),
+        version: "0.0.1".into(),
         assets: vec![(platform_asset_name(), package_current_binary(), None)],
         manifest_override: None,
     })
@@ -288,6 +291,45 @@ async fn update_force_swaps_binary_in_place() {
         .expect("run swapped copy");
     assert!(ver.status.success());
     assert!(String::from_utf8_lossy(&ver.stdout).contains(&current));
+}
+
+/// `--check --force` on a same-version manifest is up to date, not a phantom
+/// `vX → vX` update: exit 0, no `available` event, binary untouched.
+#[tokio::test]
+async fn update_check_force_same_version_is_up_to_date() {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let base = spawn_release_server(ReleaseFixture {
+        version: current.clone(),
+        assets: vec![(platform_asset_name(), package_current_binary(), None)],
+        manifest_override: None,
+    })
+    .await;
+    let env = UpdateEnv::new("check-force-same");
+    let bin = env.binary_copy();
+    let before = std::fs::read(&bin).unwrap();
+
+    let (code, _out, err) = env.run(&base, &["update", "--check", "--force"]).await;
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(err.contains("up to date"), "stderr: {err}");
+    assert!(!err.contains("Update available"), "stderr: {err}");
+
+    let (code, out, err) = env
+        .run(&base, &["update", "--check", "--force", "--json"])
+        .await;
+    assert_eq!(code, 0, "stderr: {err}");
+    let events: Vec<Value> = out
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("each line is JSON"))
+        .collect();
+    let types: Vec<String> = events
+        .iter()
+        .map(|e| e["type"].as_str().expect("type tag").to_string())
+        .collect();
+    assert_eq!(types, vec!["checking", "up_to_date"], "events: {out}");
+
+    let after = std::fs::read(&bin).unwrap();
+    assert_eq!(before, after, "--check --force must not touch the binary");
 }
 
 /// Tampered checksum → exit 71, binary untouched.

@@ -6,10 +6,10 @@
 
 use super::api::{ModelInfo, ModelMetadata, QuantizationGroup};
 use super::ui::{FileTreeNode, SortDirection, SortField};
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
 
@@ -28,6 +28,26 @@ pub struct SearchKey {
     pub min_likes: u64,
 }
 
+/// How long a cached entry counts as fresh before
+/// [`ApiCache::get_or_fetch`] re-fetches it. A TUI left open for hours
+/// must not serve day-old file trees (a since-removed file 404s
+/// confusingly against the stale tree), but must not re-hit the API on
+/// every redraw either — 10 minutes is the hub-side staleness window the
+/// audit picked.
+pub(crate) const API_CACHE_TTL: Duration = Duration::from_secs(60 * 10);
+
+/// The freshness decision for one cached entry, factored out as a pure
+/// helper so the TTL boundary is unit-testable.
+///
+/// Boundary choice (documented): an entry whose age EXACTLY equals the
+/// TTL is already STALE (`age < TTL` is fresh) — re-validating one tick
+/// early is always safe, serving an over-TTL entry is the bug this fixes.
+/// `now` before `fetched_at` cannot happen on a monotonic clock, but the
+/// saturating subtraction keeps it fresh instead of panicking.
+pub(crate) fn entry_is_fresh(fetched_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(fetched_at) < API_CACHE_TTL
+}
+
 /// Unified API cache container for all cached data
 #[derive(Debug, Default)]
 pub struct ApiCache {
@@ -35,6 +55,18 @@ pub struct ApiCache {
     pub quantizations: QuantizationCache,
     pub file_trees: FileTreeCache,
     pub searches: SearchCache,
+    /// Fetch timestamps backing the TTL of [`ApiCache::get_or_fetch`]:
+    /// one map per model-keyed value map, keyed identically. An entry
+    /// present in its value map WITHOUT a timestamp is treated as STALE
+    /// (re-fetched) — simple and safe, because the only writer of the
+    /// three value maps is `get_or_fetch` itself, which always stamps.
+    /// `searches` is deliberately untimed: it is [`SearchKey`]-keyed and
+    /// written directly by `ui/app/search.rs` (its inline Entry insert,
+    /// outside this module), so a timestamp map here would have no owner;
+    /// search results keep their historical process-lifetime cache.
+    pub(crate) metadata_at: HashMap<String, Instant>,
+    pub(crate) quantizations_at: HashMap<String, Instant>,
+    pub(crate) file_trees_at: HashMap<String, Instant>,
 }
 
 /// Selects which model-keyed map of [`ApiCache`] a
@@ -43,6 +75,9 @@ pub struct ApiCache {
 pub trait CacheMapFor<V> {
     fn cache_map(&self) -> &HashMap<String, V>;
     fn cache_map_mut(&mut self) -> &mut HashMap<String, V>;
+    /// The fetch-timestamp map paired with [`Self::cache_map`].
+    fn stamp_map(&self) -> &HashMap<String, Instant>;
+    fn stamp_map_mut(&mut self) -> &mut HashMap<String, Instant>;
 }
 
 impl CacheMapFor<ModelMetadata> for ApiCache {
@@ -51,6 +86,12 @@ impl CacheMapFor<ModelMetadata> for ApiCache {
     }
     fn cache_map_mut(&mut self) -> &mut HashMap<String, ModelMetadata> {
         &mut self.metadata
+    }
+    fn stamp_map(&self) -> &HashMap<String, Instant> {
+        &self.metadata_at
+    }
+    fn stamp_map_mut(&mut self) -> &mut HashMap<String, Instant> {
+        &mut self.metadata_at
     }
 }
 
@@ -61,6 +102,12 @@ impl CacheMapFor<FileTreeNode> for ApiCache {
     fn cache_map_mut(&mut self) -> &mut HashMap<String, FileTreeNode> {
         &mut self.file_trees
     }
+    fn stamp_map(&self) -> &HashMap<String, Instant> {
+        &self.file_trees_at
+    }
+    fn stamp_map_mut(&mut self) -> &mut HashMap<String, Instant> {
+        &mut self.file_trees_at
+    }
 }
 
 impl CacheMapFor<Vec<QuantizationGroup>> for ApiCache {
@@ -70,6 +117,12 @@ impl CacheMapFor<Vec<QuantizationGroup>> for ApiCache {
     fn cache_map_mut(&mut self) -> &mut HashMap<String, Vec<QuantizationGroup>> {
         &mut self.quantizations
     }
+    fn stamp_map(&self) -> &HashMap<String, Instant> {
+        &self.quantizations_at
+    }
+    fn stamp_map_mut(&mut self) -> &mut HashMap<String, Instant> {
+        &mut self.quantizations_at
+    }
 }
 
 impl ApiCache {
@@ -78,16 +131,21 @@ impl ApiCache {
     /// Entry-API-insert pattern the TUI search/prefetch paths repeated six
     /// times (W4.11). Semantics are the historical ones, exactly:
     ///
-    /// - fast path: read lock, clone the cached value if present; the
-    ///   lock is dropped BEFORE the fetch (no former site held a cache
-    ///   lock across a fetch);
-    /// - on a miss the fetch runs unlocked, so two concurrent callers for
-    ///   the same key may both fetch — dedup happens at insert;
+    /// - fast path: read lock, clone the cached value if present AND
+    ///   fresh ([`entry_is_fresh`] on the map's paired timestamp; a
+    ///   missing timestamp counts as stale); the lock is dropped BEFORE
+    ///   the fetch (no former site held a cache lock across a fetch);
+    /// - on a miss (absent, stale, or un-stamped) the fetch runs
+    ///   unlocked, so two concurrent callers for the same key may both
+    ///   fetch — dedup happens at the write-lock re-check;
     /// - a failed fetch is returned as `Err` and NEVER cached — the next
     ///   call retries (both former sites retried);
-    /// - the insert goes through the Entry API under the write lock: the
-    ///   first completed fetch wins and every caller ends up with the
-    ///   map's final value for the key.
+    /// - the commit runs under the write lock and re-checks freshness
+    ///   first: a racing fetch that already installed a FRESH value wins
+    ///   (the historical first-completed-fetch-wins semantics, now
+    ///   re-established under the lock); otherwise the fresh fetch
+    ///   replaces the stale/absent entry and the TTL clock starts here
+    ///   (`Instant::now()`).
     pub async fn get_or_fetch<V, E, F, Fut>(
         cache: &Arc<parking_lot::RwLock<Self>>,
         model_id: &str,
@@ -99,23 +157,41 @@ impl ApiCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
     {
-        // Fast path: read lock only, dropped before the fetch.
-        if let Some(hit) = Self::cache_map(&*cache.read()).get(model_id).cloned() {
+        // Fast path: read lock only, dropped before the fetch. An entry
+        // without a timestamp is stale (see the `ApiCache` field docs).
+        let hit = {
+            let guard = cache.read();
+            Self::cache_map(&guard)
+                .get(model_id)
+                .zip(Self::stamp_map(&guard).get(model_id))
+                .filter(|(_, fetched_at)| entry_is_fresh(**fetched_at, Instant::now()))
+                .map(|(value, _)| value.clone())
+        };
+        if let Some(hit) = hit {
             return Ok(hit);
         }
 
         let fetched = fetch().await?;
 
-        // Get-or-insert under the write lock: a racing caller may have
-        // completed the same fetch — whoever inserted first wins.
+        // Re-check under the write lock: a racing get_or_fetch may have
+        // refreshed the key since the fast-path read — a fresh racing
+        // value wins (dedup at the commit, as before).
         let mut guard = cache.write();
-        match Self::cache_map_mut(&mut guard).entry(model_id.to_string()) {
-            Entry::Occupied(o) => Ok(o.get().clone()),
-            Entry::Vacant(v) => {
-                v.insert(fetched.clone());
-                Ok(fetched)
-            }
+        let now = Instant::now();
+        let raced = Self::cache_map(&guard)
+            .get(model_id)
+            .zip(Self::stamp_map(&guard).get(model_id))
+            .filter(|(_, fetched_at)| entry_is_fresh(**fetched_at, now))
+            .map(|(value, _)| value.clone());
+        if let Some(raced) = raced {
+            return Ok(raced);
         }
+
+        // Absent, stale, or un-stamped: the fresh fetch replaces the
+        // entry outright and the TTL clock restarts.
+        Self::cache_map_mut(&mut guard).insert(model_id.to_string(), fetched.clone());
+        Self::stamp_map_mut(&mut guard).insert(model_id.to_string(), now);
+        Ok(fetched)
     }
 }
 
@@ -236,5 +312,105 @@ mod get_or_fetch_tests {
         .unwrap();
         assert_eq!(ok.name, "recovered");
         assert_eq!(attempts.load(Ordering::Relaxed), 2, "the next call retries");
+    }
+
+    // ---- TTL (audit fix: a long-open TUI must not serve stale trees) ----
+
+    #[test]
+    fn entry_is_fresh_boundary_is_pure_and_documented() {
+        let base = Instant::now();
+        let at = |secs: u64| {
+            base.checked_add(Duration::from_secs(secs))
+                .expect("instant arithmetic")
+        };
+        assert!(entry_is_fresh(base, base), "age 0 is fresh");
+        assert!(
+            entry_is_fresh(base, at(API_CACHE_TTL.as_secs() - 1)),
+            "one tick under the TTL is fresh"
+        );
+        assert!(
+            !entry_is_fresh(base, at(API_CACHE_TTL.as_secs())),
+            "exactly at the TTL is stale (documented boundary: re-validate early)"
+        );
+        assert!(
+            !entry_is_fresh(base, at(API_CACHE_TTL.as_secs() + 60)),
+            "past the TTL is stale"
+        );
+        // Monotonic-clock paranoia: `now` before `fetched_at` stays fresh
+        // instead of panicking.
+        assert!(entry_is_fresh(at(60), base), "clock skew saturates");
+    }
+
+    #[tokio::test]
+    async fn stale_entry_is_refetched_and_restamped() {
+        let cache = Arc::new(parking_lot::RwLock::new(ApiCache::default()));
+        // Seed a value map entry WITHOUT a timestamp — the documented
+        // stale rule (only get_or_fetch writes the maps, and it always
+        // stamps; a timestamp-less entry must not be served).
+        {
+            let mut guard = cache.write();
+            guard
+                .file_trees
+                .insert("org/model".to_string(), tree("stale-value"));
+        }
+
+        let calls = AtomicUsize::new(0);
+        let value = ApiCache::get_or_fetch(&cache, "org/model", || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, Infallible>(tree("refetched"))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "stale entry refetches");
+        assert_eq!(value.name, "refetched");
+        assert_eq!(cache.read().file_trees["org/model"].name, "refetched");
+        assert!(
+            cache.read().file_trees_at.contains_key("org/model"),
+            "the refetch stamps the entry"
+        );
+
+        // Fresh now → the next call is a cheap hit.
+        let second = ApiCache::get_or_fetch(&cache, "org/model", || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, Infallible>(tree("should-not-appear"))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "fresh entry is a hit");
+        assert_eq!(second.name, "refetched");
+    }
+
+    #[tokio::test]
+    async fn expired_timestamp_is_treated_as_stale() {
+        let cache = Arc::new(parking_lot::RwLock::new(ApiCache::default()));
+        // An explicitly expired stamp must trigger a refetch. The
+        // past-Instant build can fail on a machine that booted less than
+        // one TTL ago; then this case adds nothing over
+        // `stale_entry_is_refetched_and_restamped`, so it skips.
+        let Some(expired) = Instant::now().checked_sub(API_CACHE_TTL + Duration::from_secs(1))
+        else {
+            return;
+        };
+        {
+            let mut guard = cache.write();
+            guard
+                .file_trees
+                .insert("org/model".to_string(), tree("stale-value"));
+            guard.file_trees_at.insert("org/model".to_string(), expired);
+        }
+
+        let calls = AtomicUsize::new(0);
+        let value = ApiCache::get_or_fetch(&cache, "org/model", || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, Infallible>(tree("refetched"))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "expired timestamp refetches"
+        );
+        assert_eq!(value.name, "refetched");
     }
 }

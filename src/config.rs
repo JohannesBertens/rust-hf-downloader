@@ -147,10 +147,14 @@ fn mbps_to_bytes_per_sec(mbps: f64) -> u64 {
 /// accepted and merely pathological (billions of 1-byte chunks) by design —
 /// the UI's display ranges are the sanity guard. `max_retries` and
 /// `retry_delay_secs` keep `0` (meaningful), the rate-limit pair keeps `0`
-/// (`0 = unlimited`, see `docs/DEFERRED.md#rate-limiter-zero-rate`), and
-/// `verification_buffer_size` is NOT clamped: `utils::stream_file_digest`
-/// documents a zero inner buffer as its one-byte-at-a-time read mode, so
-/// zero is safe and meaningful there.
+/// (`0 = unlimited`, see `docs/DEFERRED.md#rate-limiter-zero-rate`).
+/// `verification_buffer_size` keeps its zero one-byte-at-a-time read mode
+/// (`utils::stream_file_digest` documents a zero inner buffer) but IS
+/// capped at 16 MiB: the verification path allocates the value verbatim
+/// (`vec![0u8; size.max(1)]` + `BufReader::with_capacity`), so a
+/// hand-edited gigabyte-scale value would abort the process on every
+/// verification. 16 MiB sits far above any legitimate value (the UI tops
+/// out at 512 KiB), so no hand-configured value is meaningfully rewritten.
 pub(crate) fn normalize_engine_options(options: &mut AppOptions) {
     options.concurrent_threads = options.concurrent_threads.max(1);
     options.num_chunks = options.num_chunks.max(1);
@@ -163,6 +167,9 @@ pub(crate) fn normalize_engine_options(options: &mut AppOptions) {
     options.verification_update_interval = options.verification_update_interval.max(1);
     options.download_timeout_secs = options.download_timeout_secs.max(1);
     options.progress_update_interval_ms = options.progress_update_interval_ms.max(1);
+    // Ceiling, not a floor: huge values are allocated verbatim by the
+    // verification worker; zero stays legal (one-byte read mode).
+    options.verification_buffer_size = options.verification_buffer_size.min(16 * 1024 * 1024);
 }
 
 /// All 14 engine-tunable options: download chunking/retries/timeout/cadence
@@ -355,8 +362,10 @@ mod tests {
     /// Audit fix 2 (clamp matrix): every value that hangs or panics the
     /// engine lands on its safety floor, in-range values pass through
     /// untouched, and the deliberately-unclamped fields keep their value
-    /// (`verification_buffer_size = 0` is a supported read mode; `0` is
-    /// meaningful for retries/retry delay and for the rate-limit pair).
+    /// (`verification_buffer_size = 0` is a supported read mode — but the
+    /// buffer is capped at 16 MiB against hand-edited gigabyte values;
+    /// `0` is meaningful for retries/retry delay and for the rate-limit
+    /// pair).
     #[test]
     fn normalize_engine_options_clamps_dangerous_values_to_the_safe_floors() {
         // Every hang/panic value of the audit table at once.
@@ -424,6 +433,20 @@ mod tests {
         );
         assert_eq!(reversed.min_chunk_size, 10 << 20, "min is not lowered");
         assert_eq!(reversed.max_chunk_size, 10 << 20, "max raised to the min");
+
+        // Buffer ceiling (audit fix): the verification worker allocates
+        // the value verbatim, so a hand-edited oversized value lands on
+        // the 16 MiB cap instead of aborting the process.
+        let mut oversized = crate::models::AppOptions {
+            verification_buffer_size: usize::MAX,
+            ..Default::default()
+        };
+        normalize_engine_options(&mut oversized);
+        assert_eq!(
+            oversized.verification_buffer_size,
+            16 * 1024 * 1024,
+            "gigabyte-scale buffer values are capped at 16 MiB"
+        );
 
         // In-range values pass through untouched (no silent override of
         // legitimate hand-configured values — the UI's display ranges are

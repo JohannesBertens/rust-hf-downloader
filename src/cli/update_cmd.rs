@@ -4,6 +4,7 @@ use super::args::UpdateArgs;
 use super::{EXIT_CHECKSUM, EXIT_FAILURE, EXIT_OK, EXIT_UPDATE_AVAILABLE};
 use serde::Serialize;
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// NDJSON event stream for `update --json` (mirrors `Event`'s style).
@@ -52,6 +53,7 @@ fn update_error_code(err: &crate::update::UpdateError) -> &'static str {
         UpdateError::Archive(_) => "archive",
         UpdateError::Swap(_) => "swap",
         UpdateError::Io(_) => "io",
+        UpdateError::InsecureBase { .. } => "insecure_base",
     }
 }
 
@@ -90,6 +92,11 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
         }
     };
     let base = update::base_url();
+    // Trust rule (finding 10): a manifest+asset pair from a plain-http mirror
+    // is self-consistent, so the SHA256 check cannot detect a MITM swap.
+    if let Err(e) = update::validate_base_url(&base) {
+        return update_fail(&e, &emit);
+    }
 
     let (manifest, latest) = match update::fetch_manifest(&client, &base).await {
         Ok(v) => v,
@@ -105,7 +112,7 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
         Err(e) => return update_fail(&e, &emit),
     };
 
-    if latest <= current && !args.force {
+    if update::should_skip_update(latest, current, args.force) {
         if args.json {
             emit(UpdateEvent::UpToDate {
                 current: current.to_string(),
@@ -176,18 +183,20 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
 
     let binary_path = match update::extract_binary(&archive_path, asset.format) {
         Ok(p) => p,
-        Err(e) => return update_fail(&e, &emit),
+        Err(e) => {
+            cleanup_archive(&archive_path);
+            return update_fail(&e, &emit);
+        }
     };
     // `swap` takes only the staged binary: `self_replace` resolves the
     // running executable itself (the former `current_exe` argument was
     // ignored — dropped in M4/C5 as the smaller change).
     if let Err(e) = update::swap(&binary_path) {
+        cleanup_archive(&archive_path);
         return update_fail(&e, &emit);
     }
     // Best-effort temp cleanup; self_replace consumed the staged binary.
-    if let Some(parent) = archive_path.parent() {
-        let _ = std::fs::remove_dir_all(parent);
-    }
+    cleanup_archive(&archive_path);
 
     if args.json {
         emit(UpdateEvent::Updated {
@@ -199,6 +208,16 @@ pub async fn run_update(args: UpdateArgs) -> i32 {
         eprintln!("Restart any running instance to pick up the new version.");
     }
     EXIT_OK
+}
+
+/// Best-effort removal of the temp tree holding a downloaded archive (its
+/// parent dir, which also holds the staged binary). Every post-download
+/// exit path — success, extraction failure, swap failure — calls this so a
+/// failed update never leaks a multi-MB archive.
+fn cleanup_archive(archive: &Path) {
+    if let Some(parent) = archive.parent() {
+        let _ = std::fs::remove_dir_all(parent);
+    }
 }
 
 fn update_fail(err: &crate::update::UpdateError, emit: &dyn Fn(UpdateEvent)) -> i32 {

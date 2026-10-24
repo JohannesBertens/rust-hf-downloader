@@ -248,6 +248,24 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
         }
     };
 
+    // The SHA comes from the endpoint, not from the user: a hostile
+    // HF_ENDPOINT mirror or a MITM must not be able to hand us `../../x`,
+    // which would become `snapshots/<sha>/…` (and be deleted by a later
+    // relink). The clap-level 40-hex check covers `--revision` only, never
+    // this response.
+    if !crate::cache_layout::is_hex_oid(&sha) {
+        reporter.emit(&Event::Error {
+            code: "invalid_sha".to_string(),
+            message: format!(
+                "the API endpoint returned an invalid revision sha {sha:?} for {} \
+                 (expected 40 or 64 hex characters); refusing to write to the cache",
+                args.model_id
+            ),
+            available: None,
+        });
+        return EXIT_FAILURE;
+    }
+
     // --- 4. Selection precedence (plans/hf-cache-sync.md §2.2) -------------------------------------
     let tree_paths: Vec<&str> = metadata
         .siblings
@@ -888,6 +906,9 @@ mod tests {
     }
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+    /// A hex LFS oid (sha256 width): blob oids are path components and are
+    /// validated as hex oids before they become `blobs/<oid>`.
+    const LFS_OID: &str = "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b";
 
     /// Staged file under `repo/.rhd-staging/<repo_path>` with the given
     /// bytes; returns (repo_dir, staging).
@@ -909,7 +930,7 @@ mod tests {
     fn lfs_item(repo_path: &str) -> crate::cache_layout::FetchItem {
         crate::cache_layout::FetchItem {
             repo_path: repo_path.to_string(),
-            blob_oid: Some("lfsoid".to_string()),
+            blob_oid: Some(LFS_OID.to_string()),
             size: 8,
             sha256: Some("cafebabe".to_string()),
         }
@@ -947,7 +968,7 @@ mod tests {
         assert!(gate.failures.is_empty(), "{:?}", gate.failures);
         // Blobs landed; staging consumed; snapshot entries are copies
         // (copy mode: no symlinks) resolving to the blob bytes.
-        assert!(repo.join("blobs").join("lfsoid").is_file());
+        assert!(repo.join("blobs").join(LFS_OID).is_file());
         assert_eq!(
             std::fs::read(repo.join("snapshots").join(SHA).join("a.bin")).unwrap(),
             b"payload-a\n"
@@ -959,7 +980,7 @@ mod tests {
         assert!(matches!(
             &gate.emissions[0],
             PublishGateEmission::FilePublished { path, blob }
-                if path == "a.bin" && blob == "lfsoid"
+                if path == "a.bin" && blob == LFS_OID
         ));
         let _ = std::fs::remove_dir_all(&repo);
     }

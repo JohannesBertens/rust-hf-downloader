@@ -1260,3 +1260,52 @@ fn save_is_atomic_no_temp_litter() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Audit fix: a corrupt (unparseable) registry must NOT be silently
+/// reset — the unreadable file is archived to `.corrupt` before the
+/// empty default is returned, so the next save cannot wipe the user's
+/// download history without a trace.
+#[test]
+fn corrupt_registry_is_archived_to_corrupt_before_resetting_to_empty() {
+    let _env = crate::paths::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tmp("corrupt-load");
+    let _guard = DataDirGuard::install(&tmp);
+
+    let garbage = "this is ] not [ valid toml \x00";
+    std::fs::write(crate::paths::registry_path(), garbage).expect("write garbage");
+
+    // First read: empty registry AND the garbage bytes preserved in the
+    // `.corrupt` backup under the same directory.
+    let registry = read_registry();
+    assert!(
+        registry.downloads.is_empty(),
+        "a corrupt registry must load as empty"
+    );
+    let corrupt = crate::paths::registry_path().with_extension("corrupt");
+    assert_eq!(
+        std::fs::read_to_string(&corrupt).expect("corrupt backup exists"),
+        garbage,
+        "the backup must preserve the exact garbage bytes"
+    );
+
+    // A second read with the original file gone (renamed away) is the
+    // missing-file path: empty again, no panic, no warning.
+    assert!(!crate::paths::registry_path().exists());
+    assert!(
+        read_registry().downloads.is_empty(),
+        "the second read must stay empty and warning-free"
+    );
+
+    // A re-corrupt while a `.corrupt` already exists overwrites the old
+    // backup (documented best-effort semantics, never fails the load).
+    std::fs::write(crate::paths::registry_path(), "[[downloads = broken").expect("write #2");
+    assert!(read_registry().downloads.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(&corrupt).expect("backup overwritten"),
+        "[[downloads = broken"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

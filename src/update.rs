@@ -5,7 +5,9 @@
 //! - Version + checksum manifest `latest.json`, served as a release asset at
 //!   `releases/latest/download/latest.json` — a GitHub CDN redirect with no
 //!   api.github.com rate limit. `RHD_UPDATE_BASE` overrides the base URL
-//!   entirely (mirrors; same contract as the installers' RHD_DOWNLOAD_BASE).
+//!   entirely (mirrors; same contract as the installers' RHD_DOWNLOAD_BASE),
+//!   subject to the scheme rule in [`validate_base_url`]: https/file only,
+//!   http only on loopback.
 //! - The HTTP client here is deliberately separate from `http_client.rs`:
 //!   update traffic must never carry the HuggingFace token.
 //! - The swap is delegated to `self_replace` (Unix: atomic rename over the
@@ -35,6 +37,46 @@ pub const BIN_NAME: &str = "rust-hf-downloader";
 pub fn base_url() -> String {
     let base = std::env::var("RHD_UPDATE_BASE").unwrap_or_else(|_| DEFAULT_BASE.to_string());
     base.trim_end_matches('/').to_string()
+}
+
+/// Enforces the scheme rule for a release base URL (finding 10).
+///
+/// A manifest + asset served over plain http is trivially MITM-able: the
+/// attacker controls *both* the asset and its SHA256, so "checksum ok" proves
+/// nothing about the channel and the tool would install the attacker's binary.
+/// Therefore: `https://` and `file://` (the documented offline/test path) are
+/// accepted, `http://` only for loopback hosts (the local mock servers the
+/// e2e tests run against), everything else — `http://mirror.example`,
+/// `ftp://`, unparseable strings — is rejected.
+pub fn validate_base_url(base: &str) -> Result<(), UpdateError> {
+    let parsed = url::Url::parse(base)
+        .map_err(|e| UpdateError::insecure_base(base, format!("not a valid absolute URL ({e})")))?;
+    match parsed.scheme() {
+        "https" | "file" => Ok(()),
+        "http" => {
+            // Matched on `Host` rather than `host_str()`: in url 2.4.1 the
+            // latter keeps the IPv6 brackets (`"[::1]"`), which would never
+            // parse as an IpAddr.
+            let loopback = match parsed.host() {
+                Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+                None => false,
+            };
+            if loopback {
+                Ok(())
+            } else {
+                Err(UpdateError::insecure_base(
+                    base,
+                    "plain http is only allowed for loopback hosts".to_string(),
+                ))
+            }
+        }
+        other => Err(UpdateError::insecure_base(
+            base,
+            format!("unsupported scheme {other:?}"),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +155,16 @@ impl std::fmt::Display for VersionTriple {
     }
 }
 
+/// Whether the update check should stop here and report "up to date".
+///
+/// `latest == current` is always up to date — `--force` exists to allow a
+/// deliberate reinstall/downgrade (`latest < current`), not to announce a
+/// phantom `vX → vX` update (which made `update --check --force` exit 70 on a
+/// current install).
+pub fn should_skip_update(latest: VersionTriple, current: VersionTriple, force: bool) -> bool {
+    latest == current || (latest <= current && !force)
+}
+
 // ---------------------------------------------------------------------------
 // Platform
 // ---------------------------------------------------------------------------
@@ -143,12 +195,32 @@ pub fn target_triple() -> Option<&'static str> {
 pub enum UpdateError {
     Network(String),
     UnsupportedPlatform,
-    NoAssetForPlatform { triple: String },
+    NoAssetForPlatform {
+        triple: String,
+    },
     MalformedManifest(String),
-    Checksum { expected: String, actual: String },
+    Checksum {
+        expected: String,
+        actual: String,
+    },
     Archive(String),
     Swap(String),
     Io(String),
+    /// A release base URL whose scheme is not trusted (see
+    /// [`validate_base_url`]); `reason` says why this specific base lost.
+    InsecureBase {
+        base: String,
+        reason: String,
+    },
+}
+
+impl UpdateError {
+    fn insecure_base(base: &str, reason: String) -> Self {
+        UpdateError::InsecureBase {
+            base: base.to_string(),
+            reason,
+        }
+    }
 }
 
 impl std::fmt::Display for UpdateError {
@@ -176,6 +248,13 @@ impl std::fmt::Display for UpdateError {
             UpdateError::Archive(m) => write!(f, "bad release archive: {m}"),
             UpdateError::Swap(m) => write!(f, "could not replace the running binary: {m}"),
             UpdateError::Io(m) => write!(f, "filesystem error: {m}"),
+            UpdateError::InsecureBase { base, reason } => write!(
+                f,
+                "refusing release base URL {base:?} ({reason}); accepted schemes are \
+                 https:// and file://, plus http:// for loopback hosts \
+                 (127.0.0.1, localhost, ::1) only — a plain-http mirror can serve \
+                 a self-consistent manifest and asset, which the SHA256 check cannot detect"
+            ),
         }
     }
 }
@@ -204,72 +283,157 @@ pub async fn fetch_manifest(
 }
 
 /// Resolves the asset spec for a target triple from a fetched manifest.
+///
+/// The asset name is validated here — the single place a manifest-supplied
+/// name is resolved — before any caller can `join` it onto a directory.
 pub fn manifest_asset<'a>(
     manifest: &'a Manifest,
     triple: &str,
 ) -> Result<&'a AssetSpec, UpdateError> {
-    manifest
+    let spec = manifest
         .assets
         .get(triple)
         .ok_or_else(|| UpdateError::NoAssetForPlatform {
             triple: triple.to_string(),
-        })
+        })?;
+    validate_asset_name(&spec.name).map_err(|e| match e {
+        UpdateError::MalformedManifest(m) => {
+            UpdateError::MalformedManifest(format!("{m} (target {triple})"))
+        }
+        other => other,
+    })?;
+    Ok(spec)
+}
+
+/// Rejects manifest asset names that are not a single plain file component.
+///
+/// `dir.join(&spec.name)` REPLACES `dir` for an absolute name and walks out of
+/// it for `..`, so a hostile `latest.json` could steer the download (and its
+/// self-consistent SHA256) anywhere the user can write. Approved asset names
+/// are flat file names (`rust-hf-downloader-<triple>.tar.gz`), so anything with
+/// a separator or a dot-component is rejected outright.
+pub fn validate_asset_name(name: &str) -> Result<(), UpdateError> {
+    let flat = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && Path::new(name).file_name() == Some(std::ffi::OsStr::new(name));
+    if flat {
+        Ok(())
+    } else {
+        Err(UpdateError::MalformedManifest(format!(
+            "asset name {name:?} is not a plain file name \
+             (must be one path component without separators, '.' or '..')"
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Download + verify
 // ---------------------------------------------------------------------------
 
-/// Streams the asset into a fresh temp dir, hashing as it goes; verifies the
-/// SHA256 against the manifest before returning the path.
+/// Streams the asset into a privately created temp dir (exclusive create, a
+/// pre-existing path is never reused), hashing as it goes; verifies the
+/// SHA256 against the manifest before returning the path. Any failure —
+/// checksum mismatch included — removes the temp dir again.
 pub async fn download_asset(
     client: &reqwest::Client,
     base: &str,
     spec: &AssetSpec,
     progress: &mut (dyn FnMut(u64, u64) + Send + Sync),
 ) -> Result<PathBuf, UpdateError> {
-    let dir = std::env::temp_dir().join(format!("rhd-update-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| UpdateError::Io(format!("creating {}: {e}", dir.display())))?;
+    let dir = create_private_temp_dir()?;
     let dest = dir.join(&spec.name);
-
     let url = format!("{base}/{}", spec.name);
-    let mut resp = client
-        .get(&url)
-        .timeout(ASSET_TIMEOUT)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| UpdateError::Network(format!("fetching {url}: {e}")))?;
-    let total: u64 = resp.content_length().unwrap_or(0);
 
-    let mut file = std::fs::File::create(&dest)
-        .map_err(|e| UpdateError::Io(format!("creating {}: {e}", dest.display())))?;
-    let mut hasher = Sha256::new();
-    let mut downloaded: u64 = 0;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| UpdateError::Network(format!("streaming {url}: {e}")))?
-    {
-        use std::io::Write;
-        hasher.update(&chunk);
-        file.write_all(&chunk)
-            .map_err(|e| UpdateError::Io(format!("writing {}: {e}", dest.display())))?;
-        downloaded += chunk.len() as u64;
-        progress(downloaded, total);
-    }
-    drop(file);
+    let streamed: Result<(), UpdateError> = async {
+        let mut resp = client
+            .get(&url)
+            .timeout(ASSET_TIMEOUT)
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+            .map_err(|e| UpdateError::Network(format!("fetching {url}: {e}")))?;
+        let total: u64 = resp.content_length().unwrap_or(0);
 
-    let actual = hex::encode(hasher.finalize());
-    if !actual.eq_ignore_ascii_case(&spec.sha256) {
-        let _ = std::fs::remove_file(&dest);
-        return Err(UpdateError::Checksum {
-            expected: spec.sha256.clone(),
-            actual,
-        });
+        // `create_new` instead of `File::create`: an attacker-planted symlink
+        // (or file) at the destination is rejected, never followed/written
+        // through.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|e| UpdateError::Io(format!("creating {}: {e}", dest.display())))?;
+        let mut hasher = Sha256::new();
+        let mut downloaded: u64 = 0;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| UpdateError::Network(format!("streaming {url}: {e}")))?
+        {
+            use std::io::Write;
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .map_err(|e| UpdateError::Io(format!("writing {}: {e}", dest.display())))?;
+            downloaded += chunk.len() as u64;
+            progress(downloaded, total);
+        }
+        drop(file);
+
+        let actual = hex::encode(hasher.finalize());
+        if !actual.eq_ignore_ascii_case(&spec.sha256) {
+            return Err(UpdateError::Checksum {
+                expected: spec.sha256.clone(),
+                actual,
+            });
+        }
+        Ok(())
     }
-    Ok(dest)
+    .await;
+
+    match streamed {
+        Ok(()) => Ok(dest),
+        Err(e) => {
+            // EVERY post-creation failure (checksum mismatch included) drops
+            // the whole temp tree — a failed update must not leak a multi-MB
+            // archive into /tmp.
+            let _ = std::fs::remove_dir_all(&dir);
+            Err(e)
+        }
+    }
+}
+
+/// Exclusively creates a private temp dir and returns its path.
+///
+/// `create_dir_all` on a predictable `rhd-update-<pid>` name accepts a
+/// directory (or symlink) a local attacker planted beforehand; `create_dir`
+/// fails on ANY existing path, so the candidate is retried with more entropy
+/// (epoch nanos + attempt counter) until one lands.
+fn create_private_temp_dir() -> Result<PathBuf, UpdateError> {
+    const ATTEMPTS: u32 = 8;
+    let base = std::env::temp_dir();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for attempt in 0..ATTEMPTS {
+        let dir = base.join(format!(
+            "rhd-update-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            attempt
+        ));
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(UpdateError::Io(format!("creating {}: {e}", dir.display()))),
+        }
+    }
+    Err(UpdateError::Io(format!(
+        "could not create a private temp directory under {} ({ATTEMPTS} candidate names already existed)",
+        base.display()
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -298,7 +462,20 @@ pub fn extract_binary(archive: &Path, format: AssetFormat) -> Result<PathBuf, Up
     }
 
     match found {
-        1 => Ok(dest),
+        1 => {
+            // A 0-byte member (empty regular file, or a non-file member whose
+            // data read yields nothing) passes the manifest checksum and would
+            // be swapped in as an empty binary.
+            let len = std::fs::metadata(&dest)
+                .map_err(|e| UpdateError::Archive(format!("stating {}: {e}", dest.display())))?
+                .len();
+            if len == 0 {
+                return Err(UpdateError::Archive(format!(
+                    "the `{BIN_NAME}` member extracted to 0 bytes"
+                )));
+            }
+            Ok(dest)
+        }
         0 => Err(UpdateError::Archive(format!(
             "no `{BIN_NAME}` member found"
         ))),
@@ -325,6 +502,12 @@ fn extract_tar_gz(
         .map_err(|e| UpdateError::Archive(format!("reading tar: {e}")))?
     {
         let mut entry = entry.map_err(|e| UpdateError::Archive(format!("tar entry: {e}")))?;
+        // Only regular files may become the staged binary: a `directory` entry
+        // named `rust-hf-downloader/` matches the basename test and its data
+        // read yields 0 bytes. Skipping it here means "no member found".
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let path = entry
             .path()
             .map_err(|e| UpdateError::Archive(format!("tar entry path: {e}")))?
@@ -383,6 +566,13 @@ fn extract_zip(
         let mut entry = zip
             .by_index(i)
             .map_err(|e| UpdateError::Archive(format!("zip entry {i}: {e}")))?;
+        // Mirror of the tar entry-type guard: a directory member named
+        // `rust-hf-downloader/` matches the basename test and extracts to
+        // 0 bytes. Skipping it means "no member found". (The 0-byte guard is
+        // shared in `extract_binary`.) cfg(windows): compile-blind on CI.
+        if entry.is_dir() {
+            continue;
+        }
         let name = entry.name().to_string();
         if !matches(&name) {
             continue;
@@ -510,16 +700,246 @@ mod tests {
     }
 
     #[test]
+    fn should_skip_update_covers_force_matrix() {
+        let old = VersionTriple::parse("2.9.0").unwrap();
+        let cur = VersionTriple::parse("2.10.0").unwrap();
+        let new = VersionTriple::parse("2.11.0").unwrap();
+
+        // Newer release: always offer the update, force or not.
+        assert!(!should_skip_update(new, cur, false));
+        assert!(!should_skip_update(new, cur, true));
+        // Identical version: up to date even with --force (the phantom
+        // `vX → vX` / exit-70 bug).
+        assert!(should_skip_update(cur, cur, false));
+        assert!(should_skip_update(cur, cur, true));
+        // Older release: skipped unless --force asks for the reinstall.
+        assert!(should_skip_update(old, cur, false));
+        assert!(!should_skip_update(old, cur, true));
+    }
+
+    /// Manifest with a single asset under triple `t` carrying `name`.
+    fn manifest_with_name(name: &str) -> Manifest {
+        let raw = serde_json::json!({
+            "version": "2.11.0",
+            "assets": { "t": { "name": name, "format": "tar-gz", "sha256": "aa" } }
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
+    #[test]
+    fn validate_asset_name_accepts_only_plain_file_names() {
+        assert!(validate_asset_name("ok-name.tar.gz").is_ok());
+        assert!(validate_asset_name(BIN_NAME).is_ok());
+        for bad in ["/abs/path", "../rel", "a/b", "a\\b", ".", "..", ""] {
+            let err = validate_asset_name(bad).unwrap_err();
+            assert!(
+                matches!(&err, UpdateError::MalformedManifest(m) if m.contains(&format!("{bad:?}"))),
+                "{bad:?} → {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_asset_rejects_escaping_asset_names() {
+        // A name with a path component would escape the temp dir at
+        // `dir.join(&spec.name)`; the checksum is self-consistent, so nothing
+        // else catches it.
+        for bad in ["/home/x/.bashrc", "../rust-hf-downloader"] {
+            let err = manifest_asset(&manifest_with_name(bad), "t").unwrap_err();
+            assert!(
+                matches!(&err, UpdateError::MalformedManifest(m) if m.contains(bad)),
+                "{bad} → {err}"
+            );
+        }
+        assert!(manifest_asset(&manifest_with_name("rust-hf-downloader-x.tar.gz"), "t").is_ok());
+        // Unknown triple still reports the missing asset, not a name problem.
+        assert!(matches!(
+            manifest_asset(&manifest_with_name("ok.tar.gz"), "other"),
+            Err(UpdateError::NoAssetForPlatform { .. })
+        ));
+    }
+
+    // -- hostile release archives (tar.gz is the Unix release format) --------
+
+    /// In-memory tar.gz from `(name, bytes, entry_type)` triples.
+    #[cfg(unix)]
+    fn tar_gz(entries: &[(&str, &[u8], tar::EntryType)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (name, bytes, kind) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(*kind);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(if kind.is_dir() { 0o755 } else { 0o644 });
+            builder
+                .append_data(&mut header, *name, *bytes)
+                .expect("tar append");
+        }
+        let raw = builder.into_inner().expect("tar finish");
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut enc, &raw).expect("gzip");
+        enc.finish().expect("gzip finish")
+    }
+
+    /// Scratch dir holding the archive under test (and, after extraction, the
+    /// staged binary). One unique dir per test — same pid across tests.
+    #[cfg(unix)]
+    struct Stage {
+        dir: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl Stage {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "rhd-update-unit-{}-{}",
+                tag,
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create unit scratch dir");
+            Stage { dir }
+        }
+
+        fn archive(&self, bytes: &[u8]) -> PathBuf {
+            let path = self.dir.join("release.tar.gz");
+            std::fs::write(&path, bytes).expect("write archive");
+            path
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Stage {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_accepts_a_single_regular_member() {
+        // Sanity pin: the guards below must not reject a well-formed archive.
+        let stage = Stage::new("ok-member");
+        let archive = stage.archive(&tar_gz(&[(
+            BIN_NAME,
+            b"binary-bytes",
+            tar::EntryType::Regular,
+        )]));
+        let bin = extract_binary(&archive, AssetFormat::TarGz).expect("extract");
+        assert_eq!(bin.file_name().unwrap(), BIN_NAME);
+        assert_eq!(std::fs::read(&bin).unwrap(), b"binary-bytes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_rejects_duplicate_binary_members() {
+        let stage = Stage::new("dup-members");
+        let archive = stage.archive(&tar_gz(&[
+            (BIN_NAME, b"good", tar::EntryType::Regular),
+            (BIN_NAME, b"evil", tar::EntryType::Regular),
+        ]));
+        let err = extract_binary(&archive, AssetFormat::TarGz).unwrap_err();
+        assert!(
+            matches!(&err, UpdateError::Archive(m) if m.contains("expected exactly 1")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_rejects_empty_binary_member() {
+        // A 0-byte regular file passes the manifest checksum (the manifest
+        // hashes the ARCHIVE, not the member) and would be swapped in as an
+        // empty binary.
+        let stage = Stage::new("empty-member");
+        let archive = stage.archive(&tar_gz(&[(BIN_NAME, b"", tar::EntryType::Regular)]));
+        let err = extract_binary(&archive, AssetFormat::TarGz).unwrap_err();
+        assert!(
+            matches!(&err, UpdateError::Archive(m) if m.contains("0 bytes")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_ignores_directory_member_named_like_the_binary() {
+        // `file_name()` strips the trailing slash, so a directory entry would
+        // otherwise match and "extract" to 0 bytes.
+        let stage = Stage::new("dir-member");
+        let dir_name = format!("{BIN_NAME}/");
+        let archive = stage.archive(&tar_gz(&[(
+            dir_name.as_str(),
+            b"",
+            tar::EntryType::Directory,
+        )]));
+        let err = extract_binary(&archive, AssetFormat::TarGz).unwrap_err();
+        assert!(
+            matches!(&err, UpdateError::Archive(m) if m.starts_with("no `") && m.contains("member found")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn base_url_strips_trailing_slash_and_honors_override() {
         // SAFETY: tests run multi-threaded but sequentially within this module.
+        // A loopback http base: the override is passed through verbatim here,
+        // the SCHEME rule lives in `validate_base_url` (checked below).
         let key = "RHD_UPDATE_BASE";
         let prev = std::env::var_os(key);
-        unsafe { std::env::set_var(key, "http://mirror.example/releases//") };
-        assert_eq!(base_url(), "http://mirror.example/releases");
+        unsafe { std::env::set_var(key, "http://127.0.0.1:8080/releases//") };
+        assert_eq!(base_url(), "http://127.0.0.1:8080/releases");
         match prev {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
         }
         assert!(!base_url().ends_with('/'));
+    }
+
+    #[test]
+    fn validate_base_url_accepts_https_file_and_loopback_http() {
+        for ok in [
+            DEFAULT_BASE,
+            "https://mirror.example/releases",
+            "HTTPS://Mirror.Example/releases", // scheme match is case-insensitive
+            "http://127.0.0.1:8080/x",
+            "http://127.0.0.1",
+            "http://localhost:8080",
+            "http://LOCALHOST/x",
+            "http://[::1]:8080/x",
+            "http://[::1]",
+            "http://127.0.0.53:9/notes", // whole 127/8 is loopback
+            "file:///tmp/r",
+        ] {
+            assert!(validate_base_url(ok).is_ok(), "{ok} should be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_base_url_rejects_plaintext_mirrors_and_garbage() {
+        // `http://mirror.example` was pinned as VALID before finding 10: a
+        // plain-http mirror serves a self-consistent manifest + asset, so the
+        // SHA256 check cannot detect the substitution.
+        for bad in [
+            "http://mirror.example",
+            "http://mirror.example:8080/releases",
+            "http://10.0.0.5:8080/releases",
+            "http://127.0.0.1.evil.example/releases", // prefix match is not loopback
+            "http://notlocalhost:8080",
+            "ftp://mirror.example/releases",
+            "//mirror.example/releases",
+            "mirror.example/releases",
+            "notaurl",
+            "",
+        ] {
+            let err = validate_base_url(bad).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                matches!(&err, UpdateError::InsecureBase { base, .. } if base == bad),
+                "{bad:?} → {err}"
+            );
+            // The message names the offending base AND the accepted-scheme rule.
+            assert!(msg.contains(&format!("{bad:?}")), "{bad:?}: {msg}");
+            assert!(msg.contains("https://"), "{bad:?}: {msg}");
+            assert!(msg.contains("loopback"), "{bad:?}: {msg}");
+        }
     }
 }

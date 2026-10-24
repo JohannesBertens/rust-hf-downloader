@@ -1264,3 +1264,34 @@ async fn sync_progress_plain_prints_lines_without_tty() {
     // The progress assertions are about a run that really synced.
     assert!(cache.join("models--a--b/refs/main").exists());
 }
+
+/// A hostile `HF_ENDPOINT` mirror (or a MITM) that answers the revision
+/// endpoint with a path-escaping commit SHA must not be able to steer the
+/// sync outside the hub cache: the SHA is validated as a hex commit SHA
+/// before any plan/publish, so nothing is written and the run fails.
+#[tokio::test]
+async fn evil_revision_sha_from_the_endpoint_is_rejected() {
+    let mut repo = plain_repo();
+    repo.revisions[0].sha = "../../evil".to_string();
+    let (endpoint, counts) = spawn_mock(repo).await;
+    let env = TestEnv::new(&endpoint);
+    let cache = env.cache_dir();
+    let (code, stdout, stderr) = env
+        .run(&[
+            "hf-cache",
+            "sync",
+            "a/b",
+            "--cache-dir",
+            cache.to_str().unwrap(),
+        ])
+        .await;
+    assert_exit_code(code, 1, &stdout, &stderr);
+    assert!(
+        stderr.contains("invalid revision sha") && stderr.contains("a/b"),
+        "--- stderr ---\n{stderr}"
+    );
+    // No repo folder was created, and not a single file byte was fetched.
+    assert!(!cache.join("models--a--b").join("snapshots").exists());
+    assert!(!cache.join("models--a--b").join("blobs").exists());
+    assert_eq!(counts.total(), 0, "no file bytes may be fetched");
+}

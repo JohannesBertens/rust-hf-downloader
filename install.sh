@@ -13,6 +13,9 @@
 # Equivalent env overrides: VERSION, INSTALL_DIR, RHD_DOWNLOAD_BASE.
 # RHD_DOWNLOAD_BASE replaces the GitHub release base URL entirely — useful
 # for mirrors and for testing (e.g. a file:///path/to/fake-release dir).
+# Scheme rule (validate_base): https:// and file:// only; http:// is accepted
+# for loopback hosts (127.0.0.1, localhost, [::1]) alone — a plain-http
+# mirror also serves SHA256SUMS, so the checksum cannot detect a substitution.
 #
 # Design notes:
 # - Uses the stable asset names published by CI. The
@@ -132,6 +135,27 @@ esac
 ASSET="$BIN_NAME-$TRIPLE.tar.gz"
 
 # --- Resolve the release download base ----------------------------------------
+validate_base() { # validate_base <url> — enforce the scheme rule for RHD_DOWNLOAD_BASE
+  # Plain http is MITM-able: the mirror serves SHA256SUMS and the asset, so a
+  # matching checksum proves nothing about the channel and the tool would
+  # install the mirror's binary. https:// and file:// (offline/test dir) are
+  # fine; http:// only for loopback hosts (local mock servers).
+  # Compare lowercased: DNS hostnames are case-insensitive, so
+  # HTTP://LOCALHOST is the same request as http://localhost.
+  _vb_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$_vb_lc" in
+    https://*|file://*) return 0 ;;
+  esac
+  # The host must end at the string, a ':' port or a '/' path — otherwise
+  # 'http://127.0.0.1.evil.example' would sneak past a bare prefix match.
+  case "$_vb_lc" in
+    http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) return 0 ;;
+    http://localhost|http://localhost:*|http://localhost/*) return 0 ;;
+    http://\[::1\]|http://\[::1\]:*|http://\[::1\]/*) return 0 ;;
+  esac
+  err "unsafe download base '$1': only https:// and file:// are accepted, plus http:// for loopback hosts (127.0.0.1, localhost, [::1]) only — a plain-http mirror can serve a self-consistent SHA256SUMS and asset, which the checksum check cannot detect"
+}
+
 if [ -n "$BASE_OVERRIDE" ]; then
   BASE="$BASE_OVERRIDE"
 elif [ -n "$VERSION" ]; then
@@ -143,6 +167,7 @@ elif [ -n "$VERSION" ]; then
 else
   BASE="https://github.com/$REPO/releases/latest/download"
 fi
+validate_base "$BASE"
 
 # --- Uninstall ----------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
@@ -220,6 +245,13 @@ if [ -f "$DEST" ]; then
 fi
 
 # --- Install (atomic rename within the destination directory) ----------------------
+if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+  err "cannot create $INSTALL_DIR — set INSTALL_DIR to a writable directory
+  (for a system-wide install, put the binary there yourself with appropriate
+  privileges, e.g. INSTALL_DIR=/usr/local/bin run via sudo)"
+fi
+[ -w "$INSTALL_DIR" ] || err "$INSTALL_DIR is not writable (set INSTALL_DIR or fix permissions)"
+
 if [ "$TAKEOVER_CARGO" = 1 ]; then
   # Let cargo forget its install record via the sanctioned path (the Cargo
   # Book forbids editing .crates.toml/.crates2.json by hand). Best effort:
@@ -231,13 +263,6 @@ if [ "$TAKEOVER_CARGO" = 1 ]; then
     warn "cargo not found on PATH — replacing the binary without cleaning cargo's install record"
   fi
 fi
-
-if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
-  err "cannot create $INSTALL_DIR — set INSTALL_DIR to a writable directory
-  (for a system-wide install, put the binary there yourself with appropriate
-  privileges, e.g. INSTALL_DIR=/usr/local/bin run via sudo)"
-fi
-[ -w "$INSTALL_DIR" ] || err "$INSTALL_DIR is not writable (set INSTALL_DIR or fix permissions)"
 
 cp "$TMP/$BIN_NAME" "$DEST.new"
 mv -f "$DEST.new" "$DEST"

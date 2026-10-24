@@ -213,6 +213,11 @@ pub fn plan(
             )));
         }
         let blob_oid = tree_blob_oid(entry);
+        // Trust boundary: the oid comes from the (possibly hostile) tree
+        // response and names `blobs/<oid>`; only hex oids may become paths.
+        if let Some(oid) = &blob_oid {
+            require_hex_oid("tree entry oid", oid)?;
+        }
         let expected = effective_size(entry);
         match blob_oid {
             // R6: only oid-known blobs can be recognized as current.
@@ -302,6 +307,14 @@ pub fn publish_one(
     use_symlinks: bool,
 ) -> io::Result<String> {
     validate_relative_path(&item.repo_path)?;
+    // Trust boundary (defense in depth): `sha` and the tree-provided blob
+    // oid arrive from the hub API and become path components below; a
+    // non-hex value (e.g. `../../evil`) must never reach `blobs/` or
+    // `snapshots/`.
+    require_hex_oid("commit sha", sha)?;
+    if let Some(oid) = &item.blob_oid {
+        require_hex_oid("blob oid", oid)?;
+    }
     let _lock = HubFileLock::acquire(repo_dir, &item.repo_path);
 
     // R1: resolve the blob name, verifying non-LFS content against the
@@ -321,6 +334,9 @@ pub fn publish_one(
         (Some(oid), Some(_)) => oid.clone(),
         (None, _) => git_blob_sha1(staged_path)?,
     };
+    // Defense in depth: the resolved name (tree oid or computed sha1) is
+    // what addresses `blobs/<oid>`.
+    require_hex_oid("blob oid", &blob_oid)?;
 
     // R5: staging lives inside repo_dir, so this rename stays on one
     // filesystem — instant and atomic.
@@ -378,9 +394,12 @@ pub fn ensure_snapshot_entry(
     use_symlinks: bool,
 ) -> io::Result<()> {
     validate_relative_path(&file.rfilename)?;
+    // Trust boundary (defense in depth, same contract as [`publish_one`]).
+    require_hex_oid("commit sha", sha)?;
     let blob_oid = tree_blob_oid(file).ok_or_else(|| {
         invalid_input(format!("tree entry for {} carries no oid", file.rfilename))
     })?;
+    require_hex_oid("blob oid", &blob_oid)?;
     let snapshot_path = repo_dir.join(SNAPSHOTS_DIR).join(sha).join(&file.rfilename);
     if let Some(parent) = snapshot_path.parent() {
         fs::create_dir_all(parent)?; // nested repo paths need their dirs (R3)
@@ -388,14 +407,26 @@ pub fn ensure_snapshot_entry(
     let target = snapshot_symlink_target(&blob_oid, &file.rfilename);
 
     if !use_symlinks {
-        // Copy mode: an existing regular entry is assumed current (the
-        // same assumption hub makes); only a missing or foreign entry is
-        // (re)written.
-        if fs::symlink_metadata(&snapshot_path).is_ok_and(|md| md.is_file()) {
+        // Copy mode: an existing regular entry counts as current only
+        // when its size matches the blob's (audit fix: a run that crashed
+        // mid-`fs::copy` leaves a truncated file behind, and a blind
+        // regular-file fast path kept serving those bytes forever while
+        // the blob was fine). Size mismatch, a foreign entry type, or
+        // missing blob metadata all fall through to the remove + re-copy
+        // below — the same size-compare pattern [`blob_is_current`] uses
+        // for blobs. Equal-size regular entries keep the cheap fast path
+        // (hub's assumption; content hashing is out of scope).
+        let blob_path = repo_dir.join(BLOBS_DIR).join(&blob_oid);
+        let entry_is_current = fs::symlink_metadata(&snapshot_path)
+            .ok()
+            .filter(|md| md.is_file())
+            .zip(fs::metadata(&blob_path).ok().filter(|md| md.is_file()))
+            .is_some_and(|(entry, blob)| entry.len() == blob.len());
+        if entry_is_current {
             return Ok(());
         }
         remove_existing_entry(&snapshot_path)?;
-        return fs::copy(repo_dir.join(BLOBS_DIR).join(&blob_oid), &snapshot_path).map(|_| ());
+        return fs::copy(&blob_path, &snapshot_path).map(|_| ());
     }
 
     // Symlink mode: a link already pointing at the right blob is a no-op.
@@ -840,9 +871,36 @@ fn validate_relative_path(path: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether `s` is a content-addressed identifier safe to use as a path
+/// component: non-empty, exactly 40 (git blob sha1 / commit SHA) or 64
+/// (sha256 LFS oid) characters, all ASCII hex digits.
+///
+/// This is the trust-boundary predicate for hub-API-derived values: the
+/// resolved commit SHA (`api::resolve_revision_sha`) and the tree-entry
+/// oids (`lfs.oid` / `oid`) arrive over the wire — `HF_ENDPOINT` may point
+/// at a hostile mirror or a MITM — and are joined straight into
+/// `snapshots/<sha>/…` and `blobs/<oid>` paths. Anything that is not a hex
+/// oid (e.g. `../../evil`) must be rejected before it becomes a path, or
+/// the sync writes/deletes outside the hub cache.
+pub(crate) fn is_hex_oid(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Shorthand for an [`io::ErrorKind::InvalidInput`] error with a message.
 fn invalid_input(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// Guard for a hub-API-derived commit SHA or blob oid that is about to
+/// become a path component: see [`is_hex_oid`].
+fn require_hex_oid(what: &str, value: &str) -> io::Result<()> {
+    if is_hex_oid(value) {
+        Ok(())
+    } else {
+        Err(invalid_input(format!(
+            "{what} is not a hex commit SHA or blob oid: {value}"
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,6 +1200,40 @@ mod tests {
     }
 
     #[test]
+    fn plan_rejects_non_hex_tree_oids() {
+        // Trust boundary: oids come from the (possibly hostile) tree
+        // response and become `blobs/<oid>` path components — a non-hex oid
+        // rejects the entry, exactly like an unknown selection.
+        let cache = tmp("plan-non-hex-oid");
+        let selected = vec!["x.bin".to_string()];
+        // Non-hex tree oid.
+        let bad_tree_oid = vec![repo_file("x.bin", Some(5), Some("../../evil"), None)];
+        let err = plan(&cache, "a/b", &bad_tree_oid, &selected, COMMIT_SHA, false)
+            .expect_err("non-hex tree oid must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("not a hex commit SHA or blob oid"));
+        // Non-hex LFS oid (wins over a valid tree oid).
+        let bad_lfs_oid = vec![repo_file(
+            "x.bin",
+            Some(5),
+            Some(GIT_OID),
+            Some(("../../evil", 5)),
+        )];
+        assert!(plan(&cache, "a/b", &bad_lfs_oid, &selected, COMMIT_SHA, false).is_err());
+        // An oidless entry still defers to the publish-time fallback (no
+        // oid to validate).
+        let oidless = vec![repo_file("x.bin", Some(5), None, None)];
+        assert_eq!(
+            plan(&cache, "a/b", &oidless, &selected, COMMIT_SHA, false)
+                .unwrap()
+                .fetch
+                .len(),
+            1
+        );
+        let _ = fs::remove_dir_all(&cache);
+    }
+
+    #[test]
     fn plan_rejects_conflicting_duplicate_tree_entries_but_accepts_agreeing_ones() {
         let cache = tmp("plan-duplicates");
         let selected = vec!["f.bin".to_string()];
@@ -1314,6 +1406,40 @@ mod tests {
     }
 
     #[test]
+    fn publish_one_rejects_escaping_commit_sha() {
+        // The commit SHA comes from the hub API (resolve_revision_sha), not
+        // from the user: it must not become `snapshots/../../x`.
+        let repo = tmp("publish-escape-sha");
+        let staged = staged_file(&repo, "c.txt", b"payload\n");
+        let item = consistent_item(&staged, "c.txt");
+        let err = publish_one(&repo, "../../x", &item, &staged, true)
+            .expect_err("escaping sha must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("commit sha"));
+        assert!(!repo.join("blobs").exists());
+        assert!(!repo.join("snapshots").exists());
+        assert!(staged.exists(), "staged copy survives the rejection");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn publish_one_rejects_escaping_blob_oid() {
+        // A hostile tree entry's oid is rejected even with a valid SHA —
+        // and before the staged content is ever hashed.
+        let repo = tmp("publish-escape-oid");
+        let staged = staged_file(&repo, "c.txt", b"payload\n");
+        let item = fetch_item("c.txt", "../../evil");
+        let err = publish_one(&repo, COMMIT_SHA, &item, &staged, true)
+            .expect_err("escaping blob oid must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("blob oid"));
+        assert!(!repo.join("blobs").exists());
+        assert!(!repo.join("snapshots").exists());
+        assert!(staged.exists(), "staged copy survives the rejection");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn publish_one_rejects_content_not_matching_tree_oid() {
         // R1/R5: a non-LFS file whose staged bytes do not hash to the
         // tree's git oid never enters blobs/ — the staged copy survives
@@ -1398,17 +1524,51 @@ mod tests {
             .file_type()
             .is_symlink());
 
-        // An existing regular entry is assumed current and left untouched
-        // (the same assumption hub makes), even when it differs from blob.
-        fs::write(&entry, b"stale").expect("write stale entry");
+        // An existing regular entry of the blob's size is assumed current
+        // and left untouched (the same assumption hub makes), even when
+        // its bytes differ from the blob. (Same-size content drift is the
+        // irreducible limit of the size check; a DIFFERENT-size entry is
+        // provably stale — pinned by
+        // `ensure_snapshot_entry_copy_mode_recopies_truncated_entries`.)
+        fs::write(&entry, b"stale!!!").expect("write stale entry");
         ensure_snapshot_entry(&repo, COMMIT_SHA, &file, false).expect("ensure again");
-        assert_eq!(fs::read(&entry).unwrap(), b"stale");
+        assert_eq!(fs::read(&entry).unwrap(), b"stale!!!");
 
         // A foreign entry type (dangling symlink) is replaced by a copy.
         fs::remove_file(&entry).expect("remove entry");
         std::os::unix::fs::symlink("../../blobs/none", &entry).expect("dangling");
         ensure_snapshot_entry(&repo, COMMIT_SHA, &file, false).expect("ensure third");
         assert_eq!(fs::read(&entry).unwrap(), b"payload\n");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn ensure_snapshot_entry_copy_mode_recopies_truncated_entries() {
+        let repo = tmp("ensure-copy-truncated");
+        fs::create_dir_all(repo.join("blobs")).expect("create blobs dir");
+        fs::write(repo.join("blobs").join(GIT_OID), b"payload\n").expect("write blob");
+        let file = repo_file("config.json", Some(8), Some(GIT_OID), None);
+        let entry = repo.join("snapshots").join(COMMIT_SHA).join("config.json");
+        fs::create_dir_all(entry.parent().unwrap()).expect("create snapshot dir");
+
+        // A crashed earlier copy left a TRUNCATED regular file (N-1 of the
+        // blob's N bytes): the size check proves it is not current, so it
+        // is replaced with the blob's bytes (audit fix).
+        fs::write(&entry, b"payloa").expect("write truncated entry");
+        ensure_snapshot_entry(&repo, COMMIT_SHA, &file, false).expect("ensure truncated");
+        assert_eq!(fs::read(&entry).unwrap(), b"payload\n");
+
+        // Equal-size regular entry → cheap fast path, left untouched.
+        fs::write(&entry, b"payload!").expect("write equal-size entry");
+        ensure_snapshot_entry(&repo, COMMIT_SHA, &file, false).expect("ensure equal");
+        assert_eq!(fs::read(&entry).unwrap(), b"payload!");
+
+        // Missing blob metadata: the entry cannot be validated, so it is
+        // removed and the (failing) re-copy surfaces the error instead of
+        // blessing an unverifiable file.
+        fs::remove_file(repo.join("blobs").join(GIT_OID)).expect("remove blob");
+        assert!(ensure_snapshot_entry(&repo, COMMIT_SHA, &file, false).is_err());
+        assert!(!entry.exists(), "unverifiable entry must not survive");
         let _ = fs::remove_dir_all(&repo);
     }
 
@@ -1421,6 +1581,24 @@ mod tests {
         // Escaping repo path: rejected before any filesystem effect.
         let escape = repo_file("../evil", Some(3), Some(GIT_OID), None);
         assert!(ensure_snapshot_entry(&repo, COMMIT_SHA, &escape, true).is_err());
+        assert!(!repo.join("snapshots").exists());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn ensure_snapshot_entry_rejects_non_hex_sha() {
+        // Defense in depth at the write path: a non-hex SHA never becomes
+        // `snapshots/<sha>/…` (and nothing under it is ever removed).
+        let repo = tmp("ensure-bad-sha");
+        fs::create_dir_all(repo.join("blobs")).expect("create blobs dir");
+        fs::write(repo.join("blobs").join(GIT_OID), b"payload\n").expect("write blob");
+        let file = repo_file("config.json", Some(8), Some(GIT_OID), None);
+        for bad_sha in ["../../x", "", "xyz", &COMMIT_SHA[..39]] {
+            let err = ensure_snapshot_entry(&repo, bad_sha, &file, true)
+                .expect_err("non-hex sha must be rejected");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{bad_sha:?}");
+            assert!(err.to_string().contains("commit sha"));
+        }
         assert!(!repo.join("snapshots").exists());
         let _ = fs::remove_dir_all(&repo);
     }
@@ -1550,6 +1728,28 @@ mod tests {
         assert!(validate_relative_path("/abs/path").is_err());
         assert!(validate_relative_path("C:\\win").is_err());
         assert!(validate_relative_path("a\\b").is_err());
+    }
+
+    #[test]
+    fn hex_oid_validation_accepts_only_40_or_64_hex_digits() {
+        // 40-hex (git blob sha1 / commit SHA) and 64-hex (sha256 LFS oid)
+        // are the only accepted widths — these values become path components.
+        assert!(is_hex_oid(COMMIT_SHA));
+        assert!(is_hex_oid(GIT_OID));
+        assert!(is_hex_oid(LFS_OID));
+        assert!(is_hex_oid(&"a".repeat(40)));
+        assert!(is_hex_oid(&"f".repeat(64)));
+        // Escapes, empties, wrong widths and non-hex characters are rejected.
+        assert!(!is_hex_oid("../../x"));
+        assert!(!is_hex_oid(""));
+        assert!(!is_hex_oid(&"a".repeat(41)));
+        assert!(!is_hex_oid(&"a".repeat(39)));
+        assert!(!is_hex_oid(&"a".repeat(63)));
+        assert!(!is_hex_oid(&"a".repeat(65)));
+        assert!(!is_hex_oid(&COMMIT_SHA.replace('0', "g")));
+        assert!(!is_hex_oid("0123456789abcdef0123456789abcdef0123456 "));
+        // Non-ASCII: 40 characters but 41 bytes, and not ASCII hex.
+        assert!(!is_hex_oid(&COMMIT_SHA.replacen('0', "\u{e9}", 1)));
     }
 
     // ---- hub-cache directory resolution + CACHEDIR.TAG (M6/C7, moved

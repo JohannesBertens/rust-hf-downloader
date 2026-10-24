@@ -266,7 +266,11 @@ impl Reporter {
             }
             Event::FilePublished { path, blob } => {
                 if !self.quiet {
-                    let short_oid = if blob.len() > 12 { &blob[..12] } else { blob };
+                    // Char-safe truncation (same pattern as the hash
+                    // shortening in `verification.rs`): a blob name is
+                    // hub-provided, so slicing at byte 12 could land inside
+                    // a multi-byte character and panic.
+                    let short_oid: String = blob.chars().take(12).collect();
                     self.line_stderr(&format!(
                         " ✓ published {} → blobs/{}…",
                         truncate_path_cli(path, 52),

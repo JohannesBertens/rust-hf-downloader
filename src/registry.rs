@@ -148,8 +148,9 @@ pub fn with_registry(f: impl FnOnce(&mut DownloadRegistry)) -> DownloadRegistry 
 /// Read the on-disk registry (the public read API — bootstrap mirror
 /// seeding, tests asserting disk state). Reads take no lock: the atomic
 /// save means a concurrent reader sees the complete pre- or post-write
-/// file, never a torn one. Missing/unparseable file → empty registry
-/// (the historical load behavior).
+/// file, never a torn one. Missing file → empty registry; an unparseable
+/// file is archived to `<registry>.corrupt` before returning the default
+/// (so the next save cannot silently wipe it).
 pub fn read_registry() -> DownloadRegistry {
     load_registry()
 }
@@ -165,7 +166,30 @@ fn load_registry() -> DownloadRegistry {
     }
 
     match fs::read_to_string(&path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_default(),
+        Ok(content) => match toml::from_str(&content) {
+            Ok(registry) => registry,
+            Err(e) => {
+                // A parse failure must NOT silently reset history: the
+                // next `save_registry` would overwrite the file and wipe
+                // the user's whole download history (audit fix). Archive
+                // the unreadable file first (overwrite an older `.corrupt`
+                // — best effort, never panic), then start empty.
+                let corrupt = path.with_extension("corrupt");
+                match fs::rename(&path, &corrupt) {
+                    Ok(()) => eprintln!(
+                        "warning: registry {} is not valid TOML ({e}); moved it to {} and starting with an empty registry",
+                        path.display(),
+                        corrupt.display(),
+                    ),
+                    Err(re) => eprintln!(
+                        "warning: registry {} is not valid TOML ({e}); backup to {} failed ({re}) and the next save will overwrite it — starting with an empty registry",
+                        path.display(),
+                        corrupt.display(),
+                    ),
+                }
+                DownloadRegistry::default()
+            }
+        },
         Err(_) => DownloadRegistry::default(),
     }
 }

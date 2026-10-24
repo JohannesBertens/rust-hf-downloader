@@ -11,6 +11,15 @@ impl App {
         let query = self.input.value().to_string();
 
         if query.is_empty() {
+            // Undo the `clear_search_results()` pre-set (finding 7): Enter
+            // in the search popup with an empty input cleared the list and
+            // set loading + "Searching...", but this early return never
+            // reaches the fetch paths that reset them — without this the
+            // UI stranded on a fake spinner until the next search. The
+            // list is empty here, so the idle status is the same one the
+            // empty screen shows at startup (state.rs / App::run).
+            *self.loading.write() = false;
+            *self.status.write() = "Welcome! Press '/' to search for models".to_string();
             return;
         }
 
@@ -448,5 +457,94 @@ impl App {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Finding 7 regression: `clear_search_results()` pre-sets
+    //! `loading = true` + "Searching..."; the empty-query early return in
+    //! `search_models` must undo both, or pressing Enter in the search
+    //! popup without typing strands the UI on a fake spinner forever.
+    use super::*;
+    use crate::paths::{ENV_CONFIG_DIR, ENV_MUTEX};
+
+    /// Env guard restoring one variable on drop (same pattern as
+    /// `mouse_tests.rs`; `App::new` reads the ambient config path).
+    struct VarGuard {
+        key: &'static str,
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl VarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let saved = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, saved }
+        }
+    }
+
+    impl Drop for VarGuard {
+        fn drop(&mut self) {
+            match self.saved.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// `App::new` is sync and lazy (no EventStream), so the TUI container
+    /// is directly test-constructible (same fixture discipline as
+    /// `downloads.rs` tests). Only the config-dir env needs redirecting
+    /// here: the empty-query path never touches the network or registry.
+    fn app_with_input(value: &str) -> (App, TempDir) {
+        let tmp = TempDir::install();
+        let mut app = App::new();
+        app.input = tui_input::Input::default().with_value(value.to_string());
+        (app, tmp)
+    }
+
+    struct TempDir {
+        tmp: std::path::PathBuf,
+        _g: VarGuard,
+    }
+
+    impl TempDir {
+        fn install() -> Self {
+            let tmp = std::env::temp_dir().join(format!("rhd-search-test-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).expect("create temp config dir");
+            Self {
+                _g: VarGuard::set(ENV_CONFIG_DIR, &tmp.to_string_lossy()),
+                tmp,
+            }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.tmp);
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_query_after_clear_search_results_resets_loading_and_status() {
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut app, _tmp) = app_with_input("");
+
+        // The exact state the search popup's Enter handler leaves behind:
+        // clear_search_results() pre-sets loading + "Searching...".
+        app.clear_search_results();
+        assert!(*app.loading.read(), "clear_search_results pre-sets");
+        assert_eq!(*app.status.read(), "Searching...");
+
+        app.search_models().await;
+
+        assert!(!*app.loading.read(), "empty query must clear loading");
+        let status = app.status.read().clone();
+        assert_ne!(status, "Searching...", "empty query must reset status");
+        // Neutral idle status, not an error or stale searching line.
+        assert_eq!(status, "Welcome! Press '/' to search for models");
+        assert!(app.models.read().is_empty(), "list stays cleared");
     }
 }
