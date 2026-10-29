@@ -527,7 +527,14 @@ mod tests {
         }
     }
 
+    // ENV_MUTEX is a std mutex whose guard intentionally spans the awaited
+    // body: it serializes env-var mutation across the WHOLE test
+    // (single-threaded #[tokio::test] runtime, so the parked future never
+    // blocks another ENV_MUTEX user). Pre-existing at v2.18.0 (main
+    // 0ae3fc3); scoped here so the repo gate (clippy --all-targets -D
+    // warnings) is green for feature work.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn empty_query_after_clear_search_results_resets_loading_and_status() {
         let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let (mut app, _tmp) = app_with_input("");
