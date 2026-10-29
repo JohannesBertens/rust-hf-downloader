@@ -145,7 +145,7 @@ pub async fn fetch_model_metadata(
     let mut metadata: ModelMetadata = response.json().await?;
 
     // Fetch the complete file tree recursively (shared entry point with the
-    // FLARE scanner, plan §3.1 — behavior-neutral extraction).
+    // FLARE scanner, plans/flare-models.md §3.1 — behavior-neutral extraction).
     metadata.siblings = fetch_revision_tree(client, model_id, revision).await?;
 
     Ok(metadata)
@@ -155,7 +155,7 @@ pub async fn fetch_model_metadata(
 /// [`RepoFile`] siblings (root path, every subdirectory expanded, Link-header
 /// pages followed — everything [`fetch_recursive_tree`] guarantees).
 ///
-/// Public per-revision tree entry point (plan §3.1): the FLARE scan fetches
+/// Public per-revision tree entry point (plans/flare-models.md §3.1): the FLARE scan fetches
 /// one tree per `target_commit` without going through
 /// [`fetch_model_metadata`]. `fetch_model_metadata` overwrites
 /// `siblings` with exactly this call, so the two consumers can never drift.

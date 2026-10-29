@@ -19,7 +19,7 @@
 //! The commit is the pin everywhere: trees are keyed by `target_commit`,
 //! and a refs entry without a usable `targetCommit` DROPS its revision into
 //! [`FlareRepoInfo::dropped_refs`] instead of degrading to a name-based
-//! lookup (plan §3.1 — never a silent degradation).
+//! lookup (plans/flare-models.md §3.1 — never a silent degradation).
 
 // Wave-1 foundation (plan `plans/flare-models.md` §7): the production
 // consumers land in wave 2 (Lane C: CLI preset, Lane D: TUI viewer/download);
@@ -84,7 +84,7 @@ impl From<reqwest::Error> for FlareScanError {
     }
 }
 
-/// Cheap detection over fetched metadata (plan §3.1): `Yes` on a `flare`
+/// Cheap detection over fetched metadata (plans/flare-models.md §3.1): `Yes` on a `flare`
 /// tag; `Probable` when a root `publisher.json` is among the siblings
 /// (confirmed later via the config markers); `No` otherwise.
 ///
@@ -105,13 +105,13 @@ pub fn flare_disposition(metadata: &ModelMetadata) -> FlareDisposition {
 }
 
 /// Parse a raw JSON body; `None` on absent input or malformed JSON — the
-/// config/publisher parsers NEVER error (plan §3.1).
+/// config/publisher parsers NEVER error (plans/flare-models.md §3.1).
 fn parse_json(raw: Option<&str>) -> Option<serde_json::Value> {
     serde_json::from_str(raw?).ok()
 }
 
 /// Does a `config.json` body confirm a Probable FLARE detection? The four
-/// live-verified markers (plan §3.1 / Research facts):
+/// live-verified markers (plans/flare-models.md §3.1 / Research facts):
 /// `"format" == "flare"`, `"runtime" == "flare"`,
 /// `"model_type" == "flare-runtime-package"`, or a top-level `"flare"`
 /// object. Anything else (including unparseable JSON) is not a confirmation.
@@ -128,7 +128,7 @@ pub fn config_json_confirms_flare(raw: Option<&str>) -> bool {
 
 /// Extract the optional config facts from the top-level `flare` object of
 /// a `config.json` body. Every field is optional; a malformed or absent
-/// body yields all-`None` facts, never an error (plan §3.1).
+/// body yields all-`None` facts, never an error (plans/flare-models.md §3.1).
 pub fn parse_flare_config_facts(raw: Option<&str>) -> FlareConfigFacts {
     let facts = parse_json(raw).and_then(|root| root.get("flare").cloned());
     let number = |key: &str| {
@@ -181,7 +181,7 @@ fn all_digits(s: &str) -> bool {
 }
 
 /// A 40-hex commit SHA — the shape every `targetCommit` must have to be
-/// usable as a pin (plan §3.1: missing/invalid ⇒ the revision is DROPPED).
+/// usable as a pin (plans/flare-models.md §3.1: missing/invalid ⇒ the revision is DROPPED).
 fn is_commit_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -211,7 +211,7 @@ fn is_data_shard_stem(stem: &str) -> bool {
         .is_some_and(|(_, part)| all_digits(part))
 }
 
-/// flare's `choose_file` package rule (plan §3.1), over one revision's
+/// flare's `choose_file` package rule (plans/flare-models.md §3.1), over one revision's
 /// complete file listing:
 ///
 /// - Directory form (checked first — its root `model.safetensors` would
@@ -220,7 +220,7 @@ fn is_data_shard_stem(stem: &str) -> bool {
 /// - Packed form: exactly ONE top-level `.safetensors` whose stem is
 ///   neither a bare 64-hex hash nor a `*-data-NN-of-NN` shard.
 /// - Anything else yields `None` — the caller SKIPS such a revision
-///   (a revision without a package is not an error, plan §3.1).
+///   (a revision without a package is not an error, plans/flare-models.md §3.1).
 pub(crate) fn select_package(files: &[RepoFile]) -> Option<FlarePackage> {
     if let Some(primary) = files.iter().find(|f| f.rfilename == "model.safetensors") {
         let companions = files
@@ -260,7 +260,7 @@ fn package_filename(package: &FlarePackage) -> &str {
     }
 }
 
-/// Parse flare's package-filename token grammar (plan §3.1): `tp<N>`,
+/// Parse flare's package-filename token grammar (plans/flare-models.md §3.1): `tp<N>`,
 /// `c<N>`, `mtp<N>`, `i4`, `gb<token>`, free variants (letters immediately
 /// followed by digits, e.g. `yarn4`). Matching is case-insensitive; unknown
 /// tokens (the model-name parts, dots, …) are ignored. DISPLAY ONLY — the
@@ -315,7 +315,7 @@ pub fn parse_flare_package_tokens(filename: &str) -> ParsedPackageTokens {
     parsed
 }
 
-/// PURE assembly core (plan §3.1): refs + trees keyed by `target_commit` +
+/// PURE assembly core (plans/flare-models.md §3.1): refs + trees keyed by `target_commit` +
 /// the raw main-branch `config.json` / `publisher.json` bodies →
 /// [`FlareRepoInfo`].
 ///
@@ -358,7 +358,7 @@ pub fn assemble_flare_info_from(
             .get(&entry.target_commit)
             .and_then(|files| select_package(files))
         else {
-            // No tree or no package: a SKIP, never an error (plan §3.1).
+            // No tree or no package: a SKIP, never an error (plans/flare-models.md §3.1).
             continue;
         };
         let parsed = parse_flare_package_tokens(package_filename(&package));
@@ -401,7 +401,7 @@ pub async fn fetch_repo_refs(
 
 /// `GET {api_base()}/{model_id}/raw/{revision}/{path}` — pointer-free
 /// content for NON-LFS files; an LFS path would return the pointer text.
-/// The CALLER guards LFS using an already-fetched tree (plan §3.1) — this
+/// The CALLER guards LFS using an already-fetched tree (plans/flare-models.md §3.1) — this
 /// function issues no tree request of its own.
 pub async fn fetch_raw_file(
     client: &reqwest::Client,
@@ -421,7 +421,7 @@ pub async fn fetch_raw_file(
     response.text().await
 }
 
-/// Thin orchestration (plan §3.1): refs → concurrent per-revision trees at
+/// Thin orchestration (plans/flare-models.md §3.1): refs → concurrent per-revision trees at
 /// each payload `target_commit` (+ main) → raw `config.json` +
 /// `publisher.json` at main, each LFS-guarded by the already-fetched main
 /// tree → [`assemble_flare_info_from`].
@@ -461,7 +461,7 @@ pub async fn fetch_flare_info(
         }
     }
 
-    // Concurrent per-revision tree fetches (plan §3.1).
+    // Concurrent per-revision tree fetches (plans/flare-models.md §3.1).
     let trees = futures::future::join_all(
         commits
             .iter()

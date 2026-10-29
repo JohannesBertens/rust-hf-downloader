@@ -740,7 +740,7 @@ fn flare_assemble_jb_probable_repo_lands_facts_and_fingerprint() {
 #[test]
 fn flare_assemble_drops_commitless_refs_never_degrades_silently() {
     // A refs entry whose targetCommit is missing or malformed DROPS the
-    // revision and names it in dropped_refs (plan §3.1: trees/URLs/registry
+    // revision and names it in dropped_refs (plans/flare-models.md §3.1: trees/URLs/registry
     // pin to the commit — a name-only entry is not degradable).
     let refs: RepoRefs = serde_json::from_str(
         r#"{"branches":[

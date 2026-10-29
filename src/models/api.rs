@@ -109,7 +109,7 @@ pub struct QuantizationInfo {
 /// `target_commit` is load-bearing: trees, download URLs and registry pins
 /// all key on it — the name is display-only. A missing (empty) or invalid
 /// `targetCommit` is NOT degradable: [`crate::api::assemble_flare_info_from`]
-/// drops that revision with a scan note (plan §3.1).
+/// drops that revision with a scan note (plans/flare-models.md §3.1).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RefEntry {
     #[serde(default)]
@@ -137,7 +137,7 @@ pub enum RefKind {
 }
 
 /// The payload package of one FLARE revision, per flare's `choose_file`
-/// rule (plan §3.1): either a single packed `.safetensors` file or a
+/// rule (plans/flare-models.md §3.1): either a single packed `.safetensors` file or a
 /// directory package (root `model.safetensors` primary + `weights/**` +
 /// `deployments/**` companions).
 // Wave-1 foundation (plans/flare-models.md §7): the field readers land with
@@ -194,7 +194,7 @@ pub struct FlareRevision {
 }
 
 /// FLARE config facts from the repo's `config.json` at main — every field
-/// is optional and a malformed/absent file NEVER errors (plan §3.1).
+/// is optional and a malformed/absent file NEVER errors (plans/flare-models.md §3.1).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlareConfigFacts {
     pub serving_context: Option<u64>,
@@ -214,7 +214,7 @@ pub struct FlarePublisher {
     pub fingerprint: Option<String>,
 }
 
-/// The assembled FLARE scan result for one repository (plan §3.1).
+/// The assembled FLARE scan result for one repository (plans/flare-models.md §3.1).
 // Wave-1 foundation (plans/flare-models.md §7): the field readers land with
 // wave-2 lanes C/D — drop the allow when the first merged reader lands.
 #[allow(dead_code)]
@@ -226,7 +226,7 @@ pub struct FlareRepoInfo {
     pub config: FlareConfigFacts,
     pub publisher: Option<FlarePublisher>,
     /// Names of refs entries DROPPED for a missing/invalid `targetCommit`
-    /// (the scan note — never a silent degradation, plan §3.1).
+    /// (the scan note — never a silent degradation, plans/flare-models.md §3.1).
     pub dropped_refs: Vec<String>,
 }
 
