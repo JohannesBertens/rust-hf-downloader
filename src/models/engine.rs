@@ -66,6 +66,16 @@ pub struct DownloadMetadata {
     /// Absent in registries written before v2.7.0 — treated as `main`.
     #[serde(default)]
     pub revision: Option<String>,
+    /// Repo-relative remote path when the local `filename` carries a
+    /// prefix the Hub never sees (plans/flare-models.md §3.3d: FLARE
+    /// revision-scoped destinations set `filename =
+    /// "<revision-dir>/<repo-relpath>"` + `remote_path =
+    /// Some("<repo-relpath>")`, so request URLs stay unprefixed).
+    /// `None` ⇒ byte-identical behavior at every site; absent in
+    /// registries written before this field existed (the URL is the
+    /// identity key and always carries the true repo path).
+    #[serde(default)]
+    pub remote_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

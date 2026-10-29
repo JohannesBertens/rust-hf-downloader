@@ -9,9 +9,16 @@ use std::collections::HashSet;
 /// A concrete file selected for download.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSpec {
+    /// Local destination path RELATIVE to the model root — may carry a
+    /// FLARE revision-dir prefix (`<revision-dir>/<repo-relpath>`,
+    /// plans/flare-models.md §3.3d). The Hub-facing URL path is
+    /// `remote_path` when set, else this.
     pub filename: String,
     pub size_bytes: u64,
     pub sha256: Option<String>,
+    /// The repo-relative path the request URL uses when it differs from
+    /// `filename`. `None` everywhere except the FLARE frontends.
+    pub remote_path: Option<String>,
 }
 
 impl From<&RepoFile> for FileSpec {
@@ -19,11 +26,14 @@ impl From<&RepoFile> for FileSpec {
     /// available list and hf-cache sync's `tree_file_dtos`: filename
     /// verbatim, tree size defaulting to 0 when absent, sha256 from the
     /// LFS oid only (non-LFS git blob oids are not SHA256s).
+    /// `remote_path` is `None` — the ordinary download layout uses the
+    /// repo path verbatim as the local path (§3.3d None ⇒ byte-identical).
     fn from(f: &RepoFile) -> Self {
         Self {
             filename: f.rfilename.clone(),
             size_bytes: f.size.unwrap_or(0),
             sha256: f.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+            remote_path: None,
         }
     }
 }
@@ -171,6 +181,7 @@ pub fn resolve_files(
                             filename: file.filename.clone(),
                             size_bytes: file.size,
                             sha256: file.sha256.clone(),
+                            remote_path: None,
                         });
                     }
                 }

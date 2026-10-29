@@ -171,6 +171,7 @@ mod tests {
                     status: DownloadStatus::Complete,
                     expected_sha256: Some("sha-2".to_string()),
                     revision: None,
+                    remote_path: None,
                 },
             );
         }

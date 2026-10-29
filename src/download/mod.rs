@@ -54,6 +54,8 @@ pub struct DownloadParams {
     pub model_id: String,
     /// Git revision (branch/tag/SHA) to download from (issue #28).
     pub revision: String,
+    /// Local destination path relative to `base_path` — may carry a FLARE
+    /// revision-dir prefix (plans/flare-models.md §3.3d).
     pub filename: String,
     pub base_path: PathBuf,
     pub progress: Arc<Mutex<Option<DownloadProgress>>>,
@@ -66,6 +68,27 @@ pub struct DownloadParams {
     /// verification, never download → engine).
     pub verification: crate::verification::VerificationHub,
     pub hf_token: Option<String>,
+    /// Repo-relative path the request URL uses when it differs from
+    /// `filename` (FLARE revision-scoped destinations,
+    /// plans/flare-models.md §3.3d). `None` ⇒ the URL is built from
+    /// `filename`, byte-identical to the pre-FLARE behavior.
+    pub remote_path: Option<String>,
+}
+
+/// The engine's sanitize+join step, extracted pure
+/// (plans/flare-models.md §3.3f path source): sanitize every `/`-separated
+/// component of `relpath` exactly like `prepare_download_paths` does and
+/// join the result onto `base`. `None` when any component fails
+/// sanitization. Parity with the engine-built final path is pinned by
+/// `final_path_for_matches_engine_prepared_path`.
+pub fn final_path_for(base: &std::path::Path, relpath: &str) -> Option<PathBuf> {
+    let mut sanitized = String::new();
+    for part in relpath.split('/') {
+        sanitized.push_str(&sanitize_path_component(part)?);
+        sanitized.push('/');
+    }
+    sanitized.pop(); // the trailing separator of the last component
+    Some(base.join(sanitized))
 }
 
 pub async fn start_download(params: DownloadParams) -> FileOutcome {
@@ -80,6 +103,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
         expected_sha256,
         verification,
         hf_token,
+        remote_path,
     } = params;
 
     // Notify user that download is starting
@@ -95,6 +119,7 @@ pub async fn start_download(params: DownloadParams) -> FileOutcome {
         expected_sha256: &expected_sha256,
         verification: &verification,
         hf_token: &hf_token,
+        remote_path: &remote_path,
     };
 
     // Phase 1: sanitize the filename, create the directory tree, and
@@ -142,6 +167,9 @@ struct DownloadCtx<'a> {
     expected_sha256: &'a Option<String>,
     verification: &'a crate::verification::VerificationHub,
     hf_token: &'a Option<String>,
+    /// Repo-relative URL path when it differs from `filename`
+    /// (plans/flare-models.md §3.3d).
+    remote_path: &'a Option<String>,
 }
 
 /// The paths and URL [`start_download`]'s post-preparation phases work
@@ -177,12 +205,17 @@ async fn prepare_download_paths(
         revision,
         filename,
         status_tx,
+        remote_path,
         ..
     } = ctx;
 
-    // Validate filename to prevent path traversal
-    let sanitized_filename = {
-        let parts: Vec<&str> = filename.split('/').collect();
+    // The URL path is the REPO-relative `remote_path` when the FLARE
+    // frontends set one (plans/flare-models.md §3.3d), else `filename`
+    // verbatim — sanitized per component exactly as `filename` always
+    // was (the engine keeps sanitizing whatever feeds its URL).
+    let url_path = {
+        let raw = remote_path.as_deref().unwrap_or(filename);
+        let parts: Vec<&str> = raw.split('/').collect();
         let mut sanitized_parts = Vec::new();
         for part in parts {
             match sanitize_path_component(part) {
@@ -199,7 +232,7 @@ async fn prepare_download_paths(
         sanitized_parts.join("/")
     };
 
-    let url = crate::api::resolve_url(model_id, &sanitized_filename, revision);
+    let url = crate::api::resolve_url(model_id, &url_path, revision);
 
     // Create directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(base_path).await {
@@ -223,8 +256,18 @@ async fn prepare_download_paths(
     };
 
     // Build the final path preserving the directory structure from the filename
-    // The filename may contain subdirectories (e.g., "tokenizer/config.json", "Q2_K_L/model.gguf")
-    let final_path = canonical_base.join(&sanitized_filename);
+    // The filename may contain subdirectories (e.g., "tokenizer/config.json", "Q2_K_M/model.gguf",
+    // or a FLARE revision-dir prefix like "gb202/weights/x.safetensors", §3.3d). The
+    // sanitize+join step is the extracted pure `final_path_for` — parity pinned by test.
+    let Some(final_path) = final_path_for(&canonical_base, filename) else {
+        // Unreachable for a filename whose components all sanitized above
+        // (filename and url_path sanitize identically); kept for totality.
+        let _ = status_tx.send(format!("Error: Invalid filename component: {}", filename));
+        return Err(FileOutcome::Failed {
+            filename: filename.to_string(),
+            reason: format!("invalid filename component: {}", filename),
+        });
+    };
 
     // Containment check (audit fix 1b): walk to the FIRST EXISTING ancestor
     // of the final path — the same rule `sanitize::validate_and_sanitize_path`
@@ -470,6 +513,7 @@ async fn execute_download_with_retry(
         complete_downloads,
         expected_sha256,
         hf_token,
+        remote_path,
         ..
     } = ctx;
     let PreparedDownload {
@@ -492,6 +536,7 @@ async fn execute_download_with_retry(
             expected_sha256,
             hf_token,
             revision,
+            remote_path,
         };
 
         match download_chunked(chunked_params, model_id).await {
@@ -709,6 +754,7 @@ mod containment_tests {
         };
         let expected_sha256: Option<String> = None;
         let hf_token: Option<String> = None;
+        let remote_path: Option<String> = None;
         let ctx = DownloadCtx {
             model_id: "a/b",
             revision: crate::api::DEFAULT_REVISION,
@@ -719,6 +765,7 @@ mod containment_tests {
             expected_sha256: &expected_sha256,
             verification: &verification,
             hf_token: &hf_token,
+            remote_path: &remote_path,
         };
         prepare_download_paths(&ctx, base_path).await
     }
@@ -890,6 +937,499 @@ mod containment_tests {
         assert_eq!(
             prepared.incomplete_path.parent().unwrap(),
             prepared.final_path.parent().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The `remote_path` split (plans/flare-models.md §3.3d): URL/disk-parity
+/// fixtures. One download must hit the UNPREFIXED request URL
+/// (`/resolve/<commit>/<repo-relpath>`) while landing at the PREFIXED disk
+/// path (`<base>/<revision-dir>/<repo-relpath>`), and an interrupt/resume
+/// round-trip must preserve BOTH (a local-path-only test would miss a URL
+/// regression — the round-3 gate finding). Pure-parity half:
+/// [`final_path_for`] vs the engine-built final path.
+#[cfg(test)]
+mod remote_path_tests {
+    use super::{
+        final_path_for, prepare_download_paths, start_download, DownloadCtx, DownloadParams,
+    };
+    use crate::models::{CompleteDownloads, DownloadProgress, FileOutcome};
+    use crate::verification::{VerificationHub, VerificationResultCounters};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::{mpsc, Mutex as AsyncMutex};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    /// The commit pin a FLARE run downloads at (40-hex).
+    const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn temp_root(tag: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "rhd-remote-path-{}-{}-{}",
+            tag,
+            std::process::id(),
+            n
+        ))
+    }
+
+    /// Throwaway engine context for `prepare_download_paths` (only
+    /// `filename` + `remote_path` matter here; the channels are drained
+    /// into a sink that is asserted to stay empty of errors on the happy
+    /// paths).
+    async fn prepare(
+        filename: &str,
+        remote_path: Option<&str>,
+        base_path: &Path,
+    ) -> (Result<super::PreparedDownload, FileOutcome>, Vec<String>) {
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel();
+        let progress = Arc::new(AsyncMutex::new(None::<DownloadProgress>));
+        let complete = Arc::new(AsyncMutex::new(CompleteDownloads::default()));
+        let (hub_status_tx, _hub_status_rx) = mpsc::unbounded_channel();
+        let (verify_tx, _verify_rx) = mpsc::unbounded_channel();
+        let verification = VerificationHub {
+            queue: Arc::new(AsyncMutex::new(Vec::new())),
+            size: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            progress: Arc::new(AsyncMutex::new(Vec::new())),
+            results: VerificationResultCounters::default(),
+            status_tx: hub_status_tx,
+            verify_tx,
+            registry_mirror: Arc::new(AsyncMutex::new(crate::models::DownloadRegistry::default())),
+        };
+        let expected_sha256: Option<String> = None;
+        let hf_token: Option<String> = None;
+        let remote_path = remote_path.map(str::to_string);
+        let ctx = DownloadCtx {
+            model_id: "a/b",
+            revision: PIN,
+            filename,
+            progress: &progress,
+            status_tx: &status_tx,
+            complete_downloads: &complete,
+            expected_sha256: &expected_sha256,
+            verification: &verification,
+            hf_token: &hf_token,
+            remote_path: &remote_path,
+        };
+        let result = prepare_download_paths(&ctx, base_path).await;
+        let mut status = Vec::new();
+        while let Ok(line) = status_rx.try_recv() {
+            status.push(line);
+        }
+        (result, status)
+    }
+
+    /// Pure parity (§3.3f path source): `final_path_for` must reproduce
+    /// the engine's sanitize+join step byte-for-byte, for plain paths and
+    /// FLARE-shaped prefixed paths, and reject what the engine rejects.
+    #[tokio::test]
+    async fn final_path_for_matches_engine_prepared_path() {
+        let root = temp_root("parity");
+        let base = root.join("models").join("a").join("b");
+        std::fs::create_dir_all(&base).unwrap();
+
+        for filename in [
+            "model.gguf",
+            "gb202/model.safetensors",
+            "gb202/weights/x-1.safetensors",
+        ] {
+            let (prepared, status) = prepare(filename, Some("model.safetensors"), &base).await;
+            let prepared = prepared.expect("plain paths prepare cleanly");
+            assert!(
+                status.is_empty(),
+                "unexpected status lines for {filename}: {status:?}"
+            );
+            let canonical_base = base.canonicalize().unwrap();
+            assert_eq!(
+                prepared.final_path,
+                final_path_for(&canonical_base, filename).unwrap(),
+                "final_path_for parity for {filename}"
+            );
+        }
+
+        // None (no remote_path) — the ordinary path — matches too.
+        let (prepared, _) = prepare("sub/dir/file.gguf", None, &base).await;
+        let prepared = prepared.expect("plain nested path prepares");
+        assert_eq!(
+            prepared.final_path,
+            final_path_for(&base.canonicalize().unwrap(), "sub/dir/file.gguf").unwrap()
+        );
+
+        // Rejection parity: an invalid component is None from the pure fn
+        // and a Failed outcome from the engine.
+        assert_eq!(final_path_for(&base, "../evil"), None);
+        assert_eq!(final_path_for(&base, "a/../b"), None);
+        assert_eq!(final_path_for(&base, ""), None);
+        let (result, _) = prepare("../evil", None, &base).await;
+        assert!(matches!(result, Err(FileOutcome::Failed { .. })));
+
+        // And the URL for a remote_path download is UNPREFIXED while the
+        // disk path is prefixed — pinned here at the pure level too.
+        let (result, _) =
+            prepare("gb202/model.safetensors", Some("model.safetensors"), &base).await;
+        let prepared = result.expect("prepare");
+        assert!(prepared
+            .url
+            .ends_with(&format!("/a/b/resolve/{PIN}/model.safetensors")));
+        assert!(
+            !prepared.url.contains("/gb202/"),
+            "URL must stay unprefixed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------------------------------
+    // Wire-level parity fixture (hyper mock, dev-dep): a FLARE-shaped
+    // download through the REAL `start_download`, asserting the unprefixed
+    // request URL, the prefixed disk path, the registry round-trip, and an
+    // interrupt/resume round-trip that never re-requests completed bytes.
+    // ------------------------------------------------------------------
+
+    /// One observed range-bearing request (`(0, 0)` = the probe).
+    type ReqLog = Arc<Mutex<Vec<(u64, u64)>>>;
+    /// The mutable failure script: `Some(from)` ⇒ every range starting
+    /// at/after `from` answers 500. Run 1 sets it (chunk 1 onward), run 2
+    /// clears it — one endpoint for both runs, because the resume journal
+    /// validates the URL and a second server would be a different URL.
+    type FailScript = Arc<Mutex<Option<u64>>>;
+
+    /// Minimal `/resolve/` range server: records every range request and
+    /// applies the live [`FailScript`].
+    async fn spawn_range_server(
+        content: Arc<Vec<u8>>,
+        fail_script: FailScript,
+    ) -> (std::net::SocketAddr, ReqLog) {
+        use hyper::service::{make_service_fn, service_fn};
+        use hyper::{Body, Request, Response, Server, StatusCode};
+
+        let log: ReqLog = Arc::new(Mutex::new(Vec::new()));
+        let log_for_service = log.clone();
+        let service = make_service_fn(move |_| {
+            let content = content.clone();
+            let log = log_for_service.clone();
+            let fail_script = fail_script.clone();
+            async move {
+                Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
+                    let content = content.clone();
+                    let log = log.clone();
+                    let fail_script = fail_script.clone();
+                    async move {
+                        // One annotation for every `Ok(…)` below.
+                        type R = Result<Response<Body>, std::convert::Infallible>;
+                        let range = req
+                            .headers()
+                            .get(hyper::header::RANGE)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.strip_prefix("bytes="))
+                            .and_then(|v| v.split_once('-'))
+                            .and_then(|(a, b)| {
+                                Some((
+                                    a.trim().parse::<u64>().ok()?,
+                                    b.trim().parse::<u64>().ok().unwrap_or(0),
+                                ))
+                            });
+                        if let Some((start, end)) = range {
+                            log.lock().unwrap().push((start, end));
+                            if start == 0 && end == 0 {
+                                // Probe: size + etag validators.
+                                let probe: R = Ok(Response::builder()
+                                    .status(StatusCode::PARTIAL_CONTENT)
+                                    .header("content-range", format!("bytes 0-0/{}", content.len()))
+                                    .header("etag", "\"parity-etag\"")
+                                    .body(Body::from(content[..1].to_vec()))
+                                    .unwrap());
+                                return probe;
+                            }
+                            if fail_script
+                                .lock()
+                                .unwrap()
+                                .is_some_and(|from| start >= from)
+                            {
+                                let fail: R = Ok(Response::builder()
+                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                    .body(Body::from("scripted failure"))
+                                    .unwrap());
+                                return fail;
+                            }
+                            let stop = end.min(content.len() as u64 - 1);
+                            let body = content[start as usize..=stop as usize].to_vec();
+                            let chunk: R = Ok(Response::builder()
+                                .status(StatusCode::PARTIAL_CONTENT)
+                                .header(
+                                    "content-range",
+                                    format!("bytes {start}-{stop}/{}", content.len()),
+                                )
+                                .body(Body::from(body))
+                                .unwrap());
+                            return chunk;
+                        }
+                        let miss: R = Ok(Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Body::from("no such path"))
+                            .unwrap());
+                        miss
+                    }
+                }))
+            }
+        });
+        let addr = ([127, 0, 0, 1], 0u16).into();
+        let server = Server::bind(&addr).serve(service);
+        let bound = server.local_addr();
+        tokio::spawn(async move {
+            server.await.ok();
+        });
+        (bound, log)
+    }
+
+    /// Snapshot/restore of the engine globals the fixture mutates.
+    struct ConfigGuard {
+        threads: usize,
+        retries: u32,
+    }
+    impl ConfigGuard {
+        fn install() -> Self {
+            let guard = Self {
+                threads: super::DOWNLOAD_CONFIG
+                    .concurrent_threads
+                    .load(Ordering::Relaxed),
+                retries: super::DOWNLOAD_CONFIG.max_retries.load(Ordering::Relaxed),
+            };
+            // Sequential chunks + no retries: run 1 deterministically
+            // completes chunk 0 before chunk 1's scripted 500.
+            super::DOWNLOAD_CONFIG
+                .concurrent_threads
+                .store(1, Ordering::Relaxed);
+            super::DOWNLOAD_CONFIG
+                .max_retries
+                .store(0, Ordering::Relaxed);
+            guard
+        }
+    }
+    impl Drop for ConfigGuard {
+        fn drop(&mut self) {
+            super::DOWNLOAD_CONFIG
+                .concurrent_threads
+                .store(self.threads, Ordering::Relaxed);
+            super::DOWNLOAD_CONFIG
+                .max_retries
+                .store(self.retries, Ordering::Relaxed);
+        }
+    }
+
+    /// Run the REAL transport once for a FLARE-shaped file.
+    async fn run_transport(
+        endpoint: &str,
+        base_path: &Path,
+    ) -> (FileOutcome, mpsc::UnboundedReceiver<String>) {
+        let (status_tx, status_rx) = mpsc::unbounded_channel();
+        let progress = Arc::new(AsyncMutex::new(None::<DownloadProgress>));
+        let complete = Arc::new(AsyncMutex::new(CompleteDownloads::default()));
+        let (hub_status_tx, _hub_status_rx) = mpsc::unbounded_channel();
+        let (verify_tx, _verify_rx) = mpsc::unbounded_channel();
+        let verification = VerificationHub {
+            queue: Arc::new(AsyncMutex::new(Vec::new())),
+            size: Arc::new(AtomicUsize::new(0)),
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            progress: Arc::new(AsyncMutex::new(Vec::new())),
+            results: VerificationResultCounters::default(),
+            status_tx: hub_status_tx,
+            verify_tx,
+            registry_mirror: Arc::new(AsyncMutex::new(crate::models::DownloadRegistry::default())),
+        };
+        // `api_base()` reads HF_ENDPOINT at URL-build time; pin it for
+        // this call's duration.
+        std::env::set_var("HF_ENDPOINT", endpoint);
+        let outcome = start_download(DownloadParams {
+            model_id: "a/b".to_string(),
+            revision: PIN.to_string(),
+            filename: "gb202/model.safetensors".to_string(),
+            base_path: base_path.to_path_buf(),
+            progress,
+            status_tx,
+            complete_downloads: complete,
+            expected_sha256: None,
+            verification,
+            hf_token: None,
+            remote_path: Some("model.safetensors".to_string()),
+        })
+        .await;
+        std::env::remove_var("HF_ENDPOINT");
+        (outcome, status_rx)
+    }
+
+    /// The MANDATORY §3.3d fixture: unprefixed request URL + prefixed disk
+    /// path + interrupt/resume round-trip, through the real transport.
+    ///
+    /// Layout math (with `concurrent_threads = 1`): 12,000,000 bytes,
+    /// chunk size clamps to the 5 MiB minimum → 3 chunks of
+    /// 5,242,880 / 5,242,880 / 1,514,240 bytes. Run 1's server fails every
+    /// range starting at/after 5,242,880, so chunk 0 completes and is
+    /// journalled before chunk 1's terminal 500. Run 2 serves everything
+    /// and must resume at chunk 1 — never re-requesting chunk 0's bytes.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn flare_download_parity_unprefixed_url_prefixed_disk_and_resume() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _config = ConfigGuard::install();
+        let root = temp_root("wire");
+        let data_dir = root.join("data");
+        let base = root.join("models").join("a").join("b");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        // Isolate the registry + pin HF_ENDPOINT (restored on drop).
+        let _guard = crate::engine::test_support::EnvGuard::install(
+            &data_dir,
+            &format!(
+                "http://127.0.0.1:{}",
+                crate::engine::test_support::closed_port()
+            ),
+        );
+
+        const TOTAL: u64 = 12_000_000;
+        const CHUNK: u64 = 5 * 1024 * 1024; // the clamp minimum
+        let content: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+        let content = Arc::new(content);
+
+        // One server for both runs (the journal validates the URL — a
+        // second endpoint would discard it and restart from byte 0).
+        let fail_script: FailScript = Arc::new(Mutex::new(None));
+        let (addr, log) = spawn_range_server(content.clone(), fail_script.clone()).await;
+        let endpoint = format!("http://{addr}");
+
+        // --- Run 1: chunk 0 completes, chunk 1 fails terminally -----------
+        *fail_script.lock().unwrap() = Some(CHUNK);
+        let (outcome, _status) = run_transport(&endpoint, &base).await;
+        assert!(
+            matches!(&outcome, FileOutcome::Failed { reason, .. } if reason.contains("scripted") || reason.contains("500")),
+            "run 1 must fail terminally, got {outcome:?}"
+        );
+        let requests1 = log.lock().unwrap().clone();
+        assert_eq!(requests1.first(), Some(&(0, 0)), "probe first");
+        assert!(requests1.contains(&(0, CHUNK - 1)), "chunk 0 requested");
+        // The URL every request hit is the UNPREFIXED repo path at the pin.
+        // (Asserted structurally: the server only serves the one route, and
+        // the registry row below pins the exact URL bytes.)
+        let incomplete = base.join("gb202").join("model.safetensors.incomplete");
+        assert!(
+            incomplete.exists(),
+            ".incomplete kept after terminal failure"
+        );
+        let journal = base
+            .join("gb202")
+            .join("model.safetensors.incomplete.state.json");
+        assert!(journal.exists(), "resume journal kept");
+        // The journal carries the real progress (the `.incomplete` file is
+        // PREALLOCATED at the probed total size): chunk 0 done, 1 and 2 not.
+        let journal_doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&journal).unwrap()).unwrap();
+        let offsets = journal_doc["chunk_offsets"].as_array().unwrap();
+        assert_eq!(
+            offsets
+                .iter()
+                .map(|v| v.as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![CHUNK, 0, 0],
+            "run 1's journal: chunk 0 complete, chunks 1-2 not started"
+        );
+
+        // --- Run 2: full serve; resume must skip chunk 0 ------------------
+        *fail_script.lock().unwrap() = None;
+        let (outcome, _status) = run_transport(&endpoint, &base).await;
+        assert!(
+            matches!(&outcome, FileOutcome::Complete { bytes, .. } if *bytes == TOTAL),
+            "run 2 must complete, got {outcome:?}"
+        );
+        let requests2 = {
+            let all = log.lock().unwrap().clone();
+            // Run 2's window starts at the LAST probe (a sibling request
+            // aborted client-side can still be logged server-side after
+            // run 1's outcome resolved — a byte-count split would race).
+            let last_probe = all
+                .iter()
+                .rposition(|r| *r == (0, 0))
+                .expect("run 2 probed");
+            all[last_probe..].to_vec()
+        };
+        assert_eq!(requests2.first(), Some(&(0, 0)), "probe first");
+        assert!(
+            !requests2.contains(&(0, CHUNK - 1)),
+            "resume must NOT re-request chunk 0's bytes: {requests2:?}"
+        );
+        assert!(
+            requests2.contains(&(CHUNK, 2 * CHUNK - 1)),
+            "chunk 1 re-requested from start"
+        );
+        assert!(
+            requests2.contains(&(2 * CHUNK, TOTAL - 1)),
+            "chunk 2 requested"
+        );
+
+        // Disk path is the PREFIXED destination, byte-exact content.
+        let final_file = base.join("gb202").join("model.safetensors");
+        assert!(final_file.exists(), "prefixed final path");
+        assert!(!incomplete.exists(), "no .incomplete left after success");
+        let on_disk = std::fs::read(&final_file).unwrap();
+        assert_eq!(on_disk.len(), TOTAL as usize);
+        assert!(on_disk == *content, "resumed file is byte-exact");
+
+        // Registry round-trip: URL unprefixed at the pin, local path
+        // prefixed, remote_path + revision persisted.
+        let registry = crate::registry::read_registry();
+        let entries: Vec<_> = registry
+            .downloads
+            .iter()
+            .filter(|d| d.filename == "gb202/model.safetensors")
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "one registry row for the url: {registry:?}"
+        );
+        let entry = entries[0];
+        assert_eq!(
+            entry.url,
+            format!("{endpoint}/a/b/resolve/{PIN}/model.safetensors")
+        );
+        assert_eq!(entry.remote_path.as_deref(), Some("model.safetensors"));
+        assert_eq!(entry.revision.as_deref(), Some(PIN));
+        assert_eq!(entry.status, crate::models::DownloadStatus::Complete);
+        assert!(
+            entry
+                .local_path
+                .replace('\\', "/")
+                .ends_with("a/b/gb202/model.safetensors"),
+            "recorded local_path is the prefixed destination: {}",
+            entry.local_path
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `None` remote_path stays byte-identical: the URL path IS the
+    /// filename, even for a nested one (the ordinary-download invariant).
+    #[tokio::test]
+    async fn none_remote_path_builds_url_from_filename() {
+        let root = temp_root("none");
+        let base = root.join("models").join("a").join("b");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let (result, _) = prepare("tokenizer/config.json", None, &base).await;
+        let prepared = result.expect("prepare");
+        assert!(prepared
+            .url
+            .ends_with(&format!("/a/b/resolve/{PIN}/tokenizer/config.json")));
+        assert_eq!(
+            prepared.final_path,
+            base.canonicalize()
+                .unwrap()
+                .join("tokenizer")
+                .join("config.json")
         );
         let _ = std::fs::remove_dir_all(&root);
     }

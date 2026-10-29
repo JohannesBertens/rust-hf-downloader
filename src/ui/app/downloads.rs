@@ -231,6 +231,7 @@ impl App {
                         expected_sha256: f.sha256.clone(),
                         hf_token: self.options.hf_token.clone(),
                         total_size: f.size,
+                        remote_path: None,
                     })
                     .collect();
 
@@ -301,6 +302,10 @@ impl App {
                     expected_sha256: metadata.expected_sha256.clone(),
                     hf_token: hf_token.clone(),
                     total_size: metadata.total_size,
+                    // Persisted on the entry — a FLARE resume re-enqueues the
+                    // identical disk path AND the unprefixed request URL
+                    // (plans/flare-models.md §3.3d interrupt/resume round-trip).
+                    remote_path: metadata.remote_path.clone(),
                 }
             })
             .collect();
@@ -446,6 +451,7 @@ impl App {
                 expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
                 hf_token: self.options.hf_token.clone(),
                 total_size: file.size.unwrap_or(0),
+                remote_path: None,
             })
             .collect();
 
@@ -1117,6 +1123,7 @@ mod tests {
                 status: DownloadStatus::Incomplete,
                 expected_sha256: Some("sha".to_string()),
                 revision: None,
+                remote_path: None,
             },
             // Malformed model id → the recorded local_path's parent.
             crate::models::DownloadMetadata {
@@ -1129,6 +1136,7 @@ mod tests {
                 status: DownloadStatus::Incomplete,
                 expected_sha256: None,
                 revision: Some("rev-x".to_string()),
+                remote_path: None,
             },
         ];
 
@@ -1229,6 +1237,7 @@ mod tests {
                 status: DownloadStatus::Incomplete,
                 expected_sha256: None,
                 revision: None,
+                remote_path: None,
             }
         }
 

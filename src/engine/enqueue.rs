@@ -102,8 +102,17 @@ impl EngineState {
                     };
                     if let Some(validated) = validated {
                         queueable.push(file);
-                        let url =
-                            crate::api::resolve_url(&file.model_id, &file.filename, &file.revision);
+                        // The registration-site URL rule (§3.3d):
+                        // `remote_path.unwrap_or(filename)` VERBATIM — no
+                        // new sanitize (None ⇒ byte-parity; Some values are
+                        // repo tree paths). The engine transport applies
+                        // its own sanitize to whatever feeds its URL, as it
+                        // always has for `filename`.
+                        let url = crate::api::resolve_url(
+                            &file.model_id,
+                            file.remote_path.as_deref().unwrap_or(&file.filename),
+                            &file.revision,
+                        );
                         entries.push(DownloadMetadata {
                             model_id: file.model_id.clone(),
                             filename: file.filename.clone(),
@@ -126,6 +135,7 @@ impl EngineState {
                             } else {
                                 Some(file.revision.clone())
                             },
+                            remote_path: file.remote_path.clone(),
                         });
                     }
                 }
@@ -154,9 +164,18 @@ impl EngineState {
                     .first()
                     .map(|f| f.revision.clone())
                     .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
-                let pending: Vec<(String, u64, Option<String>)> = files
+                // 4-tuple (filename, size, sha256, remote_path) — the
+                // `remote_path` hop into `register_pending` (§3.3d).
+                let pending: Vec<(String, u64, Option<String>, Option<String>)> = files
                     .iter()
-                    .map(|f| (f.filename.clone(), f.total_size, f.expected_sha256.clone()))
+                    .map(|f| {
+                        (
+                            f.filename.clone(),
+                            f.total_size,
+                            f.expected_sha256.clone(),
+                            f.remote_path.clone(),
+                        )
+                    })
                     .collect();
                 (
                     Vec::new(),
@@ -481,6 +500,7 @@ mod tests {
             expected_sha256: Some(format!("sha-{filename}")),
             hf_token: None,
             total_size,
+            remote_path: None,
         }
     }
 
@@ -637,6 +657,7 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         };
         crate::registry::upsert_pending(std::slice::from_ref(&preexisting));
         *state.download_registry.lock().await = DownloadRegistry {
@@ -754,6 +775,7 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         }]);
 
         let (state, tx) = EngineState::new();
@@ -1006,6 +1028,7 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         }));
         let baseline = std::fs::read(crate::paths::registry_path()).unwrap();
 

@@ -125,6 +125,7 @@ fn file_spec_from_repo_file_pins_the_sibling_mapping() {
             filename: "model.Q4_K_M.gguf".to_string(),
             size_bytes: 4_947,
             sha256: Some("cafebabe".to_string()),
+            remote_path: None,
         }
     );
     assert_eq!(
@@ -133,6 +134,7 @@ fn file_spec_from_repo_file_pins_the_sibling_mapping() {
             filename: "plain.bin".to_string(),
             size_bytes: 0,
             sha256: None,
+            remote_path: None,
         }
     );
     assert_eq!(
@@ -141,6 +143,7 @@ fn file_spec_from_repo_file_pins_the_sibling_mapping() {
             filename: "non-lfs.safetensors".to_string(),
             size_bytes: 42,
             sha256: None,
+            remote_path: None,
         }
     );
 

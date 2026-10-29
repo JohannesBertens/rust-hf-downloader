@@ -73,6 +73,7 @@ mod tests {
                 status: DownloadStatus::Incomplete,
                 expected_sha256: None,
                 revision: None,
+                remote_path: None,
             }],
         }
     }

@@ -278,7 +278,7 @@ const RENAME_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis
 pub fn register_pending(
     model_id: &str,
     revision: &str,
-    files: &[(String, u64, Option<String>)],
+    files: &[(String, u64, Option<String>, Option<String>)],
     base_path: &str,
 ) -> Result<(), crate::paths::sanitize::PathError> {
     // Validate and build every entry first: the first invalid filename
@@ -286,11 +286,20 @@ pub fn register_pending(
     // registry write itself is the shared `upsert_pending` op (one load,
     // append-only-missing-urls, one save).
     let mut entries = Vec::with_capacity(files.len());
-    for (filename, size, sha256) in files {
+    for (filename, size, sha256, remote_path) in files {
         let validated_path =
             crate::paths::sanitize::validate_and_sanitize_path(base_path, model_id, filename)?;
 
-        let url = crate::api::resolve_url(model_id, filename, revision);
+        // The registration-site URL rule (plans/flare-models.md §3.3d):
+        // `remote_path.unwrap_or(filename)` VERBATIM — no new sanitize
+        // here (None ⇒ byte-parity with the pre-FLARE build; Some values
+        // are repo tree paths, and the engine transport applies its own
+        // sanitize to whatever feeds its URL).
+        let url = crate::api::resolve_url(
+            model_id,
+            remote_path.as_deref().unwrap_or(filename),
+            revision,
+        );
         entries.push(DownloadMetadata {
             model_id: model_id.to_string(),
             filename: filename.clone(),
@@ -305,6 +314,7 @@ pub fn register_pending(
             } else {
                 Some(revision.to_string())
             },
+            remote_path: remote_path.clone(),
         });
     }
 

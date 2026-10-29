@@ -108,6 +108,7 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
             expected_sha256: file.sha256.clone(),
             hf_token: token.clone(),
             total_size: file.size_bytes,
+            remote_path: file.remote_path.clone(),
         })
         .collect();
     // Shared enqueue transaction, CLI flavor: register_pending's

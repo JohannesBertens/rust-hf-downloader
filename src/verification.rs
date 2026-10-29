@@ -591,6 +591,7 @@ mod tests {
                     status: status.clone(),
                     expected_sha256: None,
                     revision: None,
+                    remote_path: None,
                 })
                 .collect(),
         }))
