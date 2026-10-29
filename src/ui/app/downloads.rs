@@ -1749,7 +1749,8 @@ mod tests {
     }
 
     /// qwen impl-gate P2 — the TUI's blocked-path surface (the only
-    /// untested arm of the §3.3d pre-flight in `trigger_flare_download`):
+    /// untested arm of the plans/flare-models.md §3.3d pre-flight in
+    /// `trigger_flare_download`):
     /// a recorded row for the SAME model under the SAME revision dir at
     /// a DIFFERENT commit, with the file present on disk at the recorded
     /// path — the moved-branch guard rejects the trigger BEFORE any
@@ -1799,7 +1800,7 @@ mod tests {
         let revision = packed_flare_revision();
         app.trigger_flare_download("author/model", &revision).await;
 
-        // The blocked-path strings: the error names the §3.3d guard, the
+        // The blocked-path strings: the error names the plans/flare-models.md §3.3d guard, the
         // status names the pre-flight.
         let error = app.error.read().clone();
         assert!(
