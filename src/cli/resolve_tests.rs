@@ -1415,3 +1415,63 @@ fn preflight_ambiguous_existing_files_from_two_commits_errors() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Impl-gate r3 P1 regression (codex's symlink trace): a base spelled
+/// `<root>/missing/../alias` — where `missing` does NOT exist and
+/// `alias` is an EXISTING symlink to `dirA` — must NOT bypass the
+/// moved-branch guard. The single-pass helper anchored at `<root>`,
+/// lexically dropped `missing/..`, and appended `alias` UNRESOLVED, so
+/// the dir identity (`<root>/alias/…`) never matched the row recorded
+/// at the CANONICAL path (`<root>/dirA/…`); guard (i) cannot stat the
+/// dotted spelling (`missing` is absent) and the different commit means
+/// a fresh URL, so ONLY guard (ii)'s identity comparison can catch the
+/// collision — the fixpoint re-anchors on the lexically normalized
+/// path, resolves `alias`, and fires. Mirrors the dotted-base test
+/// style above (impl-gate r2).
+#[cfg(unix)]
+#[test]
+fn preflight_missing_dotdot_then_symlink_base_still_hits_moved_branch() {
+    let root = guard_root("symfix");
+    // dirA holds A's bytes under the revision dir; `alias` → dirA is an
+    // EXISTING symlink; NOTHING named `missing` is created.
+    let dir_a = root.join("dirA");
+    let file = dir_a.join("a/b/gb202/pkg.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    std::os::unix::fs::symlink(&dir_a, root.join("alias")).unwrap();
+    // The recorded row uses the CANONICAL path (dirA/…) — what a real
+    // earlier run at commit sha(1) would have registered.
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &file.to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    // The rerun at commit sha(2) spells the base through
+    // `missing/../alias`: equal size, so only the identity comparison
+    // separates the runs.
+    let base = format!("{}/missing/../alias", root.display());
+    let outcome = flare_preflight(
+        &registry,
+        &base,
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::MovedBranch { .. })),
+        "a base spelled through `missing/../alias` (existing symlink after \
+         lexical `..`) must not bypass the moved-branch guard: {outcome:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

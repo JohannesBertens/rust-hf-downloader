@@ -468,8 +468,8 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
     crate::paths::sanitize::validate_and_sanitize_path(base, model_id, filename).ok()
 }
 
-/// The on-disk IDENTITY of `p` (impl-gate r2 P1): canonicalize the
-/// NEAREST EXISTING ancestor — `p` itself included, since an existing
+/// The on-disk IDENTITY of `p` (impl-gate r2 P1 + r3 P1): canonicalize
+/// the NEAREST EXISTING ancestor — `p` itself included, since an existing
 /// path is its own nearest ancestor — then re-append the remaining
 /// components with `.`/`..` lexically normalized, so a base spelled
 /// `--output ../work/models` still compares EQUAL to the recorded
@@ -479,18 +479,52 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
 /// containment checks), so raw string comparisons miss the same
 /// directory. `None` when NOTHING along `p` exists — no on-disk
 /// identity to compare.
+///
+/// r3 P1 — FIXPOINT: a single anchor pass can MISS symlink components
+/// that only become reachable AFTER lexical `..` removal — a spelling
+/// like `<anchor>/missing/../alias/…` (with `alias` an EXISTING symlink
+/// and `missing` absent) anchors at `<anchor>`, lexically drops
+/// `missing/..`, then appends `alias` UNRESOLVED, so its identity
+/// differs from the recorded canonical path and the directory guards
+/// silently pass. Each pass therefore re-anchors the PREVIOUS pass's
+/// identity: when a longer prefix of it exists on disk, canonicalization
+/// resolves more symlinks, and the loop continues until two passes agree
+/// or the whole identity canonicalizes (a fully existing canonical path
+/// canonicalizes to itself — the exact fixpoint). Loop-bounded
+/// defensively at components+2 passes: the first pass consumes every
+/// lexical `..`, so later passes only resolve symlinks, each strictly
+/// extending the canonical prefix or reaching the fixpoint.
 fn anchored_fs_identity(p: &Path) -> Option<PathBuf> {
+    let bound = p.components().count() + 2;
+    let mut identity = anchor_pass(p)?;
+    for _ in 0..bound {
+        // The whole identity existing on disk is the exact fixpoint:
+        // full canonicalization.
+        if let Ok(canonical) = identity.canonicalize() {
+            return Some(canonical);
+        }
+        let next = anchor_pass(&identity)?;
+        if next == identity {
+            return Some(identity);
+        }
+        identity = next;
+    }
+    Some(identity)
+}
+
+/// One anchor pass of [`anchored_fs_identity`]: canonicalize the deepest
+/// existing ancestor of `p` — the OS resolves `..`/symlink components
+/// inside the prefix during canonicalize, so dots below an existing
+/// component dissolve there — then re-append the remaining components
+/// with `.`/`..` lexically normalized (`.` drops; `..` pops the last
+/// re-appended component — the tail sits below the canonical anchor and
+/// `PathBuf::pop` cannot go past `/`).
+fn anchor_pass(p: &Path) -> Option<PathBuf> {
     use std::path::Component;
     let components: Vec<Component<'_>> = p.components().collect();
-    // Longest existing prefix = nearest existing ancestor (the OS
-    // resolves `..`/symlink components inside the prefix during
-    // canonicalize, so dots below an existing component dissolve here).
     for keep in (0..=components.len()).rev() {
         let prefix: PathBuf = components[..keep].iter().collect();
         if let Ok(canonical) = prefix.canonicalize() {
-            // Re-append the skipped tail lexically: `.` drops, `..` pops
-            // the last re-appended component (the tail sits below the
-            // canonical anchor, and `PathBuf::pop` cannot go past `/`).
             let mut identity = canonical;
             for component in &components[keep..] {
                 match component {
