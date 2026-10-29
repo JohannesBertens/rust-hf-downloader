@@ -144,11 +144,30 @@ pub async fn fetch_model_metadata(
     let response = response.error_for_status()?;
     let mut metadata: ModelMetadata = response.json().await?;
 
-    // Fetch the complete file tree recursively
+    // Fetch the complete file tree recursively (shared entry point with the
+    // FLARE scanner, plans/flare-models.md §3.1 — behavior-neutral extraction).
+    metadata.siblings = fetch_revision_tree(client, model_id, revision).await?;
+
+    Ok(metadata)
+}
+
+/// The complete recursive file tree of `model_id` at `revision`, as
+/// [`RepoFile`] siblings (root path, every subdirectory expanded, Link-header
+/// pages followed — everything [`fetch_recursive_tree`] guarantees).
+///
+/// Public per-revision tree entry point (plans/flare-models.md §3.1): the FLARE scan fetches
+/// one tree per `target_commit` without going through
+/// [`fetch_model_metadata`]. `fetch_model_metadata` overwrites
+/// `siblings` with exactly this call, so the two consumers can never drift.
+pub async fn fetch_revision_tree(
+    client: &reqwest::Client,
+    model_id: &str,
+    revision: &str,
+) -> Result<Vec<RepoFile>, reqwest::Error> {
     let all_files = fetch_recursive_tree(client, model_id, "", revision).await?;
 
     // Convert ModelFile to RepoFile with proper size information
-    metadata.siblings = all_files
+    Ok(all_files
         .into_iter()
         .map(|f| RepoFile {
             rfilename: f.path,
@@ -156,9 +175,7 @@ pub async fn fetch_model_metadata(
             oid: f.oid,
             lfs: f.lfs,
         })
-        .collect();
-
-    Ok(metadata)
+        .collect())
 }
 
 /// Minimal shape of a `GET /api/models/{id}/revision/{rev}` response. Only
