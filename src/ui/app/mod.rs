@@ -62,6 +62,25 @@ impl App {
         crate::engine::spawn_verification_worker(self.engine.clone());
         let _manager = crate::engine::spawn_manager(self.engine.clone());
 
+        // Session-scoped FLARE platform detection
+        // (plans/flare-models.md §3.4): ONE
+        // spawn_blocking call whose result stays for the whole session
+        // (hardware does not change per model; `flare_platform` is never
+        // cleared). The first visible GPU is the star baseline — the
+        // revision cards compare it against their parsed arch token.
+        // Detection failure ⇒ `None` ⇒ no star (display-only, never an
+        // error here; the CLI's `--gpus` path owns the hard errors).
+        {
+            let platform_slot = self.flare_platform.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(platform)) =
+                    tokio::task::spawn_blocking(|| crate::gpu::detect_platform(&[0])).await
+                {
+                    *platform_slot.write() = Some(platform);
+                }
+            });
+        }
+
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -91,6 +110,8 @@ impl App {
         let quantizations = self.quantizations.read().clone();
         let model_metadata = self.model_metadata.read().clone();
         let file_tree = self.file_tree.read().clone();
+        let flare_info = self.flare_info.read().clone();
+        let flare_platform = *self.flare_platform.read();
 
         // For tokio Mutex, snapshot_in_place() refreshes the render cache when the
         // lock is free and leaves the cached value untouched when the lock is
@@ -184,6 +205,13 @@ impl App {
                     // Standard mode reuses the quant-loading spinner flag
                     loading: *self.loading_quants.read(),
                 },
+                flare: crate::ui::render::FlarePanelContext {
+                    flare_info: &flare_info,
+                    flare_list_state: &mut self.flare_list_state,
+                    flare_platform: &flare_platform,
+                    // Flare mode reuses the quant-loading spinner flag too
+                    loading: *self.loading_quants.read(),
+                },
                 filters: crate::ui::render::FilterCtx {
                     sort_field: self.filters.sort_field,
                     sort_direction: self.filters.sort_direction,
@@ -238,6 +266,23 @@ impl App {
                     .as_ref()
                     .is_some_and(|t| !t.is_empty());
                 crate::ui::render::render_auth_error_popup(frame, model_url, has_token);
+            }
+            PopupMode::FlareRevision {
+                ref model_id,
+                ref choices,
+                cursor,
+            } => {
+                // The star rides the SESSION platform (plans/flare-models.md §3.4) —
+                // pure input
+                // to the render pass, cloned out of the RwLock first.
+                let platform = *self.flare_platform.read();
+                crate::ui::render::render_flare_revision_popup(
+                    frame,
+                    model_id,
+                    choices,
+                    cursor,
+                    platform.as_ref(),
+                );
             }
             PopupMode::None => {}
         }
@@ -361,6 +406,13 @@ impl App {
                     self.previous_file_tree_item();
                 } else {
                     self.next_file_tree_item();
+                }
+            }
+            crate::models::FocusedPane::FlareRevisions => {
+                if scroll_up {
+                    self.previous_flare_revision();
+                } else {
+                    self.next_flare_revision();
                 }
             }
         }

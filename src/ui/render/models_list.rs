@@ -9,9 +9,20 @@ use ratatui::{
     widgets::ListItem,
 };
 
+/// plans/flare-models.md §3.4a: the search-list FLARE badge rule — any
+/// tag equals `flare` or
+/// starts with `flare-` (covers all three flagship repos: two carry the
+/// exact `flare` tag, JohannesBertens' carries `flare-runtime-package`).
+/// Tag-based only: no extra fetch.
+pub(super) fn model_has_flare_tag(tags: &[String]) -> bool {
+    tags.iter()
+        .any(|tag| tag == "flare" || tag.starts_with("flare-"))
+}
+
 /// Build the Results list: one line per model with index, id, author
 /// (derived from the id when absent), download/like counts, the
-/// last-modified date and up to three tags.
+/// last-modified date, the plans/flare-models.md §3.4a `[FLARE]` badge,
+/// and up to three tags.
 pub(super) fn model_list_items(models: &[ModelInfo]) -> Vec<ListItem<'_>> {
     models
         .iter()
@@ -57,6 +68,17 @@ pub(super) fn model_list_items(models: &[ModelInfo]) -> Vec<ListItem<'_>> {
                 String::new()
             };
 
+            let flare_badge = if model_has_flare_tag(&model.tags) {
+                Span::styled(
+                    " [FLARE]",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("")
+            };
+
             let content = Line::from(vec![
                 Span::styled(
                     format!("{:3}. ", idx + 1),
@@ -72,6 +94,7 @@ pub(super) fn model_list_items(models: &[ModelInfo]) -> Vec<ListItem<'_>> {
                 Span::styled(author, Style::default().fg(Color::Green)),
                 Span::raw(format!(" ↓{} ♥{}", downloads, likes)),
                 Span::styled(last_modified_str, Style::default().fg(Color::Cyan)),
+                flare_badge,
                 Span::styled(tags_str, Style::default().fg(Color::Yellow)),
             ]);
 

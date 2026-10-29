@@ -43,6 +43,7 @@ use ratatui::{
 };
 use tui_input::Input;
 
+mod flare;
 mod gguf;
 mod hud;
 mod models_list;
@@ -59,6 +60,8 @@ pub use toolbar::*;
 // Panel-input groups consumed by [`RenderParams`] (W5.2): each bottom-
 // panel renderer owns its own context struct, re-exported so `ui::app`
 // can construct them next to the other groups.
+use flare::render_flare_panels;
+pub use flare::{flare_package_files, flare_package_size, FlarePanelContext};
 use gguf::render_gguf_panels;
 pub use gguf::GgufPanelContext;
 use models_list::model_list_items;
@@ -110,7 +113,8 @@ pub struct StatusCtx<'a> {
 ///
 /// - `panels`: Results list first, then the active display mode's bottom
 ///   panels left-to-right — GGUF: QuantizationGroups, QuantizationFiles;
-///   Standard: ModelMetadata, FileTree.
+///   Standard: ModelMetadata, FileTree; Flare: FlareRevisions (the
+///   read-only facts panel registers no hit-rect).
 /// - `filters`: toolbar fields in display order (0 = sort, 1 = min
 ///   downloads, 2 = min likes).
 #[derive(Debug, Default)]
@@ -141,6 +145,7 @@ pub struct RenderParams<'a> {
     pub list: ListCtx<'a>,
     pub gguf: GgufPanelContext<'a>,
     pub standard: StandardPanelContext<'a>,
+    pub flare: FlarePanelContext<'a>,
     pub filters: FilterCtx,
     pub status: StatusCtx<'a>,
     /// Activity HUD: DESIRED strip height above the status bar (the
@@ -177,6 +182,7 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
         list,
         gguf,
         standard,
+        flare,
         filters,
         status,
         hud_height,
@@ -283,6 +289,9 @@ pub fn render_ui(frame: &mut Frame, params: RenderParams) -> RenderOutput {
                 &focus,
                 &mut mouse.panels,
             );
+        }
+        ModelDisplayMode::Flare => {
+            render_flare_panels(frame, bottom_panel_chunks, flare, &focus, &mut mouse.panels);
         }
     }
 

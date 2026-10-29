@@ -1,11 +1,122 @@
 //! Search + model-detail loading: query the hub, load quantizations and
 //! file trees into the caches (`ApiCache::get_or_fetch`, W4.11), and drive
 //! the background prefetch of adjacent models. Was `models.rs` before W3.6.
+//!
+//! plans/flare-models.md §3.4 adds the FLARE detail scan: disposition over
+//! the fetched
+//! metadata → (Probable confirmed via raw `config.json`) → cached
+//! refs+trees scan → ownership-guarded publish into `ModelDisplayMode::Flare`.
 use super::state::App;
-use crate::api::{build_file_tree, classify_quantizations, fetch_model_metadata};
-use crate::models::ModelDisplayMode;
+use crate::api::{
+    build_file_tree, classify_quantizations, config_json_confirms_flare, fetch_flare_info,
+    fetch_model_metadata, fetch_raw_file, flare_disposition, FlareDisposition,
+};
+use crate::models::{ModelDisplayMode, PopupMode, RepoFile};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+/// The shared state slots a FLARE detail scan writes
+/// (plans/flare-models.md §3.4): bundled so
+/// the spawned scan task (which owns Arc clones, not `&App`) and the
+/// offline tests share ONE ownership-guarded publish body. The epoch is
+/// [`App::flare_scan_epoch`] — bumped on every selection change and
+/// every new scan spawn; `publish` is a no-op for a superseded epoch.
+pub(super) struct FlareScanShared {
+    pub epoch: Arc<AtomicU64>,
+    pub display_mode: Arc<parking_lot::RwLock<ModelDisplayMode>>,
+    pub flare_info: Arc<parking_lot::RwLock<Option<crate::models::FlareRepoInfo>>>,
+    pub quantizations: Arc<parking_lot::RwLock<Vec<crate::models::QuantizationGroup>>>,
+    pub model_metadata: Arc<parking_lot::RwLock<Option<crate::models::ModelMetadata>>>,
+    pub file_tree: Arc<parking_lot::RwLock<Option<crate::models::FileTreeNode>>>,
+    pub loading_quants: Arc<parking_lot::RwLock<bool>>,
+    pub status: Arc<parking_lot::RwLock<String>>,
+}
+
+impl FlareScanShared {
+    /// Capture the publish slots off `App` (spawn time).
+    fn from_app(app: &App) -> Self {
+        Self {
+            epoch: app.flare_scan_epoch.clone(),
+            display_mode: app.display_mode.clone(),
+            flare_info: app.flare_info.clone(),
+            quantizations: app.quantizations.clone(),
+            model_metadata: app.model_metadata.clone(),
+            file_tree: app.file_tree.clone(),
+            loading_quants: app.loading_quants.clone(),
+            status: app.status.clone(),
+        }
+    }
+
+    /// plans/flare-models.md §3.4 ownership-guarded publish: installs the
+    /// scan result ONLY while
+    /// `epoch` is still current. Publishing switches to Flare mode,
+    /// installs `flare_info`, clears the GGUF/Standard state (the converse
+    /// of what the Standard/GGUF paths do to `flare_info`), drops the
+    /// spinner, and notes the revision count. A superseded scan is a
+    /// silent no-op — the current selection's state wins.
+    pub(super) fn publish(&self, epoch: u64, info: crate::models::FlareRepoInfo) {
+        if self.epoch.load(Ordering::Relaxed) != epoch {
+            return;
+        }
+        let revisions = info.revisions.len();
+        *self.display_mode.write() = ModelDisplayMode::Flare;
+        *self.flare_info.write() = Some(info);
+        self.quantizations.write().clear();
+        *self.model_metadata.write() = None;
+        *self.file_tree.write() = None;
+        *self.loading_quants.write() = false;
+        *self.status.write() =
+            format!("FLARE repository: {revisions} payload revision(s) — press 'd' to download");
+    }
+}
+
+/// Confirm a Probable FLARE disposition (plans/flare-models.md §3.4): fetch
+/// the raw
+/// `config.json` at main and apply the live-verified markers. The LFS
+/// guard uses the already-fetched main tree (`siblings`) — an LFS or
+/// absent `config.json` is not confirmable; a failed fetch is NOT an
+/// error (degrades to the Standard/GGUF classification).
+async fn confirm_flare_probable(
+    client: &reqwest::Client,
+    model_id: &str,
+    siblings: &[RepoFile],
+) -> bool {
+    let plain_config = siblings
+        .iter()
+        .any(|file| file.rfilename == "config.json" && file.lfs.is_none());
+    if !plain_config {
+        return false;
+    }
+    match fetch_raw_file(
+        client,
+        model_id,
+        crate::api::DEFAULT_REVISION,
+        "config.json",
+    )
+    .await
+    {
+        Ok(body) => config_json_confirms_flare(Some(&body)),
+        Err(_) => false,
+    }
+}
 
 impl App {
+    /// Capture the current FLARE scan epoch for a newly spawned detail
+    /// scan (plans/flare-models.md §3.4): every spawn advances the epoch,
+    /// superseding any
+    /// earlier in-flight scan.
+    fn begin_flare_scan(&self) -> u64 {
+        self.flare_scan_epoch.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Invalidate every in-flight FLARE scan (plans/flare-models.md §3.4):
+    /// run from
+    /// `clear_model_details` on every selection change, so a scan for a
+    /// previously selected model can never publish over the new one.
+    fn invalidate_flare_scans(&self) {
+        self.flare_scan_epoch.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Execute search query and load results
     pub async fn search_models(&mut self) {
         let query = self.input.value().to_string();
@@ -214,6 +325,33 @@ impl App {
         }
     }
 
+    /// Status-bar details for the selected FLARE revision card (the
+    /// `show_quantization_details` precedent, plans/flare-models.md §3.4).
+    /// The FULL commit pin
+    /// lives here — the card shows only the short form.
+    pub async fn show_flare_revision_details(&mut self) {
+        let flare = self.flare_info.read();
+        let Some(selected) = self.flare_list_state.selected() else {
+            return;
+        };
+        let Some(revision) = flare.as_ref().and_then(|info| info.revisions.get(selected)) else {
+            return;
+        };
+        let aliases = if revision.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", revision.aliases.join(", "))
+        };
+        *self.status.write() = format!(
+            "Revision: {}{} | Commit: {} | Size: {} | Files: {}",
+            revision.revision,
+            aliases,
+            revision.target_commit,
+            crate::fmt::size_full(crate::ui::render::flare_package_size(&revision.package,)),
+            crate::ui::render::flare_package_files(&revision.package).len(),
+        );
+    }
+
     /// Load quantizations for currently selected model (with cache check)
     /// Now supports dual-mode: GGUF quantizations or standard model metadata + file tree
     /// Spawns a background task to avoid blocking UI thread
@@ -232,6 +370,11 @@ impl App {
         // Immediate UI feedback (synchronous)
         *self.loading_quants.write() = true;
 
+        // plans/flare-models.md §3.4 ownership rule: this spawn supersedes
+        // every in-flight
+        // FLARE scan (and any selection change supersedes it in turn).
+        let epoch = self.begin_flare_scan();
+
         // Clone Arcs for background task
         let quantizations = self.quantizations.clone();
         let api_cache = self.api_cache.clone();
@@ -241,6 +384,10 @@ impl App {
         let error = self.error.clone();
         let display_mode = self.display_mode.clone();
         let status = self.status.clone();
+        // The FLARE publish slots (plans/flare-models.md §3.4) — one bundle
+        // so the guarded
+        // publish has a single home shared with the offline tests.
+        let flare_shared = FlareScanShared::from_app(self);
         // The session's shared API client (M4/B5): cheap Arc clone, the
         // token rides in its default headers.
         let api_client = self.api_client.clone();
@@ -274,6 +421,37 @@ impl App {
             // Classify the full recursive tree (pure function — issue #25:
             // GGUFs in arbitrarily named subdirectories used to be invisible
             // because quant listing walked only the repo root).
+            //
+            // FLARE scan first (plans/flare-models.md §3.4): a confirmed
+            // disposition publishes
+            // Flare mode and RETURNS; any error or non-confirmation
+            // degrades to the Standard/GGUF classification below (with a
+            // status note on a failed scan) — never a dead end.
+            let flare_confirmed = match flare_disposition(&metadata) {
+                FlareDisposition::No => false,
+                FlareDisposition::Yes => true,
+                FlareDisposition::Probable => {
+                    confirm_flare_probable(&api_client, &model_id, &metadata.siblings).await
+                }
+            };
+            if flare_confirmed {
+                let scanned = crate::models::ApiCache::get_or_fetch(&api_cache, &model_id, || {
+                    fetch_flare_info(&api_client, &model_id)
+                })
+                .await;
+                match scanned {
+                    Ok(info) => {
+                        flare_shared.publish(epoch, info);
+                        return;
+                    }
+                    Err(e) => {
+                        *status.write() =
+                            format!("FLARE scan failed: {e} — showing file tree instead");
+                        // fall through to the Standard/GGUF classification
+                    }
+                }
+            }
+
             let groups = classify_quantizations(&metadata.siblings);
 
             if groups.is_empty() {
@@ -341,6 +519,18 @@ impl App {
         // Clear metadata and file tree (Standard mode)
         *self.model_metadata.write() = None;
         *self.file_tree.write() = None;
+
+        // Clear the FLARE scan result (plans/flare-models.md §3.4: cleared
+        // wherever the
+        // quant/tree state clears, together with the popup state — the
+        // popup's snapshot is bound to the cleared model) and invalidate
+        // any in-flight FLARE scan for the old selection (ownership rule).
+        // `flare_platform` is SESSION-scoped and stays.
+        *self.flare_info.write() = None;
+        if matches!(self.popup_mode, PopupMode::FlareRevision { .. }) {
+            self.popup_mode = PopupMode::None;
+        }
+        self.invalidate_flare_scans();
 
         // Set loading state
         *self.loading_quants.write() = true;
@@ -553,5 +743,94 @@ mod tests {
         // Neutral idle status, not an error or stale searching line.
         assert_eq!(status, "Welcome! Press '/' to search for models");
         assert!(app.models.read().is_empty(), "list stays cleared");
+    }
+
+    // ------------------------------------------------------------------
+    // plans/flare-models.md §3.4 ownership rule: the reversed-completion
+    // pin. A slow scan for
+    // model A completing AFTER a fast selection change to B must not
+    // publish over B's state — the publish guard is the epoch captured
+    // at spawn, invalidated by every selection change.
+    // ------------------------------------------------------------------
+
+    /// Minimal one-revision scan value whose revision name identifies it.
+    fn flare_info_for(revision: &str) -> crate::models::FlareRepoInfo {
+        use crate::models::{
+            FlareConfigFacts, FlarePackage, FlareRepoInfo, FlareRevision, ParsedPackageTokens,
+            RefKind, RepoFile,
+        };
+        FlareRepoInfo {
+            revisions: vec![FlareRevision {
+                revision: revision.to_string(),
+                aliases: Vec::new(),
+                kind: RefKind::Branch,
+                target_commit: format!("{:040}", 0),
+                package: FlarePackage::Packed {
+                    file: RepoFile {
+                        rfilename: "pkg.safetensors".to_string(),
+                        size: Some(1),
+                        oid: None,
+                        lfs: None,
+                    },
+                },
+                parsed: ParsedPackageTokens::default(),
+            }],
+            config: FlareConfigFacts::default(),
+            publisher: None,
+            dropped_refs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn flare_publish_guard_pins_reversed_completion() {
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = TempDir::install();
+        let mut app = App::new();
+        let shared = FlareScanShared::from_app(&app);
+
+        // Slow scan A starts; the user moves to B (every selection change
+        // clears details, invalidating in-flight scans); scan B starts.
+        let epoch_a = app.begin_flare_scan();
+        app.clear_model_details();
+        let epoch_b = app.begin_flare_scan();
+
+        // Fast B completes FIRST: published — Flare mode, B's info, the
+        // GGUF/Standard state cleared, spinner down.
+        shared.publish(epoch_b, flare_info_for("gb202"));
+        assert!(matches!(*app.display_mode.read(), ModelDisplayMode::Flare));
+        assert_eq!(
+            app.flare_info
+                .read()
+                .as_ref()
+                .map(|info| info.revisions[0].revision.clone()),
+            Some("gb202".to_string())
+        );
+        assert!(app.model_metadata.read().is_none());
+        assert!(app.file_tree.read().is_none());
+        assert!(app.quantizations.read().is_empty());
+        assert!(!*app.loading_quants.read());
+
+        // Slow A completes LAST: suppressed — B's publish survives intact.
+        shared.publish(epoch_a, flare_info_for("gb10"));
+        assert_eq!(
+            app.flare_info
+                .read()
+                .as_ref()
+                .map(|info| info.revisions[0].revision.clone()),
+            Some("gb202".to_string()),
+            "stale scan must not publish over the current selection's state"
+        );
+
+        // A CURRENT-epoch publish still goes through (the guard passes the
+        // living scan, not just rejecting dead ones).
+        let epoch_c = app.begin_flare_scan();
+        shared.publish(epoch_c, flare_info_for("gb10"));
+        assert_eq!(
+            app.flare_info
+                .read()
+                .as_ref()
+                .map(|info| info.revisions[0].revision.clone()),
+            Some("gb10".to_string())
+        );
     }
 }

@@ -1,3 +1,4 @@
+use super::models_list::model_has_flare_tag;
 use super::*;
 use crate::models::{SortDirection, SortField};
 use crate::ui::app::options::{
@@ -250,4 +251,35 @@ fn options_fields_table_pins_dialog_shape() {
         (OPTIONS_FIELDS[4].value)(&options, &dialog, &empty, &empty),
         "5.00 MB"
     );
+}
+
+// ---------------------------------------------------------------------
+// plans/flare-models.md §3.4a: the search-list FLARE badge rule.
+// ---------------------------------------------------------------------
+
+#[test]
+fn flare_badge_rule_matches_the_three_real_tag_vectors() {
+    let tags = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+
+    // The two flagship repos that carry the exact `flare` tag
+    // (local-inference-lab, lflare).
+    assert!(model_has_flare_tag(&tags(&["text-generation", "flare"])));
+    // JohannesBertens' repo: `flare-runtime-package`, NO `flare` tag —
+    // the prefix arm is what badges it.
+    assert!(model_has_flare_tag(&tags(&[
+        "flare-runtime-package",
+        "text-generation"
+    ])));
+    // An ordinary repo: no flare-family tag at all.
+    assert!(!model_has_flare_tag(&tags(&["text-generation", "llama"])));
+    assert!(!model_has_flare_tag(&[]));
+    // Near misses must NOT badge: `flare` as a substring is not a prefix
+    // match, and `flare-` must lead.
+    assert!(!model_has_flare_tag(&tags(&["flared"])));
+    assert!(!model_has_flare_tag(&tags(&["x-flare"])));
+    // The exact tag still badges when other flare- tags coexist.
+    assert!(model_has_flare_tag(&tags(&[
+        "flare",
+        "flare-runtime-package"
+    ])));
 }
