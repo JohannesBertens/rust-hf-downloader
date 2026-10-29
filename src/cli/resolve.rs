@@ -572,6 +572,16 @@ fn fs_identity(p: &Path) -> PathBuf {
 /// spelled `--output ../work/models` must still match the recorded
 /// absolute row for the same directory (impl-gate r1 P1 absolutize fix +
 /// r2 P1 identity fix).
+///
+/// Verification backstop: this pre-flight is the FAST-FAIL layer, not
+/// the last line of defense. When verification is enabled (the default)
+/// the engine re-verifies every AlreadyExists file against the CURRENT
+/// run's expected sha256 (`download::handle_existing_file` queues the
+/// existing-file skip for verification — src/download/mod.rs ~:420), so
+/// stale bytes a pre-flight heuristic misses are still caught downstream
+/// as a hash mismatch. `--no-verify` is the user-accepted residual risk:
+/// there, ONLY this pre-flight stands between the run and another
+/// commit's bytes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flare_preflight(
     registry: &DownloadRegistry,
