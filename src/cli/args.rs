@@ -217,6 +217,31 @@ pub struct DownloadArgs {
     /// [default: main]
     #[arg(long, value_name = "REV", value_parser = parse_revision)]
     pub revision: Option<String>,
+
+    /// Download a FLARE runtime package (semantic package selection;
+    /// conflicts with --quant/--file/--all)
+    #[arg(
+        long = "for",
+        value_name = "PRESET",
+        value_parser = parse_flare_preset,
+        conflicts_with_all = ["quant", "file", "all"]
+    )]
+    pub for_preset: Option<String>,
+
+    /// GPU indices for FLARE platform detection, e.g. "0", "0,1",
+    /// "0-3" (comma ints + N-M ranges; count = tensor-parallel size)
+    #[arg(long, value_name = "SPEC", value_parser = parse_gpus_spec_flag)]
+    pub gpus: Option<String>,
+
+    /// Include only package files matching GLOB (repeatable, fnmatch
+    /// semantics: `*` crosses `/`; filters WITHIN the preset's package set)
+    #[arg(long = "include", value_name = "GLOB", requires = "for_preset")]
+    pub include: Vec<String>,
+
+    /// Exclude package files matching GLOB (repeatable; applies after
+    /// selection)
+    #[arg(long = "exclude", value_name = "GLOB", requires = "for_preset")]
+    pub exclude: Vec<String>,
 }
 
 /// `hf-cache` subcommand group (plans/hf-cache-sync.md §2.1): the hub-cache
@@ -323,6 +348,29 @@ fn parse_preset(s: &str) -> Result<String, String> {
             "unknown preset {other:?} — available presets: vllm"
         )),
     }
+}
+
+/// Validate a `download --for <PRESET>` name (plans/flare-models.md §3.3a):
+/// only `flare` exists on this subcommand. Deliberately a SEPARATE parser
+/// from hf-cache's `parse_preset` (vllm-only, untouched) so
+/// `hf-cache sync --for flare` remains unparseable — the two presets never
+/// share a surface.
+fn parse_flare_preset(s: &str) -> Result<String, String> {
+    match s {
+        "flare" => Ok(s.to_string()),
+        other => Err(format!(
+            "unknown preset {other:?} — available presets: flare"
+        )),
+    }
+}
+
+/// Validate `--gpus <SPEC>` at parse time through `gpu::parse_gpus_spec`
+/// (plans/flare-models.md §3.2 grammar: comma ints + inclusive N-M ranges,
+/// duplicates collapse, UUID tokens rejected pointing at `--revision`),
+/// keeping the RAW string — the §3.3f handoff echoes the spec verbatim and
+/// the revision ladder re-parses it into indices.
+fn parse_gpus_spec_flag(s: &str) -> Result<String, String> {
+    crate::gpu::parse_gpus_spec(s).map(|_| s.to_string())
 }
 
 /// Token precedence: `--token` flag → `$HF_TOKEN` env → config file.

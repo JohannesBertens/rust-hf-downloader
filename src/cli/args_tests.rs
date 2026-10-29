@@ -670,3 +670,134 @@ fn snapshot_search_json_array() {
         serde_json::to_string_pretty(&dtos).unwrap()
     );
 }
+
+// --- download --for flare flags (plans/flare-models.md §3.3a) ----------
+
+/// The download preset parser accepts ONLY `flare`; hf-cache's shared
+/// `parse_preset` stays vllm-only (D5: the two presets never share a
+/// surface — `hf-cache sync --for flare` remains unparseable).
+#[test]
+fn flare_preset_parsers_are_per_surface() {
+    let args = Cli::try_parse_from(["hfd", "download", "a/b", "--for", "flare"]).unwrap();
+    let Command::Download(args) = args.command.unwrap() else {
+        panic!("expected download");
+    };
+    assert_eq!(args.for_preset.as_deref(), Some("flare"));
+    assert_eq!(args.gpus, None);
+    assert!(args.include.is_empty());
+    assert!(args.exclude.is_empty());
+
+    // Unknown presets are clap usage errors naming the choice.
+    let err = Cli::try_parse_from(["hfd", "download", "a/b", "--for", "vllm"]).unwrap_err();
+    assert!(
+        err.to_string().contains("available presets: flare"),
+        "error must name the preset: {err}"
+    );
+
+    // hf-cache sync still rejects `flare` through its own vllm-only parser.
+    let err =
+        Cli::try_parse_from(["hfd", "hf-cache", "sync", "a/b", "--for", "flare"]).unwrap_err();
+    assert!(
+        err.to_string().contains("available presets: vllm"),
+        "hf-cache preset parser must stay vllm-only: {err}"
+    );
+    // ...and still accepts `vllm`.
+    assert!(Cli::try_parse_from(["hfd", "hf-cache", "sync", "a/b", "--for", "vllm"]).is_ok());
+}
+
+/// `--for` is mutually exclusive with the ordinary selectors
+/// (§3.3a: error, not precedence).
+#[test]
+fn flare_preset_conflicts_with_quant_file_all() {
+    for extra in [
+        vec!["--quant", "Q4_K_M"],
+        vec!["--file", "a.gguf"],
+        vec!["--all"],
+    ] {
+        let mut argv = vec!["hfd", "download", "a/b", "--for", "flare"];
+        argv.extend(extra.iter().copied());
+        let err = Cli::try_parse_from(argv).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "--for + {extra:?} must be a clap conflict: {err}"
+        );
+    }
+}
+
+/// `--include`/`--exclude` REQUIRE `--for` (general include-on-download is
+/// out of scope this round, §3.3a).
+#[test]
+fn include_exclude_require_for_preset() {
+    for flag in ["--include", "--exclude"] {
+        let err = Cli::try_parse_from(["hfd", "download", "a/b", flag, "*.gguf"]).unwrap_err();
+        assert!(
+            err.to_string().contains("--for"),
+            "{flag} without --for must be a usage error: {err}"
+        );
+        assert!(
+            Cli::try_parse_from(["hfd", "download", "a/b", "--for", "flare", flag, "*.gguf"])
+                .is_ok(),
+            "{flag} with --for must parse"
+        );
+    }
+}
+
+/// `--gpus` keeps the RAW spec (§3.3f verbatim echo) while validating it
+/// through `gpu::parse_gpus_spec` at parse time.
+#[test]
+fn gpus_flag_validates_and_keeps_raw_spec() {
+    let args = Cli::try_parse_from([
+        "hfd", "download", "a/b", "--for", "flare", "--gpus", "0,1-2",
+    ])
+    .unwrap();
+    let Command::Download(args) = args.command.unwrap() else {
+        panic!("expected download");
+    };
+    assert_eq!(args.gpus.as_deref(), Some("0,1-2"));
+
+    // Malformed specs are clap errors (gpu::parse_gpus_spec grammar).
+    for bad in ["", "  ", "abc", "5-2", "0,,1", "GPU-abc"] {
+        let mut argv = vec!["hfd", "download", "a/b", "--for", "flare", "--gpus"];
+        argv.push(bad);
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "--gpus {bad:?} must be rejected at parse time"
+        );
+    }
+    // The UUID wording points at --revision (gpu module contract).
+    let err = Cli::try_parse_from([
+        "hfd",
+        "download",
+        "a/b",
+        "--for",
+        "flare",
+        "--gpus",
+        "0,GPU-1a2b3c4d-1e2f-3a4b-5c6d-7e8f9a0b1c2d",
+    ])
+    .unwrap_err();
+    assert!(err.to_string().contains("--revision"), "got: {err}");
+}
+
+/// Repeatable `--include`/`--exclude` accumulate in order.
+#[test]
+fn include_exclude_are_repeatable_and_ordered() {
+    let args = Cli::try_parse_from([
+        "hfd",
+        "download",
+        "a/b",
+        "--for",
+        "flare",
+        "--include",
+        "weights/**",
+        "--include",
+        "config.json",
+        "--exclude",
+        "*.md",
+    ])
+    .unwrap();
+    let Command::Download(args) = args.command.unwrap() else {
+        panic!("expected download");
+    };
+    assert_eq!(args.include, vec!["weights/**", "config.json"]);
+    assert_eq!(args.exclude, vec!["*.md"]);
+}

@@ -36,6 +36,10 @@ fn download_args(quant: Option<&str>, file: &[&str], all: bool) -> DownloadArgs 
         },
         output: None,
         revision: None,
+        for_preset: None,
+        gpus: None,
+        include: Vec::new(),
+        exclude: Vec::new(),
     }
 }
 
