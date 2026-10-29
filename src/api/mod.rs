@@ -34,13 +34,15 @@ mod quant;
 mod tree;
 
 pub use client::*;
-// Wave-1 foundation (plans/flare-models.md §7): the re-exports gain their
-// first production reader when wave-2 lanes C/D merge — drop the allow then.
+// Remaining wave-1 foundation re-exports (plans/flare-models.md §7): the
+// TUI viewer/download readers land with Lane D — drop this allow when they
+// do. The FLARE CLI (Lane C) already consumes select_package/
+// fetch_flare_info/fetch_repo_refs without it.
 #[allow(unused_imports)]
 pub use flare::{
     assemble_flare_info_from, config_json_confirms_flare, fetch_flare_info, fetch_raw_file,
     fetch_repo_refs, flare_disposition, parse_flare_config_facts, parse_flare_package_tokens,
-    parse_flare_publisher, FlareDisposition, FlareScanError,
+    parse_flare_publisher, select_package, FlareDisposition, FlareScanError,
 };
 pub use quant::*;
 pub use tree::*;

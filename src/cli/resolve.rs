@@ -219,3 +219,147 @@ impl ResolveError {
         }
     }
 }
+
+// --- FLARE preset selection (plans/flare-models.md §3.3b/§3.3c) ---------
+
+use crate::models::{FlarePackage, RepoRefs};
+
+/// A 40-hex commit SHA — ladder step (i)'s direct-pin shape
+/// (plans/flare-models.md §3.3b).
+pub(super) fn is_commit_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// One member of a FLARE package's file set: the REPO-relative path (the
+/// URL truth), its tree size, and the LFS oid when present
+/// (plans/flare-models.md §3.3e: the oid forwards into `expected_sha256`
+/// so LFS payloads are digest-verified by default; non-LFS files like
+/// directory-form `config.json`/`publisher.json` carry no oid).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct FlareFile {
+    pub relpath: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+}
+
+fn flare_file(f: &crate::models::RepoFile) -> FlareFile {
+    FlareFile {
+        relpath: f.rfilename.clone(),
+        size: f.size.unwrap_or(0),
+        sha256: f.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+    }
+}
+
+/// The §3.3c semantic package set — wave-1's `choose_file` rule plus the
+/// two root metadata files: packed = the single file; directory =
+/// `model.safetensors` + `weights/**` + `deployments/**` companions +
+/// `config.json` + `publisher.json` when present in the revision's tree
+/// (the two root files are the directory form's — a packed package is
+/// self-contained). The primary (packed file / root `model.safetensors`)
+/// comes FIRST.
+pub(super) fn flare_package_set(
+    package: &FlarePackage,
+    tree: &[crate::models::RepoFile],
+) -> Vec<FlareFile> {
+    match package {
+        FlarePackage::Packed { file } => vec![flare_file(file)],
+        FlarePackage::Directory {
+            primary,
+            companions,
+        } => {
+            let mut out = vec![flare_file(primary)];
+            out.extend(companions.iter().map(flare_file));
+            // Root metadata files (plain git blobs — no LFS oid): they ride
+            // the package so the served form is complete.
+            for name in ["config.json", "publisher.json"] {
+                if let Some(found) = tree.iter().find(|f| f.rfilename == name) {
+                    out.push(flare_file(found));
+                }
+            }
+            out
+        }
+    }
+}
+
+/// Map the package set into download [`FileSpec`]s with the
+/// revision-scoped destination split (§3.3d): `filename` = the LOCAL
+/// `<revision-dir>/<repo-relpath>`, `remote_path` = the repo path (the
+/// URL truth). `--include`/`--exclude` filter WITHIN the set, matching
+/// the REPO-relative path (patterns.rs fnmatch — `*` crosses `/`).
+/// An empty result is a selection error listing the unfiltered set.
+pub(super) fn select_flare_files(
+    package_set: &[FlareFile],
+    revision_dir: &str,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<FileSpec>, ResolveError> {
+    let relpaths: Vec<&str> = package_set.iter().map(|f| f.relpath.as_str()).collect();
+    let kept = crate::patterns::filter_paths(&relpaths, include, exclude);
+    let picked: Vec<FileSpec> = package_set
+        .iter()
+        .filter(|f| kept.contains(&f.relpath.as_str()))
+        .map(|f| FileSpec {
+            filename: format!("{}/{}", revision_dir, f.relpath),
+            size_bytes: f.size,
+            sha256: f.sha256.clone(),
+            remote_path: Some(f.relpath.clone()),
+        })
+        .collect();
+    if picked.is_empty() {
+        let selector = if include.is_empty() && exclude.is_empty() {
+            "--for flare".to_string()
+        } else {
+            let mut s = String::from("--for flare");
+            for glob in include {
+                s.push_str(&format!(" --include {}", glob));
+            }
+            for glob in exclude {
+                s.push_str(&format!(" --exclude {}", glob));
+            }
+            s
+        };
+        return Err(ResolveError::NoFilesMatch {
+            selector,
+            available: package_set
+                .iter()
+                .map(|f| FileSpec {
+                    filename: format!("{}/{}", revision_dir, f.relpath),
+                    size_bytes: f.size,
+                    sha256: f.sha256.clone(),
+                    remote_path: Some(f.relpath.clone()),
+                })
+                .collect(),
+        });
+    }
+    Ok(picked)
+}
+
+/// The PREFERRED revision name for a commit (plans/flare-models.md §3.1:
+/// branch name first, else tag — the directory-segment + display name).
+/// `main` never wins: payload revisions exclude it.
+pub(super) fn preferred_revision_name(refs: &RepoRefs, commit: &str) -> Option<String> {
+    refs.branches
+        .iter()
+        .filter(|b| b.name != "main")
+        .find(|b| b.target_commit == commit)
+        .map(|b| b.name.clone())
+        .or_else(|| {
+            refs.tags
+                .iter()
+                .find(|t| t.target_commit == commit)
+                .map(|t| t.name.clone())
+        })
+}
+
+/// The repo's payload revision names from `/refs` (branches other than
+/// `main`, then tags, aliases included) — the listing the CLI appends to
+/// GPU-detection errors and to the neither-flag error
+/// (plans/flare-models.md §3.3b).
+pub(super) fn payload_revision_names(refs: &RepoRefs) -> Vec<String> {
+    refs.branches
+        .iter()
+        .filter(|b| b.name != "main")
+        .map(|b| b.name.clone())
+        .chain(refs.tags.iter().map(|t| t.name.clone()))
+        .collect()
+}

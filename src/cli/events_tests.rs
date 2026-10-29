@@ -18,9 +18,47 @@ fn snapshot_event_resolved() {
                 sha256: Some("a".repeat(64)),
             }],
             total_bytes: 4_947_802_324,
+            // Absent for the ordinary command (plans/flare-models.md §3.3f):
+            // the optional fields serialize to nothing when None.
+            revision: None,
+            commit: None,
         },
         "event-resolved",
     );
+}
+
+#[test]
+fn resolved_revision_and_commit_wire_shape() {
+    // The FLARE preset's Resolved carries the display revision name + the
+    // 40-hex commit pin (plans/flare-models.md §3.3f, additive-only): both
+    // present in that order after total_bytes, snake_case keys.
+    let event = Event::Resolved {
+        model: "org/model".to_string(),
+        files: vec![FileDto {
+            filename: "gb202/pkg.safetensors".to_string(),
+            size_bytes: 1,
+            sha256: None,
+        }],
+        total_bytes: 1,
+        revision: Some("gb202".to_string()),
+        commit: Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&event).unwrap(),
+        r#"{"type":"resolved","model":"org/model","files":[{"filename":"gb202/pkg.safetensors","size_bytes":1,"sha256":null}],"total_bytes":1,"revision":"gb202","commit":"0123456789abcdef0123456789abcdef01234567"}"#
+    );
+
+    // And absent (key omitted, not null) for existing commands.
+    let ordinary = Event::Resolved {
+        model: "org/model".to_string(),
+        files: Vec::new(),
+        total_bytes: 0,
+        revision: None,
+        commit: None,
+    };
+    let wire = serde_json::to_string(&ordinary).unwrap();
+    assert!(!wire.contains("revision"), "wire: {wire}");
+    assert!(!wire.contains("commit"), "wire: {wire}");
 }
 
 #[test]
