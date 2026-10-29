@@ -294,28 +294,20 @@ fn flare_badge_rule_matches_the_three_real_tag_vectors() {
 /// rows 0..=7 while the cursor kept advancing, so Enter could pick an
 /// invisible row).
 ///
-/// DEVIATION PIN (impl-gate round 2): the specified assertion — “row
-/// index 8 IS visible/highlighted” — FAILS against the current renderer.
-/// `render_flare_revision_popup` positions each row at
-/// `popup.y + 3 + ABSOLUTE idx` (src/ui/render/popups.rs), so a scrolled
-/// window (`visible_from == 1`) shifts every row DOWN by one: the first
-/// list slot renders EMPTY and the last visible row — the CURSOR row,
-/// idx 8 — lands on the same line as the `... and 1 more` overflow note,
-/// which renders after the rows and clobbers the `>> rev-8` prefix
-/// (leaving `... and 1 more] @00000008  1000 B`). The assertions below
-/// pin what renders TODAY — the window DID scroll past `rev-0` (the core
-/// windowing behavior) but the cursor row is left unhighlighted and
-/// partially overwritten. When the renderer positions rows
-/// window-relative (`popup.y + 3 + (idx - visible_from)`), flip this
-/// test to the specified form: `>> rev-8` visible, `rev-1`..=`rev-8`
-/// on screen, `rev-0` absent, the overflow note on its own line.
+/// Positions are WINDOW-RELATIVE (impl-gate r2 fix + deviation-pin flip:
+/// the renderer used to place rows at `popup.y + 3 + ABSOLUTE idx`, so a
+/// scrolled window shifted every row down by one — the first list slot
+/// rendered empty and the CURSOR row landed on the `... and 1 more`
+/// overflow line and was clobbered, leaving no `>> ` marker on screen).
+/// With the fix, the cursor row keeps its highlight and the overflow
+/// note renders on its own line below the 8 rows.
 #[test]
 fn flare_popup_window_follows_cursor_at_the_tail() {
     use crate::models::{FlareRevisionChoice, RefKind};
 
     // Distinctive revision names AND distinct 8-hex commit prefixes —
-    // row identity survives partial overwrites (the clobber below eats
-    // the row's head, not its `@<commit>` tail).
+    // row identity survives partial overwrites (a stray clobber would
+    // eat the row's head, not its `@<commit>` tail).
     let choices: Vec<FlareRevisionChoice> = (0..9)
         .map(|i| FlareRevisionChoice {
             revision: format!("rev-{i}"),
@@ -356,25 +348,28 @@ fn flare_popup_window_follows_cursor_at_the_tail() {
         );
     }
 
-    // The cursor row (idx 8) IS in the draw list but is positioned on
-    // the overflow line: its `>> rev-8` head is clobbered by
-    // `... and 1 more`, leaving only the row's `@<commit> <size>` tail
-    // merged into that line (the deviation pin — see the doc comment).
+    // The cursor row (idx 8) IS rendered WITH its `>> ` highlight and
+    // its own `@<commit>` tail — the originally-specified assertions.
+    assert!(
+        screen.contains(">> rev-8 [branch] @00000008"),
+        "the selected revision must be visible and highlighted; screen:\n{screen}"
+    );
+
+    // The overflow note sits BELOW the 8 rendered rows on its OWN line:
+    // it carries no row tail (the old absolute-index geometry merged the
+    // cursor row onto this line and the note clobbered its head).
     let overflow = rows
         .iter()
         .find(|row| row.contains("and 1 more"))
         .expect("overflow note must render when 9 rows exceed the 8-row window");
     assert!(
-        overflow.contains("@00000008"),
-        "cursor row 8's remnant renders on the overflow line (clobber pin); \
-         line: {overflow:?}"
+        !overflow.contains("@00000008"),
+        "the overflow line must not carry the cursor row's tail; line: {overflow:?}"
     );
-    // The `>> ` highlight marker is destroyed by that clobber — today
-    // NO row shows the cursor. (With the window-relative fix this flips
-    // to: the `and 1 more` line carries no row tail, and a line starting
-    // `>> rev-8` exists.)
-    assert!(
-        !screen.contains(">> "),
-        "the cursor marker is clobbered by the overflow note; screen:\n{screen}"
+    // And exactly one `>> ` marker — the cursor row's.
+    assert_eq!(
+        screen.matches(">> ").count(),
+        1,
+        "exactly one cursor marker; screen:\n{screen}"
     );
 }
