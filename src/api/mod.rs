@@ -42,7 +42,8 @@ pub use client::*;
 pub use flare::{
     assemble_flare_info_from, config_json_confirms_flare, fetch_flare_info, fetch_raw_file,
     fetch_repo_refs, flare_disposition, parse_flare_config_facts, parse_flare_package_tokens,
-    parse_flare_publisher, select_package, FlareDisposition, FlareScanError,
+    parse_flare_publisher, revision_matches_platform, select_package, select_platform_revisions,
+    FlareDisposition, FlareScanError,
 };
 pub use quant::*;
 pub use tree::*;

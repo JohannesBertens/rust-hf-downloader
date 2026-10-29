@@ -325,17 +325,12 @@ fn is_commit_sha_pins_the_ladder_shape() {
 fn flare_package_set_packed_is_the_single_file() {
     let file = repo_file("qwen3.8-flash-next-gb10-tp1.safetensors", 1, Some("cafe"));
     let package = FlarePackage::Packed { file: file.clone() };
-    // The tree holds extra repo files — the packed set ignores them.
-    let tree = vec![
-        file,
-        repo_file("README.md", 10, None),
-        repo_file("publisher.json", 2, None),
-    ];
-    // The packed form is self-contained: even present root metadata files
-    // do NOT join the set (plans/flare-models.md §3.3c scopes config.json/publisher.json to the
-    // directory form).
+    // The packed form is self-contained: even when the revision tree also
+    // holds root metadata files, the assembly's packed package never
+    // carries them (plans/flare-models.md §3.3c scopes
+    // config.json/publisher.json to the directory form).
     assert_eq!(
-        flare_package_set(&package, &tree),
+        flare_package_set(&package),
         vec![flare_file(
             "qwen3.8-flash-next-gb10-tp1.safetensors",
             1,
@@ -346,25 +341,21 @@ fn flare_package_set_packed_is_the_single_file() {
 
 #[test]
 fn flare_package_set_directory_adds_root_metadata_files() {
+    // The assembly's companions ALREADY carry the root metadata files for
+    // the directory form (single source — see select_package).
     let primary = repo_file("model.safetensors", 100, Some("prime"));
     let companions = vec![
         repo_file("weights/x-0.safetensors", 50, Some("sha-x")),
         repo_file("deployments/gb202-tp1/rank-0/plan.bin", 5, None),
+        repo_file("config.json", 3, None),
+        repo_file("publisher.json", 4, None),
     ];
     let package = FlarePackage::Directory {
         primary: primary.clone(),
         companions: companions.clone(),
     };
-    let tree = vec![
-        primary.clone(),
-        companions[0].clone(),
-        companions[1].clone(),
-        repo_file("config.json", 3, None),
-        repo_file("publisher.json", 4, None),
-        repo_file("README.md", 10, None), // NOT part of the package
-    ];
     assert_eq!(
-        flare_package_set(&package, &tree),
+        flare_package_set(&package),
         vec![
             flare_file("model.safetensors", 100, Some("prime")),
             flare_file("weights/x-0.safetensors", 50, Some("sha-x")),
@@ -375,16 +366,14 @@ fn flare_package_set_directory_adds_root_metadata_files() {
         "directory set = primary + weights/** + deployments/** + config.json + publisher.json"
     );
 
-    // Missing root metadata files are simply absent (LIL has no config.json).
-    // (A tree without the companions would not have produced them either —
-    // wave-1's select_package derives companions from the same tree.)
-    let tree_without = vec![primary.clone(), companions[0].clone()];
+    // A revision tree WITHOUT the root metadata files (LIL has no
+    // config.json) simply yields companions without them.
     let package_without = FlarePackage::Directory {
-        primary: primary.clone(),
-        companions: vec![companions[0].clone()],
+        primary,
+        companions: vec![repo_file("weights/x-0.safetensors", 50, Some("sha-x"))],
     };
     assert_eq!(
-        flare_package_set(&package_without, &tree_without)
+        flare_package_set(&package_without)
             .iter()
             .map(|f| f.relpath.as_str())
             .collect::<Vec<_>>(),
@@ -609,7 +598,6 @@ fn preflight_v1_then_v2_two_dirs_is_clean() {
         &registry,
         &root.to_string_lossy(),
         "a/b",
-        &model_root,
         "v2",
         &sha(2),
         &[preflight_file(
@@ -649,7 +637,6 @@ fn preflight_moved_branch_errors_then_delete_dir_retry_succeeds() {
             registry,
             &root.to_string_lossy(),
             "a/b",
-            &model_root,
             "gb202",
             &sha(0xB),
             &[preflight_file(
@@ -716,7 +703,6 @@ fn preflight_sha_then_branch_same_commit_conflicts_until_entry_deleted() {
             registry,
             &root.to_string_lossy(),
             "a/b",
-            &model_root,
             "gb202",
             &sha(7),
             &[preflight_file(
@@ -768,7 +754,6 @@ fn preflight_ordinary_then_flare_same_url_conflicts_until_entry_deleted() {
             registry,
             &root.to_string_lossy(),
             "a/b",
-            &model_root,
             "gb202",
             &sha(3),
             &[preflight_file(
@@ -804,7 +789,6 @@ fn preflight_size_mismatch_errors_and_equal_size_proceeds() {
         &DownloadRegistry::default(),
         &root.to_string_lossy(),
         "a/b",
-        &model_root,
         "gb202",
         &sha(1),
         &[file],
@@ -830,7 +814,6 @@ fn preflight_size_mismatch_errors_and_equal_size_proceeds() {
             &DownloadRegistry::default(),
             &root.to_string_lossy(),
             "a/b",
-            &model_root,
             "gb202",
             &sha(1),
             &[file],
@@ -889,7 +872,6 @@ fn preflight_same_commit_same_destination_is_idempotent() {
             &registry,
             &root.to_string_lossy(),
             "a/b",
-            &model_root,
             "gb202",
             &sha(5),
             &[preflight_file(
@@ -902,4 +884,110 @@ fn preflight_same_commit_same_destination_is_idempotent() {
         "same commit + same recorded destination + foreign dirs are all clean"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate P1 regression: a RELATIVE `--output` base must not bypass the
+/// moved-branch guard — registry rows are absolute (registration
+/// absolutizes), so every destination comparison goes through the
+/// registration-identical builder.
+#[test]
+fn preflight_relative_base_still_hits_moved_branch() {
+    let root = guard_root("relbase");
+    let model_root = root.join("a/b");
+    // The on-disk bytes from commit A exist under the gb202 dir.
+    std::fs::create_dir_all(model_root.join("gb202")).unwrap();
+    std::fs::write(model_root.join("gb202").join("pkg.safetensors"), b"x").unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &model_root
+                .join("gb202")
+                .join("pkg.safetensors")
+                .to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    // The rerun at commit B passes a RELATIVE base that resolves to the
+    // same root — the guard must still fire (old raw-prefix code missed it).
+    let cwd = std::env::current_dir().unwrap();
+    let relative_root = root.strip_prefix(&cwd).unwrap_or(&root);
+    let outcome = flare_preflight(
+        &registry,
+        &relative_root.to_string_lossy(),
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::MovedBranch { .. })),
+        "relative base must not bypass the moved-branch guard: {outcome:?}"
+    );
+}
+
+/// Impl-gate P2 regression: after A → delete-directory → B, the directory
+/// belongs to B (B's rows exist under it); A's remnant row must not block
+/// B's re-runs (the current pin SUPERSEDES older rows in the same dir).
+#[test]
+fn preflight_superseded_row_does_not_block_current_pin_rerun() {
+    let root = guard_root("supersede");
+    let model_root = root.join("a/b");
+    // B's bytes exist on disk under the gb202 dir (recreated after the
+    // delete), and B's rows own the directory in the registry…
+    std::fs::create_dir_all(model_root.join("gb202")).unwrap();
+    std::fs::write(model_root.join("gb202").join("pkg.safetensors"), b"x").unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![
+            // …while A's remnant row (different commit, vanished-then-
+            // recreated path) is still recorded at the same destination.
+            recorded(
+                "a/b",
+                "gb202/pkg.safetensors",
+                Some("pkg.safetensors"),
+                &sha(1),
+                &model_root
+                    .join("gb202")
+                    .join("pkg.safetensors")
+                    .to_string_lossy(),
+                Some(&sha(1)),
+                DownloadStatus::Complete,
+            ),
+            recorded(
+                "a/b",
+                "gb202/pkg.safetensors",
+                Some("pkg.safetensors"),
+                &sha(2),
+                &model_root
+                    .join("gb202")
+                    .join("pkg.safetensors")
+                    .to_string_lossy(),
+                Some(&sha(2)),
+                DownloadStatus::Complete,
+            ),
+        ],
+    };
+    let outcome = flare_preflight(
+        &registry,
+        &root.to_string_lossy(),
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        outcome.is_ok(),
+        "current-pin rows supersede older rows: {outcome:?}"
+    );
 }

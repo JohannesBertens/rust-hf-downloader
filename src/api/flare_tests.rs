@@ -836,3 +836,61 @@ fn flare_assemble_alias_entry_is_never_double_counted_in_dropped_refs() {
     assert_eq!(info.revisions[0].aliases, ["v3"]);
     assert_eq!(info.dropped_refs, ["vX"]);
 }
+
+/// The impl-gate fix for platform selection (flare's own rule: branch NAME
+/// = platform string, arch token secondary): the flagship repos carry NO
+/// arch token in their package filenames, so only the branch-name rule
+/// matches them.
+fn revision(
+    name: &str,
+    kind: crate::models::RefKind,
+    arch: Option<&str>,
+) -> crate::models::FlareRevision {
+    crate::models::FlareRevision {
+        revision: name.to_string(),
+        aliases: Vec::new(),
+        kind,
+        target_commit: format!("{:040}", name.len()),
+        package: crate::models::FlarePackage::Packed {
+            file: crate::models::RepoFile {
+                rfilename: format!("{name}-pkg.safetensors"),
+                size: Some(1),
+                oid: None,
+                lfs: None,
+            },
+        },
+        parsed: crate::models::ParsedPackageTokens {
+            arch: arch.map(str::to_string),
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn platform_selection_matches_branch_name_without_arch_token() {
+    use crate::gpu::FlarePlatform;
+    // The JB flagship shape: branch `gb202`, package `…-yarn4-tp2` — no
+    // arch token anywhere. The branch-name rule must select it.
+    let jb = vec![revision("gb202", crate::models::RefKind::Branch, None)];
+    assert_eq!(
+        select_platform_revisions(&jb, &FlarePlatform::Gb202).len(),
+        1,
+        "branch gb202 with no arch token must match Gb202"
+    );
+    // The LIL gb10 shape: BOTH signals present.
+    let lil = vec![revision(
+        "gb10",
+        crate::models::RefKind::Branch,
+        Some("gb10"),
+    )];
+    assert_eq!(
+        select_platform_revisions(&lil, &FlarePlatform::Gb10).len(),
+        1
+    );
+    // A TAG named gb202 with no arch token must NOT match (the branch-only
+    // rule — tags are pins, not hardware claims).
+    let tag = vec![revision("gb202", crate::models::RefKind::Tag, None)];
+    assert!(select_platform_revisions(&tag, &FlarePlatform::Gb202).is_empty());
+    // Wrong platform: nothing matches.
+    assert!(select_platform_revisions(&jb, &FlarePlatform::Gb10).is_empty());
+}

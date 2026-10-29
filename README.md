@@ -278,6 +278,7 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 Mouse-supported panels:
 - **Models list**: Click to focus, scroll to navigate models (loads details automatically)
+- **FLARE Revisions** (FLARE mode): Click to focus, scroll to move the revision cursor
 - **Quantization Groups**: Click to focus, scroll to navigate groups
 - **Quantization Files**: Click to focus, scroll to navigate files
 - **File Tree**: Click to focus, scroll to navigate tree
@@ -477,16 +478,20 @@ rust-hf-downloader download JohannesBertens/Qwen3.8-Flash-Next-FLARE-1M-TP2 --fo
   commit — every tree fetch, request URL, and registry entry uses the
   commit, so a moved branch can never mix commits.
 - Files land under `<output>/<author>/<model>/<revision>/` (packed single
-  file or `model.safetensors` + `weights/**` + `deployments/**` for
-  directory-form packages), with `--include/--exclude` filtering within
-  the package set. LFS sha256s verify by default (`--no-verify` disables).
+  file or `model.safetensors` + `weights/**` + `deployments/**` — plus
+  `config.json`/`publisher.json` when present — for directory-form
+  packages), with `--include/--exclude` filtering within the package set
+  (a filtered run ends with a "partial package selection" note instead
+  of a serve command). LFS sha256s verify by default (`--no-verify`
+  disables).
 - Pre-flight guards reject size mismatches, a moved branch over an
   existing directory, and any attempt to fetch a package already recorded
   at a different destination — before a byte moves.
 - On success the human reporter prints the serve command — e.g.
   `flare run '/home/you/models/JohannesBertens/Qwen3.8-Flash-Next-FLARE-1M-TP2/gb202/qwen3.8-flash-next-yarn4-tp2.safetensors' --gpus 0,1`
   — flare's explicit-path mode serves the file directly, no flare cache
-  involved.
+  involved. `--json` and `--quiet` suppress the serve line (machine-clean
+  output).
 
 Rate limiting can be controlled per-run without editing the config file:
 `--rate-limit-mbps MBPS` enables the limiter at the given rate (e.g.

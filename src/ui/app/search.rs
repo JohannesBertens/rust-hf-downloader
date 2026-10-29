@@ -23,6 +23,11 @@ use std::sync::Arc;
 /// every new scan spawn; `publish` is a no-op for a superseded epoch.
 pub(super) struct FlareScanShared {
     pub epoch: Arc<AtomicU64>,
+    /// Serializes publication against invalidation (the impl-gate race
+    /// fix): `publish` checks the epoch and writes state under one hold;
+    /// `clear_model_details`/`begin_flare_scan` bump under the same hold.
+    /// Sync-only — no await is ever held under it.
+    pub gate: Arc<parking_lot::Mutex<()>>,
     pub display_mode: Arc<parking_lot::RwLock<ModelDisplayMode>>,
     pub flare_info: Arc<parking_lot::RwLock<Option<crate::models::FlareRepoInfo>>>,
     pub quantizations: Arc<parking_lot::RwLock<Vec<crate::models::QuantizationGroup>>>,
@@ -37,6 +42,7 @@ impl FlareScanShared {
     fn from_app(app: &App) -> Self {
         Self {
             epoch: app.flare_scan_epoch.clone(),
+            gate: app.flare_scan_gate.clone(),
             display_mode: app.display_mode.clone(),
             flare_info: app.flare_info.clone(),
             quantizations: app.quantizations.clone(),
@@ -55,6 +61,11 @@ impl FlareScanShared {
     /// spinner, and notes the revision count. A superseded scan is a
     /// silent no-op — the current selection's state wins.
     pub(super) fn publish(&self, epoch: u64, info: crate::models::FlareRepoInfo) {
+        // Publication is serialized against invalidation through the gate
+        // (impl-gate fix for the check-to-publish race): the epoch check
+        // AND every state write happen under one hold, so a selection
+        // change can never interleave between check and install.
+        let _gate = self.gate.lock();
         if self.epoch.load(Ordering::Relaxed) != epoch {
             return;
         }
@@ -106,14 +117,16 @@ impl App {
     /// superseding any
     /// earlier in-flight scan.
     fn begin_flare_scan(&self) -> u64 {
+        let _gate = self.flare_scan_gate.lock();
         self.flare_scan_epoch.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     /// Invalidate every in-flight FLARE scan (plans/flare-models.md §3.4):
-    /// run from
-    /// `clear_model_details` on every selection change, so a scan for a
-    /// previously selected model can never publish over the new one.
-    fn invalidate_flare_scans(&self) {
+    /// bumped from `clear_model_details` on every selection change, so a
+    /// scan for a previously selected model can never publish over the new
+    /// one. Callers hold the publication gate (std mutexes are not
+    /// reentrant — never call without it).
+    fn invalidate_flare_scans_locked(&self) {
         self.flare_scan_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -525,12 +538,20 @@ impl App {
         // quant/tree state clears, together with the popup state — the
         // popup's snapshot is bound to the cleared model) and invalidate
         // any in-flight FLARE scan for the old selection (ownership rule).
-        // `flare_platform` is SESSION-scoped and stays.
-        *self.flare_info.write() = None;
-        if matches!(self.popup_mode, PopupMode::FlareRevision { .. }) {
-            self.popup_mode = PopupMode::None;
+        // `flare_platform` is SESSION-scoped and stays. The clear + epoch
+        // bump run under the SAME publication gate as
+        // `FlareScanShared::publish` (impl-gate fix: a stale publisher that
+        // already passed its epoch check can no longer interleave between
+        // this clear and the bump and install the old model's revisions
+        // under the new selection).
+        {
+            let _gate = self.flare_scan_gate.lock();
+            *self.flare_info.write() = None;
+            if matches!(self.popup_mode, PopupMode::FlareRevision { .. }) {
+                self.popup_mode = PopupMode::None;
+            }
+            self.invalidate_flare_scans_locked();
         }
-        self.invalidate_flare_scans();
 
         // Set loading state
         *self.loading_quants.write() = true;

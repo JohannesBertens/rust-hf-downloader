@@ -66,11 +66,26 @@ pub fn flare_package_name(package: &FlarePackage) -> &str {
     }
 }
 
-/// `★ ` when the session-detected platform matches the card's parsed arch
-/// token (both flare-canonical lowercase, e.g. `gb202`); empty otherwise.
-fn platform_star(arch: Option<&str>, platform: Option<&FlarePlatform>) -> &'static str {
-    match (arch, platform) {
-        (Some(arch), Some(platform)) if arch == platform.as_str() => "★ ",
+/// `★ ` when the session-detected platform matches the revision — flare's
+/// own rule (branch name = platform string) plus the parsed arch token
+/// (impl-gate fix: the flagship `yarn4-tp2`/`tp1-c16-mtp5` gb202 packages
+/// carry no arch token, so the branch name is what must match); empty
+/// otherwise.
+fn platform_star(
+    revision: &crate::models::FlareRevision,
+    platform: Option<&FlarePlatform>,
+) -> &'static str {
+    match platform {
+        Some(platform)
+            if crate::api::revision_matches_platform(
+                &revision.revision,
+                revision.kind,
+                revision.parsed.arch.as_deref(),
+                platform,
+            ) =>
+        {
+            "★ "
+        }
         _ => "",
     }
 }
@@ -118,7 +133,7 @@ fn parsed_tokens_suffix(parsed: &ParsedPackageTokens) -> String {
 /// kind badge, short commit) and the tail (size in `fmt.rs` FULL form,
 /// package name, parsed tokens, file count for directory packages).
 fn revision_card(revision: &FlareRevision, platform: Option<&FlarePlatform>) -> ListItem<'static> {
-    let star = platform_star(revision.parsed.arch.as_deref(), platform);
+    let star = platform_star(revision, platform);
     let aliases = if revision.aliases.is_empty() {
         String::new()
     } else {

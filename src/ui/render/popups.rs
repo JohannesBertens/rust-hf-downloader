@@ -363,10 +363,25 @@ pub fn render_flare_revision_popup(
         model_area,
     );
 
-    for (idx, choice) in choices.iter().take(8).enumerate() {
+    // Render a window that FOLLOWS the cursor (impl-gate fix: the old
+    // `.take(8)` froze the list while the cursor kept advancing — Enter
+    // could download an invisible selection).
+    let visible_from = cursor.saturating_sub(7);
+    let visible_to = (visible_from + 8).min(choices.len());
+    for (idx, choice) in choices[visible_from..visible_to].iter().enumerate() {
+        let idx = idx + visible_from;
         let selected = idx == cursor;
-        let star = match (choice.arch.as_deref(), platform) {
-            (Some(arch), Some(platform)) if arch == platform.as_str() => "★ ",
+        let star = match platform {
+            Some(platform)
+                if crate::api::revision_matches_platform(
+                    &choice.revision,
+                    choice.kind,
+                    choice.arch.as_deref(),
+                    platform,
+                ) =>
+            {
+                "★ "
+            }
             _ => "",
         };
         let aliases = if choice.aliases.is_empty() {

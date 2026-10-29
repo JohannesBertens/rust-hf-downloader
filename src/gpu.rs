@@ -20,12 +20,6 @@
 //! the sync [`detect_platform`] is meant to be wrapped in
 //! `tokio::task::spawn_blocking` by async callers.
 //!
-//! This is a wave-1 contract surface (plans/flare-models.md §7/§8): the
-//! consumer wiring (CLI `--for flare`/`--gpus`, TUI platform star) lands in
-//! wave 2, which is why the module-level `dead_code` allowance exists until
-//! then.
-
-#![allow(dead_code)]
 
 use std::fmt;
 use std::io::Read;

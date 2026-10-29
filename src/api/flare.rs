@@ -21,12 +21,6 @@
 //! [`FlareRepoInfo::dropped_refs`] instead of degrading to a name-based
 //! lookup (plans/flare-models.md §3.1 — never a silent degradation).
 
-// Wave-1 foundation (plan `plans/flare-models.md` §7): the production
-// consumers land in wave 2 (Lane C: CLI preset, Lane D: TUI viewer/download);
-// drop this module-wide allow when the first merged reader lands — until
-// then the bin target flags every entry point below as dead code.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use crate::api::{api_base, fetch_revision_tree};
@@ -515,4 +509,36 @@ pub async fn fetch_flare_info(
         main_config_json.as_deref(),
         publisher_json.as_deref(),
     )
+}
+
+/// Does one payload revision target the detected platform? (impl-gate fix:
+/// flare's OWN resolution rule is "branch name = platform string" — the
+/// research-facts line plans/flare-models.md carries — with the package
+/// filename's parsed arch token as a secondary signal.) The flagship repos
+/// (`…-yarn4-tp2`, the LIL `tp1-c16-mtp5` gb202 package) carry NO arch
+/// token, so matching on `parsed.arch` alone rejected exactly the repos
+/// the feature targets. Shared by the CLI `--gpus` selection and the TUI's
+/// platform star.
+pub fn revision_matches_platform(
+    revision_name: &str,
+    kind: crate::models::RefKind,
+    arch: Option<&str>,
+    platform: &crate::gpu::FlarePlatform,
+) -> bool {
+    arch == Some(platform.as_str())
+        || (kind == crate::models::RefKind::Branch && revision_name == platform.as_str())
+}
+
+/// Every payload revision targeting the platform (0, 1, or more — callers
+/// error on ambiguity). See [`revision_matches_platform`].
+pub fn select_platform_revisions<'a>(
+    revisions: &'a [crate::models::FlareRevision],
+    platform: &crate::gpu::FlarePlatform,
+) -> Vec<&'a crate::models::FlareRevision> {
+    revisions
+        .iter()
+        .filter(|r| {
+            revision_matches_platform(&r.revision, r.kind, r.parsed.arch.as_deref(), platform)
+        })
+        .collect()
 }

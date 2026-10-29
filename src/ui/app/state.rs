@@ -84,6 +84,9 @@ pub struct App {
     /// result only while its captured epoch is still current. Plain
     /// `AtomicU64` on purpose — no lock level, lock-free by construction.
     pub flare_scan_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Publication gate for FLARE scan state (impl-gate race fix): see
+    /// `FlareScanShared::publish` in search.rs.
+    pub flare_scan_gate: Arc<parking_lot::Mutex<()>>,
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
@@ -192,6 +195,7 @@ impl App {
             flare_platform: Arc::new(RwLock::new(None)),
             flare_list_state: ListState::default(),
             flare_scan_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            flare_scan_gate: Arc::new(parking_lot::Mutex::new(())),
             needs_load_quantizations: false,
             needs_search_models: false,
             last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),

@@ -250,17 +250,15 @@ fn flare_file(f: &crate::models::RepoFile) -> FlareFile {
     }
 }
 
-/// The plans/flare-models.md §3.3c semantic package set — wave-1's `choose_file` rule plus the
-/// two root metadata files: packed = the single file; directory =
-/// `model.safetensors` + `weights/**` + `deployments/**` companions +
-/// `config.json` + `publisher.json` when present in the revision's tree
-/// (the two root files are the directory form's — a packed package is
-/// self-contained). The primary (packed file / root `model.safetensors`)
-/// comes FIRST.
-pub(super) fn flare_package_set(
-    package: &FlarePackage,
-    tree: &[crate::models::RepoFile],
-) -> Vec<FlareFile> {
+/// The plans/flare-models.md §3.3c semantic package set: packed = the
+/// single file; directory = `model.safetensors` + companions. The wave-1
+/// assembly (`select_package`) is the SINGLE SOURCE — its companions
+/// already carry `weights/**`, `deployments/**`, and the root
+/// `config.json`/`publisher.json` when the revision tree has them — so
+/// this mapping adds nothing (impl-gate simplification: the old
+/// tree-union was a second source that could drift). The primary (packed
+/// file / root `model.safetensors`) comes FIRST.
+pub(super) fn flare_package_set(package: &FlarePackage) -> Vec<FlareFile> {
     match package {
         FlarePackage::Packed { file } => vec![flare_file(file)],
         FlarePackage::Directory {
@@ -269,19 +267,6 @@ pub(super) fn flare_package_set(
         } => {
             let mut out = vec![flare_file(primary)];
             out.extend(companions.iter().map(flare_file));
-            // Root metadata files (plain git blobs — no LFS oid) ride the
-            // package so the served form is complete. The wave-1 assembly
-            // already carries them in `companions` when the revision tree
-            // has them; this tree-union stays for trees the assembly did
-            // not enrich and is idempotent (presence-guarded).
-            for name in ["config.json", "publisher.json"] {
-                if out.iter().any(|f: &FlareFile| f.relpath == name) {
-                    continue;
-                }
-                if let Some(found) = tree.iter().find(|f| f.rfilename == name) {
-                    out.push(flare_file(found));
-                }
-            }
             out
         }
     }
@@ -469,22 +454,34 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
 /// destination — full path, ordinary/legacy entries included; no on-disk
 /// carve-out: deleting the ENTRY clears it, deleting the DIRECTORY does
 /// not).
+///
+/// Every destination comparison goes through `requested_destination` —
+/// the registration-identical builder (absolutize + canonicalize) — so a
+/// RELATIVE `--output` base can never bypass the guards (impl-gate P1:
+/// registry rows are absolute, a raw relative prefix would miss them).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flare_preflight(
     registry: &DownloadRegistry,
     base: &str,
     model_id: &str,
-    model_root: &Path,
     revision_dir: &str,
     pin: &str,
     files: &[FlarePreflightFile],
 ) -> Result<(), FlarePreflightError> {
+    // Registration-identical per-file destinations (guard (i) fs checks and
+    // the guard (ii) prefix both compare against the exact paths the
+    // enqueue would record).
+    let destinations: Vec<Option<PathBuf>> = files
+        .iter()
+        .map(|file| requested_destination(base, model_id, &file.filename))
+        .collect();
+
     // (i) on-disk size vs expected tree size per file.
-    for file in files {
-        let Some(final_path) = crate::download::final_path_for(model_root, &file.filename) else {
+    for (file, final_path) in files.iter().zip(&destinations) {
+        let Some(final_path) = final_path else {
             continue; // the enqueue's validate-first abort owns this
         };
-        if let Ok(meta) = std::fs::metadata(&final_path) {
+        if let Ok(meta) = std::fs::metadata(final_path) {
             let actual = meta.len();
             if actual != file.expected_size {
                 return Err(FlarePreflightError::SizeMismatch {
@@ -504,54 +501,67 @@ pub(crate) fn flare_preflight(
         }
     }
 
-    // (ii) moved-branch guard, scoped to THIS run's revision directory.
+    // (ii) moved-branch guard, scoped to THIS run's revision directory —
+    // the registration-identical prefix (a probe file under the revision
+    // dir; its parent is the dir itself).
     // On-disk existence is what makes the recovery honest: deleting the
     // directory clears the guard (stale registry entries for vanished
-    // files are ignored).
-    let dir_prefix = format!(
-        "{}/",
-        model_root
-            .join(revision_dir)
-            .to_string_lossy()
-            .replace('\\', "/")
-    );
-    for entry in &registry.downloads {
-        if entry.model_id != model_id {
-            continue;
-        }
-        let local = entry.local_path.replace('\\', "/");
-        if !local.starts_with(&dir_prefix) {
-            continue;
-        }
-        if entry.revision.as_deref() == Some(pin) {
-            continue; // same commit — the idempotent re-run case
-        }
-        if !Path::new(&entry.local_path).exists() {
-            continue; // vanished file: the stale entry does not block
-        }
-        return Err(FlarePreflightError::MovedBranch {
-            recorded_commit: entry.revision.clone(),
-            pin: pin.to_string(),
-            directory: model_root.join(revision_dir).display().to_string(),
+    // files are ignored). A row recorded by the CURRENT pin under the
+    // same directory SUPERSEDES older rows (impl-gate P2: after A →
+    // delete-dir → B, B's own rows own the directory; A's remnant row
+    // must not block B's re-runs).
+    let dir_prefix = requested_destination(base, model_id, &format!("{revision_dir}/_"))
+        .and_then(|probe| probe.parent().map(|dir| dir.to_path_buf()));
+    if let Some(dir) = dir_prefix {
+        let dir_str = dir.to_string_lossy().replace('\\', "/");
+        let current_pin_owns_dir = registry.downloads.iter().any(|entry| {
+            entry.model_id == model_id
+                && entry.revision.as_deref() == Some(pin)
+                && entry
+                    .local_path
+                    .replace('\\', "/")
+                    .starts_with(&format!("{dir_str}/"))
         });
+        if !current_pin_owns_dir {
+            for entry in &registry.downloads {
+                if entry.model_id != model_id {
+                    continue;
+                }
+                let local = entry.local_path.replace('\\', "/");
+                if !local.starts_with(&format!("{dir_str}/")) {
+                    continue;
+                }
+                if entry.revision.as_deref() == Some(pin) {
+                    continue; // same commit — the idempotent re-run case
+                }
+                if !Path::new(&entry.local_path).exists() {
+                    continue; // vanished file: the stale entry does not block
+                }
+                return Err(FlarePreflightError::MovedBranch {
+                    recorded_commit: entry.revision.clone(),
+                    pin: pin.to_string(),
+                    directory: dir.display().to_string(),
+                });
+            }
+        }
     }
 
     // (iii) single-destination-per-package: one URL must mean one
     // recorded destination.
-    for file in files {
+    for (file, requested) in files.iter().zip(&destinations) {
         let url = crate::api::resolve_url(
             model_id,
             file.remote_path.as_deref().unwrap_or(&file.filename),
             pin,
         );
-        let Some(requested) = requested_destination(base, model_id, &file.filename) else {
+        let Some(requested) = requested else {
             continue;
         };
         for entry in &registry.downloads {
             if entry.url != url {
                 continue;
             }
-            if crate::registry::path_matches(&entry.local_path, &requested) {
+            if crate::registry::path_matches(&entry.local_path, requested) {
                 continue; // the same destination — idempotent re-run
             }
             return Err(FlarePreflightError::DestinationConflict {

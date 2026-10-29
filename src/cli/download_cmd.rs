@@ -48,12 +48,9 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
     // The FLARE preset pipeline (plans/flare-models.md §3.3) replaces the
     // ordinary resolve → enqueue flow wholesale: revision ladder, semantic
     // package selection, commit-pinned URLs, revision-scoped destinations.
-    if args.for_preset.is_some() {
-        return run_download_flare(&args, &mut reporter, &options, &token, &api_client).await;
-    }
-
-    // --- 2. Validate usage ------------------------------------------------
-    let revision = effective_revision(&args.revision);
+    // Model-ID validation comes FIRST (impl-gate P2): the flare path builds
+    // author/model path components, so a malformed id must get the standard
+    // usage error, never a network call or a parts[1] panic.
     if let Err(code) = require_valid_model_id(&args.model_id) {
         reporter.emit(&Event::error(
             ErrorCode::Usage,
@@ -61,6 +58,12 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
         ));
         return code;
     }
+    if args.for_preset.is_some() {
+        return run_download_flare(&args, &mut reporter, &options, &token, &api_client).await;
+    }
+
+    // --- 2. Validate usage ------------------------------------------------
+    let revision = effective_revision(&args.revision);
     let selector = match parse_selector(&args) {
         Ok(selector) => selector,
         Err(message) => {
@@ -313,11 +316,7 @@ async fn flare_pin_for_gpus(
             return Err(EXIT_USAGE);
         }
     };
-    let matching: Vec<&crate::models::FlareRevision> = info
-        .revisions
-        .iter()
-        .filter(|r| r.parsed.arch.as_deref() == Some(platform.as_str()))
-        .collect();
+    let matching = crate::api::select_platform_revisions(&info.revisions, &platform);
     match matching.as_slice() {
         [one] => Ok(FlarePin {
             commit: one.target_commit.clone(),
@@ -427,7 +426,7 @@ pub(super) async fn run_download_flare(
     };
 
     // --- 3. plans/flare-models.md §3.3c file set + include/exclude WITHIN it -------------------
-    let package_set = flare_package_set(&package, &tree);
+    let package_set = flare_package_set(&package);
     let files = match select_flare_files(
         &package_set,
         &pin.revision_dir,
@@ -474,7 +473,6 @@ pub(super) async fn run_download_flare(
         &crate::registry::read_registry(),
         &base,
         &args.model_id,
-        &model_path,
         &pin.revision_dir,
         &pin.commit,
         &preflight_files,
@@ -582,6 +580,17 @@ fn quote_posix_path(path: &std::path::Path) -> String {
     }
 }
 
+/// POSIX single-quote escaping for the `--gpus` spec echo (impl-gate fix:
+/// a spec like `0, 1` contains shell-breaking whitespace and would split
+/// into two arguments if echoed raw).
+fn quote_posix_spec(spec: &str) -> String {
+    if cfg!(windows) {
+        spec.to_string()
+    } else {
+        format!("'{}'", spec.replace('\'', r"'\''"))
+    }
+}
+
 /// The plans/flare-models.md §3.3f gated handoff line — PURE (unit-tested below). `None` =
 /// suppressed (interruption or any failure). The partial-selection note
 /// replaces the command when `--include`/`--exclude` filtered the package
@@ -609,7 +618,7 @@ fn flare_handoff_line(
     }
     // Omitted when the user passed none (flare defaults to the first GPU).
     let gpus = gpus_spec
-        .map(|spec| format!(" --gpus {spec}"))
+        .map(|spec| format!(" --gpus {}", quote_posix_spec(spec)))
         .unwrap_or_default();
     match package {
         crate::models::FlarePackage::Packed { .. } => {
@@ -672,7 +681,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors' --gpus 0,1-2"
+            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors' --gpus '0,1-2'"
         );
 
         let no_gpus = flare_handoff_line(
@@ -705,7 +714,7 @@ mod tests {
             Some("0"),
         )
         .unwrap();
-        assert_eq!(line, "flare run '/data/models/org/model/gb202' --gpus 0");
+        assert_eq!(line, "flare run '/data/models/org/model/gb202' --gpus '0'");
     }
 
     /// Partial selection (--include/--exclude present) replaces the command

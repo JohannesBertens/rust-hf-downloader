@@ -640,7 +640,6 @@ impl App {
             &crate::registry::read_registry(),
             &base_path,
             model_id,
-            &model_root,
             &revision.revision,
             &revision.target_commit,
             &preflight_files,

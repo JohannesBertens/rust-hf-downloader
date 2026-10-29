@@ -140,9 +140,6 @@ pub enum RefKind {
 /// rule (plans/flare-models.md §3.1): either a single packed `.safetensors` file or a
 /// directory package (root `model.safetensors` primary + `weights/**` +
 /// `deployments/**` companions).
-// Wave-1 foundation (plans/flare-models.md §7): the field readers land with
-// wave-2 lanes C/D — drop the allow when the first merged reader lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum FlarePackage {
     Packed {
@@ -175,9 +172,6 @@ pub struct ParsedPackageTokens {
 
 /// One payload-bearing FLARE revision (a branch other than `main`, or a
 /// tag), deduped by `target_commit`.
-// Wave-1 foundation (plans/flare-models.md §7): the field readers land with
-// wave-2 lanes C/D — drop the allow when the first merged reader lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FlareRevision {
     /// PREFERRED name: branch name, else tag (used for the directory
@@ -215,9 +209,6 @@ pub struct FlarePublisher {
 }
 
 /// The assembled FLARE scan result for one repository (plans/flare-models.md §3.1).
-// Wave-1 foundation (plans/flare-models.md §7): the field readers land with
-// wave-2 lanes C/D — drop the allow when the first merged reader lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FlareRepoInfo {
     /// Payload-bearing revisions only, `main` excluded; a revision whose
