@@ -468,77 +468,97 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
     crate::paths::sanitize::validate_and_sanitize_path(base, model_id, filename).ok()
 }
 
-/// The on-disk IDENTITY of `p` (impl-gate r2 P1 + r3 P1): canonicalize
-/// the NEAREST EXISTING ancestor — `p` itself included, since an existing
-/// path is its own nearest ancestor — then re-append the remaining
-/// components with `.`/`..` lexically normalized, so a base spelled
-/// `--output ../work/models` still compares EQUAL to the recorded
-/// absolute row for the same directory. `requested_destination`
-/// absolutizes but does NOT normalize `..`/symlink components in the
-/// path it RETURNS (canonicalization happens only inside its
-/// containment checks), so raw string comparisons miss the same
-/// directory. `None` when NOTHING along `p` exists — no on-disk
-/// identity to compare.
+/// The on-disk IDENTITY of `p` (impl-gate r2 P1 + r3 P1 + r4 P1): an
+/// INCREMENTAL resolve-at-hop walk that never lexically deletes a
+/// component it has not resolved, so a base spelled `--output
+/// ../work/models` still compares EQUAL to the recorded absolute row
+/// for the same directory. `requested_destination` absolutizes but
+/// does NOT normalize `..`/symlink components in the path it RETURNS
+/// (canonicalization happens only inside its containment checks), so
+/// raw string comparisons miss the same directory.
 ///
-/// r3 P1 — FIXPOINT: a single anchor pass can MISS symlink components
-/// that only become reachable AFTER lexical `..` removal — a spelling
-/// like `<anchor>/missing/../alias/…` (with `alias` an EXISTING symlink
-/// and `missing` absent) anchors at `<anchor>`, lexically drops
-/// `missing/..`, then appends `alias` UNRESOLVED, so its identity
-/// differs from the recorded canonical path and the directory guards
-/// silently pass. Each pass therefore re-anchors the PREVIOUS pass's
-/// identity: when a longer prefix of it exists on disk, canonicalization
-/// resolves more symlinks, and the loop continues until two passes agree
-/// or the whole identity canonicalizes (a fully existing canonical path
-/// canonicalizes to itself — the exact fixpoint). Loop-bounded
-/// defensively at components+2 passes: the first pass consumes every
-/// lexical `..`, so later passes only resolve symlinks, each strictly
-/// extending the canonical prefix or reaching the fixpoint.
+/// The walk: (1) absolutize; (2) anchor at the deepest EXISTING
+/// ancestor, canonicalized — the OS resolves any `.`/`..`/symlink
+/// components inside the anchor during canonicalize, so the anchor is
+/// a canonical, symlink-free prefix; (3) walk the remaining tail one
+/// component at a time: `.` skips; `..` pops the CURRENT path — safe
+/// because the resolved prefix is canonical (its parent IS the true
+/// parent) and anything appended since the last resolution either
+/// canonicalized or never existed; every other component is joined
+/// and, when it EXISTS on disk, canonicalized AT THE HOP — a symlink
+/// is resolved the moment it is traversed, so a LATER `..` pops the
+/// RESOLVED parent (POSIX-faithful). A component that does not exist
+/// is appended lexically; a later `..` popping it is correct (it was
+/// never resolved).
+///
+/// r4 P1 — the r3 anchor→lexical→re-anchor FIXPOINT still lost
+/// symlinks: its lexical pass popped components BEFORE any re-anchor
+/// pass could resolve them (`missing/../alias/../tail` deleted
+/// `alias` before re-anchoring could see it — codex r4), so the
+/// identity pointed at the WRONG directory and the pre-flight guards
+/// compared past the collision. Resolve-at-hop removes the need for
+/// any fixpoint: the walk is one pass, finite (a step per component),
+/// and symlink cycles terminate because a cyclic candidate FAILS
+/// canonicalize (ELOOP) and falls back to its lexical spelling.
+/// `None` when NOTHING along `p` exists — no on-disk identity to
+/// compare (for an absolutized path the filesystem root always
+/// exists, so in practice `None` only when the cwd itself is
+/// unresolvable for a relative `p`).
 fn anchored_fs_identity(p: &Path) -> Option<PathBuf> {
-    let bound = p.components().count() + 2;
-    let mut identity = anchor_pass(p)?;
-    for _ in 0..bound {
-        // The whole identity existing on disk is the exact fixpoint:
-        // full canonicalization.
-        if let Ok(canonical) = identity.canonicalize() {
-            return Some(canonical);
-        }
-        let next = anchor_pass(&identity)?;
-        if next == identity {
-            return Some(identity);
-        }
-        identity = next;
-    }
-    Some(identity)
-}
-
-/// One anchor pass of [`anchored_fs_identity`]: canonicalize the deepest
-/// existing ancestor of `p` — the OS resolves `..`/symlink components
-/// inside the prefix during canonicalize, so dots below an existing
-/// component dissolve there — then re-append the remaining components
-/// with `.`/`..` lexically normalized (`.` drops; `..` pops the last
-/// re-appended component — the tail sits below the canonical anchor and
-/// `PathBuf::pop` cannot go past `/`).
-fn anchor_pass(p: &Path) -> Option<PathBuf> {
     use std::path::Component;
-    let components: Vec<Component<'_>> = p.components().collect();
+    // (1) Absolutize: a relative input resolves against the cwd, the
+    // same base the old anchor search reached implicitly through
+    // cwd-relative canonicalize.
+    let absolute: PathBuf = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(p)
+    };
+    let components: Vec<Component<'_>> = absolute.components().collect();
+    // (2) Anchor at the deepest EXISTING ancestor. The search tries
+    // the whole path first (an existing path is its own nearest
+    // ancestor → full canonicalization, the exact identity), then
+    // walks up; an absolutized path always bottoms out at `/`.
+    let mut split = components.len();
+    let mut identity: Option<PathBuf> = None;
     for keep in (0..=components.len()).rev() {
         let prefix: PathBuf = components[..keep].iter().collect();
         if let Ok(canonical) = prefix.canonicalize() {
-            let mut identity = canonical;
-            for component in &components[keep..] {
-                match component {
-                    Component::CurDir => {}
-                    Component::ParentDir => {
-                        identity.pop();
-                    }
-                    other => identity.push(other.as_os_str()),
-                }
-            }
-            return Some(identity);
+            split = keep;
+            identity = Some(canonical);
+            break;
         }
     }
-    None
+    let mut identity = identity?;
+    // (3) Walk the tail, resolving every existing component AT THE
+    // HOP so a subsequent `..` pops the RESOLVED parent — never an
+    // unresolved symlink.
+    for component in &components[split..] {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // `identity`'s resolved prefix is canonical and every
+                // appended-since component either canonicalized or
+                // never existed, so the lexical parent IS the true
+                // parent. At the root `parent()` is None: keep it
+                // (`/..` == `/`).
+                if let Some(parent) = identity.parent() {
+                    identity = parent.to_path_buf();
+                }
+            }
+            other => {
+                let candidate = identity.join(other.as_os_str());
+                // Canonicalize when the candidate EXISTS (resolving
+                // any symlink AT the hop); `unwrap_or` keeps the
+                // lexical candidate when canonicalization fails — a
+                // not-yet-created component (a later `..` pops it,
+                // which is correct: it was never resolved) or ELOOP
+                // (the walk stays finite regardless).
+                identity = candidate.canonicalize().unwrap_or(candidate);
+            }
+        }
+    }
+    Some(identity)
 }
 
 /// [`anchored_fs_identity`] with the nothing-exists fallback (impl-gate
