@@ -388,6 +388,17 @@ pub(crate) enum FlarePreflightError {
         pin: String,
         directory: String,
     },
+    /// (ii-b) Moved branch, AMBIGUOUS form (impl-gate r3 P1): the
+    /// revision directory holds EXISTING files recorded at MULTIPLE
+    /// distinct commits at once (partial deletes can produce it) — no
+    /// single owner can be named, so the recovery offers both actions.
+    AmbiguousOwner {
+        /// The distinct recorded pins whose files exist (`<none>` for
+        /// rows without a recorded revision).
+        owners: Vec<String>,
+        pin: String,
+        directory: String,
+    },
     /// (iii) Single destination per package: the URL is already recorded
     /// at a different destination (ordinary/legacy entries included).
     DestinationConflict {
@@ -420,6 +431,18 @@ impl std::fmt::Display for FlarePreflightError {
                  directory or pin `--revision {pin}`",
                 directory,
                 recorded_commit.as_deref().unwrap_or("<none>"),
+                pin
+            ),
+            FlarePreflightError::AmbiguousOwner {
+                owners,
+                pin,
+                directory,
+            } => write!(
+                f,
+                "branch moved: directory {} holds files from multiple commits ({}) — delete \
+                 the directory or the registry entries, then re-run (this run targets {})",
+                directory,
+                owners.join(", "),
                 pin
             ),
             FlarePreflightError::DestinationConflict {
@@ -565,38 +588,57 @@ pub(crate) fn flare_preflight(
     // spelled through `..`/symlinks (impl-gate r2 P1).
     // On-disk existence is what makes the recovery honest: deleting the
     // directory clears the guard (stale registry entries for vanished
-    // files are ignored). Directory ownership is LAST-ROW-WINS: the LAST
-    // registry row recorded under the dir owns it (`registry.downloads`
-    // is an append-only Vec, so position = registration recency), and the
-    // current pin supersedes only when THAT row's revision matches — a
-    // HISTORICAL row for the current commit cannot legitimize
-    // re-downloading over a NEWER owner's bytes (impl-gate r2 P1: after
-    // C → delete-dir → B, re-running at C must error even though C's old
-    // row is still on file). The Vec append order is the only ownership
-    // evidence available without hashing 100 GB of files.
+    // files are ignored). Directory ownership is EXISTENCE-BASED and
+    // ORDER-INDEPENDENT (impl-gate r3 P1): among this model's rows under
+    // the dir, only rows whose file still EXISTS vote, and the OWNER SET
+    // is those rows's distinct revision pins. The registry Vec order
+    // carries NO ownership evidence — `upsert_pending` preserves an
+    // already-recorded URL in place, so the lifecycle
+    // C → delete → B → delete → C leaves the Vec order [C, B] while C's
+    // bytes are the ones on disk (the r2 last-row-wins predicate crowned
+    // B, the last ROW, and let a B re-run silently reuse C's bytes).
+    // Owner set → verdict: EMPTY = fresh or fully-deleted dir (pass);
+    // exactly {pin} = the bytes on disk are the current commit's,
+    // idempotent re-run (pass — supersedes any vanished rows); any other
+    // SINGLE pin = moved branch (error naming the owner whose bytes are
+    // on disk); MORE than one distinct pin with existing files =
+    // ambiguous residue from partial deletes (error directing the user
+    // to delete the directory or the registry entries).
     let dir_prefix = requested_destination(base, model_id, &format!("{revision_dir}/_"))
         .and_then(|probe| probe.parent().map(fs_identity));
     if let Some(dir) = dir_prefix {
-        let owner = registry.downloads.iter().rev().find(|entry| {
-            entry.model_id == model_id
-                && fs_identity(Path::new(&entry.local_path)).starts_with(&dir)
-        });
-        if !owner.is_some_and(|entry| entry.revision.as_deref() == Some(pin)) {
-            for entry in &registry.downloads {
-                if entry.model_id != model_id {
-                    continue;
-                }
-                if !fs_identity(Path::new(&entry.local_path)).starts_with(&dir) {
-                    continue;
-                }
-                if entry.revision.as_deref() == Some(pin) {
-                    continue; // same commit — the idempotent re-run case
-                }
-                if !Path::new(&entry.local_path).exists() {
-                    continue; // vanished file: the stale entry does not block
-                }
+        let mut owners: Vec<Option<&str>> = Vec::new();
+        for entry in &registry.downloads {
+            if entry.model_id != model_id {
+                continue;
+            }
+            if !fs_identity(Path::new(&entry.local_path)).starts_with(&dir) {
+                continue;
+            }
+            if !Path::new(&entry.local_path).exists() {
+                continue; // vanished file: the stale entry does not block
+            }
+            let owner = entry.revision.as_deref();
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+        match owners.as_slice() {
+            [] => {}                           // fresh or fully-deleted dir — no ownership conflict
+            [only] if *only == Some(pin) => {} // idempotent re-run
+            [only] => {
                 return Err(FlarePreflightError::MovedBranch {
-                    recorded_commit: entry.revision.clone(),
+                    recorded_commit: only.map(str::to_string),
+                    pin: pin.to_string(),
+                    directory: dir.display().to_string(),
+                });
+            }
+            many => {
+                return Err(FlarePreflightError::AmbiguousOwner {
+                    owners: many
+                        .iter()
+                        .map(|owner| owner.unwrap_or("<none>").to_string())
+                        .collect(),
                     pin: pin.to_string(),
                     directory: dir.display().to_string(),
                 });
