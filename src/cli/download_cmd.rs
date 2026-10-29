@@ -9,8 +9,9 @@ use super::args::DownloadArgs;
 use super::events::{ErrorCode, Event, FileDto, Summary};
 use super::report::Reporter;
 use super::resolve::{
-    flare_package_set, is_commit_sha, parse_selector, payload_revision_names,
-    preferred_revision_name, resolve_files, select_flare_files, selection_error_event, Selector,
+    flare_package_set, flare_preflight, is_commit_sha, parse_selector, payload_revision_names,
+    preferred_revision_name, resolve_files, select_flare_files, selection_error_event,
+    FlarePreflightFile, Selector,
 };
 use super::run::{
     effective_revision, emit_client_error, emit_metadata_error, emit_run_failures,
@@ -181,17 +182,17 @@ pub(super) async fn run_download(args: DownloadArgs) -> i32 {
 // FLARE preset pipeline (plans/flare-models.md §3.3b/§3.3c/§3.3e)
 // ---------------------------------------------------------------------------
 
-/// The resolved FLARE revision pin (§3.3b): the 40-hex commit everything
+/// The resolved FLARE revision pin (plans/flare-models.md §3.3b): the 40-hex commit everything
 /// keys on (trees, URLs, the registry), plus the local directory segment.
 struct FlarePin {
     commit: String,
     /// Preferred revision name, or the 40-hex sha for an explicitly
-    /// pinned run (§3.3b i) — the LOCAL destination prefix (§3.3d) and
+    /// pinned run (plans/flare-models.md §3.3b i) — the LOCAL destination prefix (plans/flare-models.md §3.3d) and
     /// the `Event::Resolved` display name.
     revision_dir: String,
 }
 
-/// §3.3b ladder for an explicit `--revision` value: (i) a 40-hex value is
+/// plans/flare-models.md §3.3b ladder for an explicit `--revision` value: (i) a 40-hex value is
 /// used DIRECTLY as the pin (no refs validation; tree fetched at the sha;
 /// directory segment = the sha); (ii) a branch/tag name present in
 /// `/refs` pins to its `targetCommit` (an entry WITHOUT a usable commit
@@ -249,7 +250,7 @@ async fn flare_pin_for_revision(
     }
 }
 
-/// §3.3b `--gpus` path: detection (§3.2) resolves through the same ladder —
+/// plans/flare-models.md §3.3b `--gpus` path: detection (plans/flare-models.md §3.2) resolves through the same ladder —
 /// the detected platform selects the payload revision whose package arch
 /// token matches, and its `targetCommit` is the pin. GPU errors are
 /// repo-agnostic (the gpu module's contract); THIS layer appends the
@@ -281,7 +282,7 @@ async fn flare_pin_for_gpus(
         )
     };
     // `detect_platform` shells out to nvidia-smi (sync, 5 s budget) —
-    // spawn_blocking per the §3.2 contract.
+    // spawn_blocking per the plans/flare-models.md §3.2 contract.
     let detected =
         match tokio::task::spawn_blocking(move || crate::gpu::detect_platform(&selected)).await {
             Ok(result) => result,
@@ -347,7 +348,7 @@ async fn flare_pin_for_gpus(
     }
 }
 
-/// Neither `--revision` nor `--gpus` (§3.3b): a hard error listing the
+/// Neither `--revision` nor `--gpus` (plans/flare-models.md §3.3b): a hard error listing the
 /// repo's payload revisions from `/refs`.
 async fn flare_pin_neither(
     reporter: &mut Reporter,
@@ -371,11 +372,11 @@ async fn flare_pin_neither(
     Err(EXIT_USAGE)
 }
 
-/// The `download --for flare` pipeline (§3.3): revision ladder → tree at
-/// the commit pin → wave-1 `choose_file` package selection → §3.3c file
+/// The `download --for flare` pipeline (plans/flare-models.md §3.3): revision ladder → tree at
+/// the commit pin → wave-1 `choose_file` package selection → plans/flare-models.md §3.3c file
 /// set (+ include/exclude within it) → commit-pinned enqueue with
-/// revision-scoped destinations (§3.3d) → the shared monitor/summary
-/// tail. LFS oids forward into `expected_sha256` (§3.3e) so payloads are
+/// revision-scoped destinations (plans/flare-models.md §3.3d) → the shared monitor/summary
+/// tail. LFS oids forward into `expected_sha256` (plans/flare-models.md §3.3e) so payloads are
 /// digest-verified by default.
 pub(super) async fn run_download_flare(
     args: &DownloadArgs,
@@ -384,7 +385,7 @@ pub(super) async fn run_download_flare(
     token: &Option<String>,
     api_client: &reqwest::Client,
 ) -> i32 {
-    // --- 1. Revision ladder (§3.3b) --------------------------------------
+    // --- 1. Revision ladder (plans/flare-models.md §3.3b) --------------------------------------
     let pin = if let Some(revision) = args.revision.as_deref() {
         flare_pin_for_revision(reporter, api_client, &args.model_id, revision).await
     } else if let Some(spec) = args.gpus.as_deref() {
@@ -425,7 +426,7 @@ pub(super) async fn run_download_flare(
         }
     };
 
-    // --- 3. §3.3c file set + include/exclude WITHIN it -------------------
+    // --- 3. plans/flare-models.md §3.3c file set + include/exclude WITHIN it -------------------
     let package_set = flare_package_set(&package, &tree);
     let files = match select_flare_files(
         &package_set,
@@ -453,16 +454,41 @@ pub(super) async fn run_download_flare(
         commit: Some(pin.commit.clone()),
     });
 
-    // --- 4. Destinations + the shared engine path (§3.3d) ----------------
+    // --- 4. Destinations + plans/flare-models.md §3.3d pre-flight + the shared engine path -----
     let base = options.default_directory.clone();
     let parts: Vec<&str> = args.model_id.split('/').collect();
     let model_path = PathBuf::from(&base).join(parts[0]).join(parts[1]);
+
+    // plans/flare-models.md §3.3d pre-flight guards, PURE over the on-disk registry (reads take
+    // no lock) + on-disk facts, BEFORE enqueue: size parity, moved-branch
+    // (scoped to this run's revision dir), single-destination-per-package.
+    let preflight_files: Vec<FlarePreflightFile> = files
+        .iter()
+        .map(|file| FlarePreflightFile {
+            filename: file.filename.clone(),
+            remote_path: file.remote_path.clone(),
+            expected_size: file.size_bytes,
+        })
+        .collect();
+    if let Err(conflict) = flare_preflight(
+        &crate::registry::read_registry(),
+        &base,
+        &args.model_id,
+        &model_path,
+        &pin.revision_dir,
+        &pin.commit,
+        &preflight_files,
+    ) {
+        reporter.emit(&Event::error(ErrorCode::Usage, conflict.to_string()));
+        reporter.finish();
+        return EXIT_USAGE;
+    }
 
     let queued: Vec<QueuedDownload> = files
         .iter()
         .map(|file| QueuedDownload {
             model_id: args.model_id.clone(),
-            // THE COMMIT is the pin everywhere (§3.3b): download URLs are
+            // THE COMMIT is the pin everywhere (plans/flare-models.md §3.3b): download URLs are
             // resolve_url(model, remote_path, target_commit) and the
             // registry stores the sha.
             revision: pin.commit.clone(),
@@ -502,15 +528,233 @@ pub(super) async fn run_download_flare(
         summary: summary.clone(),
     });
     reporter.destination_line(&model_path.display().to_string());
-    reporter.finish();
 
     if interrupted {
+        // plans/flare-models.md §3.3f: the handoff is suppressed on interruption.
+        reporter.finish();
         reporter.emit(&Event::error(
             ErrorCode::Interrupted,
             "interrupted by SIGINT; unfinished files stay registered as incomplete and RESUME from their partial download on the next run".to_string(),
         ));
         return EXIT_INTERRUPTED;
     }
-    emit_run_failures(&mut *reporter, &tally, &args.model_id, &[]);
+    emit_run_failures(reporter, &tally, &args.model_id, &[]);
+
+    // --- 6. plans/flare-models.md §3.3f gated handoff (human reporter only) ---------------------
+    // Gate: run success AND every package file Downloaded/AlreadyExists
+    // AND the FULL package set (no --include/--exclude filtering).
+    let every_file_done = tally.outcomes.len() == files.len()
+        && tally.outcomes.iter().all(|outcome| {
+            matches!(
+                outcome,
+                crate::models::FileOutcome::Complete { .. }
+                    | crate::models::FileOutcome::AlreadyExists { .. }
+            )
+        });
+    let run_ok = tally.exit_code() == super::EXIT_OK && every_file_done;
+    let filtered = !args.include.is_empty() || !args.exclude.is_empty();
+    if let Some(line) = flare_handoff_line(
+        &package,
+        filtered,
+        run_ok,
+        &model_path,
+        &pin.revision_dir,
+        &package_set[0].relpath,
+        args.gpus.as_deref(),
+    ) {
+        reporter.handoff_line(&line);
+    }
+    reporter.finish();
     tally.exit_code()
+}
+
+// ---------------------------------------------------------------------------
+// plans/flare-models.md §3.3f serve-path handoff (D1)
+// ---------------------------------------------------------------------------
+
+/// POSIX single-quote escaping for the handoff path; a no-op on Windows
+/// (plans/flare-models.md §3.3f: "paths single-quote-escaped (POSIX) with a Windows no-op").
+fn quote_posix_path(path: &std::path::Path) -> String {
+    if cfg!(windows) {
+        path.display().to_string()
+    } else {
+        format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
+    }
+}
+
+/// The plans/flare-models.md §3.3f gated handoff line — PURE (unit-tested below). `None` =
+/// suppressed (interruption or any failure). The partial-selection note
+/// replaces the command when `--include`/`--exclude` filtered the package
+/// set. Packed form: `flare run <quoted final path of the primary> [--gpus
+/// <spec verbatim>]` — the path from the pure `download::final_path_for`
+/// (parity-pinned with the engine). Directory form: explicit-path
+/// acceptance of a directory package is VERIFIED against flare's source
+/// (`PackageClaim::read` / `Metadata::open` join `model.safetensors` for
+/// `is_dir` paths — see the plans/flare-models.md §3.3f verification line in
+/// plans/flare-models.md), so the directory itself is handed off.
+fn flare_handoff_line(
+    package: &crate::models::FlarePackage,
+    filtered: bool,
+    run_ok: bool,
+    model_root: &std::path::Path,
+    revision_dir: &str,
+    primary_relpath: &str,
+    gpus_spec: Option<&str>,
+) -> Option<String> {
+    if !run_ok {
+        return None; // suppressed on interruption or any failure
+    }
+    if filtered {
+        return Some("partial package selection — no serve command".to_string());
+    }
+    // Omitted when the user passed none (flare defaults to the first GPU).
+    let gpus = gpus_spec
+        .map(|spec| format!(" --gpus {spec}"))
+        .unwrap_or_default();
+    match package {
+        crate::models::FlarePackage::Packed { .. } => {
+            let path = crate::download::final_path_for(
+                model_root,
+                &format!("{revision_dir}/{primary_relpath}"),
+            )?;
+            Some(format!("flare run {}{}", quote_posix_path(&path), gpus))
+        }
+        crate::models::FlarePackage::Directory { .. } => {
+            let dir = model_root.join(revision_dir);
+            Some(format!("flare run {}{}", quote_posix_path(&dir), gpus))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{FlarePackage, RepoFile};
+
+    fn packed() -> FlarePackage {
+        FlarePackage::Packed {
+            file: RepoFile {
+                rfilename: "qwen3.8-flash-next-gb10-tp1.safetensors".to_string(),
+                size: Some(1),
+                oid: None,
+                lfs: None,
+            },
+        }
+    }
+
+    fn directory() -> FlarePackage {
+        FlarePackage::Directory {
+            primary: RepoFile {
+                rfilename: "model.safetensors".to_string(),
+                size: Some(1),
+                oid: None,
+                lfs: None,
+            },
+            companions: Vec::new(),
+        }
+    }
+
+    /// Packed: quoted final path of the primary (via the pure
+    /// `final_path_for`), `--gpus` echoed verbatim when present, omitted
+    /// when absent.
+    #[test]
+    fn handoff_packed_quotes_path_and_echoes_gpus_verbatim() {
+        let root = std::path::Path::new("/data/models/org/model");
+        let line = flare_handoff_line(
+            &packed(),
+            false,
+            true,
+            root,
+            "gb10",
+            "qwen3.8-flash-next-gb10-tp1.safetensors",
+            Some("0,1-2"),
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors' --gpus 0,1-2"
+        );
+
+        let no_gpus = flare_handoff_line(
+            &packed(),
+            false,
+            true,
+            root,
+            "gb10",
+            "qwen3.8-flash-next-gb10-tp1.safetensors",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            no_gpus,
+            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors'"
+        );
+    }
+
+    /// Directory: the package DIRECTORY is handed off (verified against
+    /// flare's explicit-path source — see the plan's plans/flare-models.md §3.3f line).
+    #[test]
+    fn handoff_directory_serves_the_package_dir() {
+        let line = flare_handoff_line(
+            &directory(),
+            false,
+            true,
+            std::path::Path::new("/data/models/org/model"),
+            "gb202",
+            "model.safetensors",
+            Some("0"),
+        )
+        .unwrap();
+        assert_eq!(line, "flare run '/data/models/org/model/gb202' --gpus 0");
+    }
+
+    /// Partial selection (--include/--exclude present) replaces the command
+    /// with the plans/flare-models.md §3.3f note — even on a fully successful run.
+    #[test]
+    fn handoff_partial_selection_prints_the_note() {
+        let line = flare_handoff_line(
+            &packed(),
+            true,
+            true,
+            std::path::Path::new("/data"),
+            "gb10",
+            "f.safetensors",
+            Some("0"),
+        )
+        .unwrap();
+        assert_eq!(line, "partial package selection — no serve command");
+    }
+
+    /// Failure/interruption suppresses the handoff entirely (no note).
+    #[test]
+    fn handoff_suppressed_on_failure() {
+        assert!(flare_handoff_line(
+            &packed(),
+            false,
+            false,
+            std::path::Path::new("/data"),
+            "gb10",
+            "f.safetensors",
+            Some("0"),
+        )
+        .is_none());
+        // The conflict-error case takes the same shape at the pipeline
+        // level: a plans/flare-models.md §3.3d pre-flight conflict returns before enqueue, so no
+        // run ever reaches the handoff with `run_ok` semantics — pinned by
+        // the guard fixtures in resolve_tests.
+    }
+
+    /// POSIX single-quote escaping round-trips an embedded quote; the
+    /// Windows branch is a no-op (cfg-gated, pinned by the cfg! branch).
+    #[test]
+    fn handoff_path_quoting_escapes_embedded_single_quotes() {
+        assert_eq!(
+            quote_posix_path(std::path::Path::new("/it's/a path")),
+            if cfg!(windows) {
+                "/it's/a path".to_string()
+            } else {
+                "'/it'\\''s/a path'".to_string()
+            }
+        );
+    }
 }

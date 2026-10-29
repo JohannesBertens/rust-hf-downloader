@@ -257,7 +257,7 @@ async fn prepare_download_paths(
 
     // Build the final path preserving the directory structure from the filename
     // The filename may contain subdirectories (e.g., "tokenizer/config.json", "Q2_K_M/model.gguf",
-    // or a FLARE revision-dir prefix like "gb202/weights/x.safetensors", §3.3d). The
+    // or a FLARE revision-dir prefix like "gb202/weights/x.safetensors", plans/flare-models.md §3.3d). The
     // sanitize+join step is the extracted pure `final_path_for` — parity pinned by test.
     let Some(final_path) = final_path_for(&canonical_base, filename) else {
         // Unreachable for a filename whose components all sanitized above
@@ -965,6 +965,51 @@ mod remote_path_tests {
     /// The commit pin a FLARE run downloads at (40-hex).
     const PIN: &str = "0123456789abcdef0123456789abcdef01234567";
 
+    /// Local twin of the engine tests' env guard (the M3 DAG forbids this
+    /// module from referencing the engine module, tests included — see
+    /// tests/docs_guards.rs module_dependency_dag): redirects
+    /// `RUST_HF_DOWNLOADER_DATA_DIR` (registry path) + `HF_ENDPOINT`
+    /// (resolve_url) and restores both on drop. Callers hold
+    /// `paths::ENV_MUTEX` for the whole test.
+    struct DownloadEnvGuard {
+        data_dir: Option<std::ffi::OsString>,
+        endpoint: Option<String>,
+    }
+
+    impl DownloadEnvGuard {
+        fn install(data_dir: &Path, endpoint: &str) -> Self {
+            let guard = Self {
+                data_dir: std::env::var_os(crate::paths::ENV_DATA_DIR),
+                endpoint: std::env::var("HF_ENDPOINT").ok(),
+            };
+            std::env::set_var(crate::paths::ENV_DATA_DIR, data_dir);
+            std::env::set_var("HF_ENDPOINT", endpoint);
+            guard
+        }
+    }
+
+    impl Drop for DownloadEnvGuard {
+        fn drop(&mut self) {
+            match &self.data_dir {
+                Some(d) => std::env::set_var(crate::paths::ENV_DATA_DIR, d),
+                None => std::env::remove_var(crate::paths::ENV_DATA_DIR),
+            }
+            match &self.endpoint {
+                Some(e) => std::env::set_var("HF_ENDPOINT", e),
+                None => std::env::remove_var("HF_ENDPOINT"),
+            }
+        }
+    }
+
+    /// Find a guaranteed-closed localhost port (bind then drop).
+    fn closed_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
@@ -1022,7 +1067,7 @@ mod remote_path_tests {
         (result, status)
     }
 
-    /// Pure parity (§3.3f path source): `final_path_for` must reproduce
+    /// Pure parity (plans/flare-models.md §3.3f path source): `final_path_for` must reproduce
     /// the engine's sanitize+join step byte-for-byte, for plain paths and
     /// FLARE-shaped prefixed paths, and reject what the engine rejects.
     #[tokio::test]
@@ -1261,7 +1306,7 @@ mod remote_path_tests {
         (outcome, status_rx)
     }
 
-    /// The MANDATORY §3.3d fixture: unprefixed request URL + prefixed disk
+    /// The MANDATORY plans/flare-models.md §3.3d fixture: unprefixed request URL + prefixed disk
     /// path + interrupt/resume round-trip, through the real transport.
     ///
     /// Layout math (with `concurrent_threads = 1`): 12,000,000 bytes,
@@ -1283,13 +1328,8 @@ mod remote_path_tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::create_dir_all(&base).unwrap();
         // Isolate the registry + pin HF_ENDPOINT (restored on drop).
-        let _guard = crate::engine::test_support::EnvGuard::install(
-            &data_dir,
-            &format!(
-                "http://127.0.0.1:{}",
-                crate::engine::test_support::closed_port()
-            ),
-        );
+        let _guard =
+            DownloadEnvGuard::install(&data_dir, &format!("http://127.0.0.1:{}", closed_port()));
 
         const TOTAL: u64 = 12_000_000;
         const CHUNK: u64 = 5 * 1024 * 1024; // the clamp minimum

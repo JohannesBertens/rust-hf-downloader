@@ -27,7 +27,7 @@ impl From<&RepoFile> for FileSpec {
     /// verbatim, tree size defaulting to 0 when absent, sha256 from the
     /// LFS oid only (non-LFS git blob oids are not SHA256s).
     /// `remote_path` is `None` — the ordinary download layout uses the
-    /// repo path verbatim as the local path (§3.3d None ⇒ byte-identical).
+    /// repo path verbatim as the local path (plans/flare-models.md §3.3d None ⇒ byte-identical).
     fn from(f: &RepoFile) -> Self {
         Self {
             filename: f.rfilename.clone(),
@@ -250,7 +250,7 @@ fn flare_file(f: &crate::models::RepoFile) -> FlareFile {
     }
 }
 
-/// The §3.3c semantic package set — wave-1's `choose_file` rule plus the
+/// The plans/flare-models.md §3.3c semantic package set — wave-1's `choose_file` rule plus the
 /// two root metadata files: packed = the single file; directory =
 /// `model.safetensors` + `weights/**` + `deployments/**` companions +
 /// `config.json` + `publisher.json` when present in the revision's tree
@@ -282,7 +282,7 @@ pub(super) fn flare_package_set(
 }
 
 /// Map the package set into download [`FileSpec`]s with the
-/// revision-scoped destination split (§3.3d): `filename` = the LOCAL
+/// revision-scoped destination split (plans/flare-models.md §3.3d): `filename` = the LOCAL
 /// `<revision-dir>/<repo-relpath>`, `remote_path` = the repo path (the
 /// URL truth). `--include`/`--exclude` filter WITHIN the set, matching
 /// the REPO-relative path (patterns.rs fnmatch — `*` crosses `/`).
@@ -362,4 +362,199 @@ pub(super) fn payload_revision_names(refs: &RepoRefs) -> Vec<String> {
         .map(|b| b.name.clone())
         .chain(refs.tags.iter().map(|t| t.name.clone()))
         .collect()
+}
+
+// --- FLARE pre-flight guards (plans/flare-models.md §3.3d) ---------------
+
+use crate::models::DownloadRegistry;
+use std::path::{Path, PathBuf};
+
+/// One file of the FLARE run, as the guards see it.
+pub(super) struct FlarePreflightFile {
+    /// LOCAL (revision-dir-prefixed) filename — the disk truth.
+    pub filename: String,
+    /// Repo-relative remote path — the URL truth.
+    pub remote_path: Option<String>,
+    /// Expected tree size in bytes.
+    pub expected_size: u64,
+}
+
+/// A plans/flare-models.md §3.3d pre-flight conflict. The `Display` strings are the human/NDJSON
+/// error messages, recovery hints included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum FlarePreflightError {
+    /// (i) On-disk size ≠ expected tree size.
+    SizeMismatch {
+        relpath: String,
+        expected: u64,
+        actual: u64,
+        directory: String,
+    },
+    /// (ii) Moved branch: this run's revision directory holds a file
+    /// recorded at a DIFFERENT commit.
+    MovedBranch {
+        recorded_commit: Option<String>,
+        pin: String,
+        directory: String,
+    },
+    /// (iii) Single destination per package: the URL is already recorded
+    /// at a different destination (ordinary/legacy entries included).
+    DestinationConflict {
+        url: String,
+        requested: String,
+        recorded: String,
+    },
+}
+
+impl std::fmt::Display for FlarePreflightError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FlarePreflightError::SizeMismatch {
+                relpath,
+                expected,
+                actual,
+                directory,
+            } => write!(
+                f,
+                "file {relpath} on disk is {actual} bytes but this revision expects {expected} \
+                 bytes — remove {directory} (or pin --revision to the revision that matches it)"
+            ),
+            FlarePreflightError::MovedBranch {
+                recorded_commit,
+                pin,
+                directory,
+            } => write!(
+                f,
+                "branch moved: directory {} holds commit {}, run targets {} — remove the \
+                 directory or pin `--revision {pin}`",
+                directory,
+                recorded_commit.as_deref().unwrap_or("<none>"),
+                pin
+            ),
+            FlarePreflightError::DestinationConflict {
+                url,
+                requested,
+                recorded,
+            } => write!(
+                f,
+                "this package is already recorded at `{recorded}` — reuse that copy, re-run \
+                 from that output root, or delete the registry entry to re-fetch here (TUI \
+                 resume-delete covers Incomplete/HashMismatch entries only; a Completed entry \
+                 is removed by deleting its row from the registry TOML, which is user-editable \
+                 data) [url: {url}, requested: {requested}]",
+            ),
+        }
+    }
+}
+
+/// The requested registration destination for one file — the exact path
+/// `register_pending` would record. `None` when the path is invalid (the
+/// enqueue's validate-first abort owns that failure).
+fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<PathBuf> {
+    crate::paths::sanitize::validate_and_sanitize_path(base, model_id, filename).ok()
+}
+
+/// plans/flare-models.md §3.3d pre-flight, PURE over the on-disk registry (the caller reads it
+/// with `registry::read_registry` — reads take no lock) plus targeted
+/// on-disk existence/size facts. Run BEFORE enqueue; any conflict is a
+/// hard error. Check order: (i) per-file size, (ii) moved-branch scoped
+/// to THIS run's `<model_root>/<revision-dir>/` prefix, (iii) per-file
+/// single-destination-per-package (same URL, ANY differing recorded
+/// destination — full path, ordinary/legacy entries included; no on-disk
+/// carve-out: deleting the ENTRY clears it, deleting the DIRECTORY does
+/// not).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn flare_preflight(
+    registry: &DownloadRegistry,
+    base: &str,
+    model_id: &str,
+    model_root: &Path,
+    revision_dir: &str,
+    pin: &str,
+    files: &[FlarePreflightFile],
+) -> Result<(), FlarePreflightError> {
+    // (i) on-disk size vs expected tree size per file.
+    for file in files {
+        let Some(final_path) = crate::download::final_path_for(model_root, &file.filename) else {
+            continue; // the enqueue's validate-first abort owns this
+        };
+        if let Ok(meta) = std::fs::metadata(&final_path) {
+            let actual = meta.len();
+            if actual != file.expected_size {
+                return Err(FlarePreflightError::SizeMismatch {
+                    relpath: file
+                        .remote_path
+                        .clone()
+                        .unwrap_or_else(|| file.filename.clone()),
+                    expected: file.expected_size,
+                    actual,
+                    directory: final_path
+                        .parent()
+                        .unwrap_or(Path::new(""))
+                        .display()
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    // (ii) moved-branch guard, scoped to THIS run's revision directory.
+    // On-disk existence is what makes the recovery honest: deleting the
+    // directory clears the guard (stale registry entries for vanished
+    // files are ignored).
+    let dir_prefix = format!(
+        "{}/",
+        model_root
+            .join(revision_dir)
+            .to_string_lossy()
+            .replace('\\', "/")
+    );
+    for entry in &registry.downloads {
+        if entry.model_id != model_id {
+            continue;
+        }
+        let local = entry.local_path.replace('\\', "/");
+        if !local.starts_with(&dir_prefix) {
+            continue;
+        }
+        if entry.revision.as_deref() == Some(pin) {
+            continue; // same commit — the idempotent re-run case
+        }
+        if !Path::new(&entry.local_path).exists() {
+            continue; // vanished file: the stale entry does not block
+        }
+        return Err(FlarePreflightError::MovedBranch {
+            recorded_commit: entry.revision.clone(),
+            pin: pin.to_string(),
+            directory: model_root.join(revision_dir).display().to_string(),
+        });
+    }
+
+    // (iii) single-destination-per-package: one URL must mean one
+    // recorded destination.
+    for file in files {
+        let url = crate::api::resolve_url(
+            model_id,
+            file.remote_path.as_deref().unwrap_or(&file.filename),
+            pin,
+        );
+        let Some(requested) = requested_destination(base, model_id, &file.filename) else {
+            continue;
+        };
+        for entry in &registry.downloads {
+            if entry.url != url {
+                continue;
+            }
+            if crate::registry::path_matches(&entry.local_path, &requested) {
+                continue; // the same destination — idempotent re-run
+            }
+            return Err(FlarePreflightError::DestinationConflict {
+                url,
+                requested: requested.display().to_string(),
+                recorded: entry.local_path.clone(),
+            });
+        }
+    }
+
+    Ok(())
 }

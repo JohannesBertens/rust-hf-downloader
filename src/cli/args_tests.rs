@@ -706,7 +706,7 @@ fn flare_preset_parsers_are_per_surface() {
 }
 
 /// `--for` is mutually exclusive with the ordinary selectors
-/// (§3.3a: error, not precedence).
+/// (plans/flare-models.md §3.3a: error, not precedence).
 #[test]
 fn flare_preset_conflicts_with_quant_file_all() {
     for extra in [
@@ -725,7 +725,7 @@ fn flare_preset_conflicts_with_quant_file_all() {
 }
 
 /// `--include`/`--exclude` REQUIRE `--for` (general include-on-download is
-/// out of scope this round, §3.3a).
+/// out of scope this round, plans/flare-models.md §3.3a).
 #[test]
 fn include_exclude_require_for_preset() {
     for flag in ["--include", "--exclude"] {
@@ -742,7 +742,7 @@ fn include_exclude_require_for_preset() {
     }
 }
 
-/// `--gpus` keeps the RAW spec (§3.3f verbatim echo) while validating it
+/// `--gpus` keeps the RAW spec (plans/flare-models.md §3.3f verbatim echo) while validating it
 /// through `gpu::parse_gpus_spec` at parse time.
 #[test]
 fn gpus_flag_validates_and_keeps_raw_spec() {

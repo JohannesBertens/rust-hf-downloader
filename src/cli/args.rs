@@ -367,7 +367,7 @@ fn parse_flare_preset(s: &str) -> Result<String, String> {
 /// Validate `--gpus <SPEC>` at parse time through `gpu::parse_gpus_spec`
 /// (plans/flare-models.md §3.2 grammar: comma ints + inclusive N-M ranges,
 /// duplicates collapse, UUID tokens rejected pointing at `--revision`),
-/// keeping the RAW string — the §3.3f handoff echoes the spec verbatim and
+/// keeping the RAW string — the plans/flare-models.md §3.3f handoff echoes the spec verbatim and
 /// the revision ladder re-parses it into indices.
 fn parse_gpus_spec_flag(s: &str) -> Result<String, String> {
     crate::gpu::parse_gpus_spec(s).map(|_| s.to_string())

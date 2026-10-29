@@ -102,7 +102,7 @@ impl EngineState {
                     };
                     if let Some(validated) = validated {
                         queueable.push(file);
-                        // The registration-site URL rule (§3.3d):
+                        // The registration-site URL rule (plans/flare-models.md §3.3d):
                         // `remote_path.unwrap_or(filename)` VERBATIM — no
                         // new sanitize (None ⇒ byte-parity; Some values are
                         // repo tree paths). The engine transport applies
@@ -165,7 +165,7 @@ impl EngineState {
                     .map(|f| f.revision.clone())
                     .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string());
                 // 4-tuple (filename, size, sha256, remote_path) — the
-                // `remote_path` hop into `register_pending` (§3.3d).
+                // `remote_path` hop into `register_pending` (plans/flare-models.md §3.3d).
                 let pending: Vec<(String, u64, Option<String>, Option<String>)> = files
                     .iter()
                     .map(|f| {

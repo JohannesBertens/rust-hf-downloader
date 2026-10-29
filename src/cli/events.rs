@@ -143,7 +143,7 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         revision: Option<String>,
         /// The 40-hex commit pin the run downloads at (trees, URLs, and
-        /// the registry all use THIS — §3.3b). Absent for existing
+        /// the registry all use THIS — plans/flare-models.md §3.3b). Absent for existing
         /// commands.
         #[serde(skip_serializing_if = "Option::is_none")]
         commit: Option<String>,
