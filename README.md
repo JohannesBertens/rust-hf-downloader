@@ -254,8 +254,8 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 |-----|--------|
 | `/` | Open search popup |
 | `o` | Toggle options screen (configure settings) |
-| `Tab` | Switch focus between Models and Quantizations lists |
-| `d` | Download selected quantization (Quantizations list), whole repo (Models list, non-GGUF repos), or the selected file/folder (Repository Files tree) |
+| `Tab` | Switch focus between Models and Quantizations lists (or Models ↔ FLARE Revisions in FLARE mode) |
+| `d` | Download selected quantization (Quantizations list), whole repo (Models list, non-GGUF repos), the selected file/folder (Repository Files tree), or open the FLARE revision picker (FLARE mode) |
 | `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
 | `Enter` | Execute search (in search popup) / Show details (in browse mode) / Edit directory (in options) |
 | `Esc` | Close search popup / Cancel popup / Close options |
@@ -459,6 +459,34 @@ groups, and unrecognized GGUFs appear under `OTHER` instead of vanishing.
 `main` (issue #28) — the file listing and all resolve URLs follow the
 revision, and registry entries record it so the TUI resumes from the right
 source. Unknown revisions exit `64` (`not_found`).
+
+### FLARE runtime packages
+
+FLARE-engine repos keep their payloads on hardware-named branches
+(`gb202` = RTX PRO 6000 Blackwell, `gb10` = DGX Spark) while `main` holds
+metadata only. `--for flare` makes the downloader FLARE-aware:
+
+```sh
+rust-hf-downloader download JohannesBertens/Qwen3.8-Flash-Next-FLARE-1M-TP2 --for flare --gpus 0,1
+```
+
+- `--gpus` selects the branch by querying `nvidia-smi` PCI device IDs
+  against flare's platform table (unknown GPUs, missing `nvidia-smi`, or
+  mixed architectures refuse and ask for `--revision`). `--revision`
+  (branch, tag, or 40-hex SHA) always wins and pins the run to that
+  commit — every tree fetch, request URL, and registry entry uses the
+  commit, so a moved branch can never mix commits.
+- Files land under `<output>/<author>/<model>/<revision>/` (packed single
+  file or `model.safetensors` + `weights/**` + `deployments/**` for
+  directory-form packages), with `--include/--exclude` filtering within
+  the package set. LFS sha256s verify by default (`--no-verify` disables).
+- Pre-flight guards reject size mismatches, a moved branch over an
+  existing directory, and any attempt to fetch a package already recorded
+  at a different destination — before a byte moves.
+- On success the human reporter prints the serve command — e.g.
+  `flare run '/home/you/models/JohannesBertens/Qwen3.8-Flash-Next-FLARE-1M-TP2/gb202/qwen3.8-flash-next-yarn4-tp2.safetensors' --gpus 0,1`
+  — flare's explicit-path mode serves the file directly, no flare cache
+  involved.
 
 Rate limiting can be controlled per-run without editing the config file:
 `--rate-limit-mbps MBPS` enables the limiter at the given rate (e.g.

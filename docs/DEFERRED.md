@@ -306,3 +306,20 @@ Seeded by M0 (2026-10). Gate-0 owner sign-offs recorded 2026-10-06:
   sign-off (it changes the transport's path contract).
 - **Provenance:** ponytail-audit finding 1 (2026-10-17); residuals recorded
   during the plan-gate rounds of plans/fix-audit-1-2-3.md (rev 3/3.1).
+
+## FLARE pre-flight shared home
+
+- **Symbol:** `flare_preflight`
+- **Status:** open
+- **Deferred:** `flare_preflight` (plans/flare-models.md §3.3d) lives in
+  `src/cli/resolve.rs` and is re-exported `pub(crate)` from the `cli`
+  facade because the TUI's FLARE trigger (§3.5) runs the same pure
+  registry+disk check before enqueue. That is a deliberate, scoped
+  frontend-to-frontend visibility edge.
+- **Remedy:** a neutral shared home (registry-adjacent query or its own
+  module) once a second non-frontend consumer appears or the next
+  architecture pass rehomes it; moving it requires breaking the
+  `download::final_path_for` import cycle question first (registry.rs →
+  download would cycle with download → registry).
+- **Provenance:** merge-wiring decision during the flare-models wave-2
+  merge (2026-10-29); noted in `src/cli/mod.rs` at the re-export.
