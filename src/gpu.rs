@@ -276,10 +276,11 @@ struct QueryRow {
     name: String,
 }
 
-/// Detect the FLARE platform of the selected GPUs (plans/flare-models.md
-/// §3.2). One `nvidia-smi --query-gpu=index,pci.device_id,compute_cap,name
-/// --format=csv,noheader` subprocess with a 5-second budget; sync by
-/// contract — async callers wrap this in `tokio::task::spawn_blocking`.
+/// Detect the FLARE platform of the selected GPUs — one
+/// `nvidia-smi --query-gpu=index,pci.device_id,compute_cap,name
+/// --format=csv,noheader` subprocess with a 5-second budget
+/// (plans/flare-models.md §3.2); sync by contract — async callers
+/// wrap this in `tokio::task::spawn_blocking`.
 ///
 /// When `CUDA_VISIBLE_DEVICES` is set to integer indices, the selected
 /// indices are resolved through it first (flare's semantics); a
@@ -531,7 +532,8 @@ mod tests {
     #[test]
     fn platform_table_pins_gb203_gb205_absent() {
         // GB203 / GB205 must NOT map — shipping them a gb202 package would
-        // be a broken install (plan §6 risk). Unknown ⇒ demand --revision.
+        // be a broken install (plans/flare-models.md §6 risk). Unknown ⇒
+        // demand --revision.
         assert_eq!(platform_from_device_id(0x2C02), None, "GB203");
         assert_eq!(platform_from_device_id(0x2F04), None, "GB205");
         // Non-device / garbage ids too.
