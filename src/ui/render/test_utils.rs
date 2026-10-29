@@ -424,6 +424,7 @@ pub(super) const SNAPSHOT_MANIFEST: &[&str] = &[
     "rust_hf_downloader__ui__render__snapshot_render_ui_model_list_selection",
     "rust_hf_downloader__ui__render__snapshot_render_ui_quantization_panels",
     "rust_hf_downloader__ui__render__snapshot_render_ui_flare_panels",
+    "rust_hf_downloader__ui__render__snapshot_flare_revision_popup",
     "rust_hf_downloader__ui__render__snapshot_search_popup",
     "rust_hf_downloader__ui__render__snapshot_search_popup_over_populated_ui",
     "rust_hf_downloader__ui__render__snapshot_download_path_popup",

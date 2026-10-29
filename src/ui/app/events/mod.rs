@@ -38,6 +38,9 @@ impl App {
         } else if matches!(self.popup_mode, PopupMode::AuthError { .. }) {
             self.handle_auth_error_popup_input(key).await;
             return;
+        } else if matches!(self.popup_mode, PopupMode::FlareRevision { .. }) {
+            self.handle_flare_revision_popup_input(key).await;
+            return;
         }
 
         self.handle_normal_mode_input(key).await;

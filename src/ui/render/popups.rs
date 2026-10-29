@@ -1,7 +1,11 @@
 //! Modal popups other than the options dialog: resume list, search input,
-//! download-path chooser, auth-error steps (plan W3.4b split out of
-//! `render.rs`; bodies byte-identical).
+//! download-path chooser, auth-error steps, FLARE revision picker
+//! (plan `plans/flare-models.md` §3.5) — split out of `render.rs` per
+//! W3.4b; bodies byte-identical unless noted.
 
+use crate::fmt::size_full;
+use crate::gpu::FlarePlatform;
+use crate::models::{FlareRevisionChoice, RefKind};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -321,4 +325,121 @@ pub fn render_auth_error_popup(frame: &mut Frame, model_url: &str, has_token: bo
         .wrap(Wrap { trim: false });
 
     frame.render_widget(message, message_area);
+}
+
+/// FLARE revision-picker popup (plans/flare-models.md §3.5): one row per
+/// payload revision — star when the session-detected platform matches the
+/// row's arch token, revision + aliases, kind badge, short commit, size in
+/// `fmt.rs` FULL form — with the cursor row highlighted and the
+/// ↑/↓ · Enter · Esc contract at the bottom.
+pub fn render_flare_revision_popup(
+    frame: &mut Frame,
+    model_id: &str,
+    choices: &[FlareRevisionChoice],
+    cursor: usize,
+    platform: Option<&FlarePlatform>,
+) {
+    // Up to 8 rows on screen; one more line when the list is cut.
+    let visible = choices.len().min(8) as u16;
+    let overflow = u16::from(choices.len() > 8);
+    let popup_area = centered_rect(72, 5 + visible + overflow, frame.area());
+
+    popup_shell(
+        frame,
+        popup_area,
+        "Download FLARE Revision",
+        Style::default().fg(Color::Yellow).bg(Color::Black),
+    );
+
+    // The popup's model binding, so the user sees whose revisions these are.
+    let model_area = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(4),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(format!("Model: {model_id}")).style(Style::default().fg(Color::Cyan)),
+        model_area,
+    );
+
+    for (idx, choice) in choices.iter().take(8).enumerate() {
+        let selected = idx == cursor;
+        let star = match (choice.arch.as_deref(), platform) {
+            (Some(arch), Some(platform)) if arch == platform.as_str() => "★ ",
+            _ => "",
+        };
+        let aliases = if choice.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", choice.aliases.join(", "))
+        };
+        let kind = match choice.kind {
+            RefKind::Branch => "branch",
+            RefKind::Tag => "tag",
+        };
+        let row = Line::from(vec![
+            Span::raw(if selected { ">> " } else { "   " }),
+            Span::raw(star.to_string()),
+            Span::styled(
+                choice.revision.clone(),
+                if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::styled(aliases, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("[{kind}]"), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(
+                    " @{}",
+                    &choice.target_commit[..choice.target_commit.len().min(8)]
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("  {}", size_full(choice.size)),
+                Style::default().fg(Color::Green),
+            ),
+        ]);
+        let row_area = Rect {
+            x: popup_area.x + 2,
+            y: popup_area.y + 3 + idx as u16,
+            width: popup_area.width.saturating_sub(4),
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(row), row_area);
+    }
+
+    if choices.len() > 8 {
+        let more_area = Rect {
+            x: popup_area.x + 2,
+            y: popup_area.y + 3 + visible,
+            width: popup_area.width.saturating_sub(4),
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(format!("  ... and {} more", choices.len() - 8))
+                .style(Style::default().fg(Color::DarkGray)),
+            more_area,
+        );
+    }
+
+    let instructions_area = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + popup_area.height.saturating_sub(2),
+        width: popup_area.width.saturating_sub(4),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new("↑/↓: select  |  Enter: download (commit-pinned)  |  Esc: cancel")
+            .style(Style::default().fg(Color::DarkGray)),
+        instructions_area,
+    );
 }

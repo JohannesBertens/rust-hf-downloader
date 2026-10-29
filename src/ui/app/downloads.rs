@@ -140,6 +140,44 @@ impl App {
                     }
                 }
             }
+            FocusedPane::FlareRevisions => {
+                // plans/flare-models.md §3.5: 'd' in Flare mode opens the
+                // revision-picker popup — the snapshot is bound to the
+                // currently selected model (the scan's owner by the
+                // plans/flare-models.md §3.4
+                // ownership rule: every selection change clears
+                // `flare_info`, so it can only describe the selection).
+                let Some(info) = self.flare_info.read().clone() else {
+                    return;
+                };
+                if info.revisions.is_empty() {
+                    return;
+                }
+                let model_id = {
+                    let models = self.models.read();
+                    let Some(id) = self
+                        .list_state
+                        .selected()
+                        .and_then(|idx| models.get(idx))
+                        .map(|model| model.id.clone())
+                    else {
+                        return;
+                    };
+                    id
+                };
+                let count = info.revisions.len();
+                self.popup_mode = PopupMode::FlareRevision {
+                    model_id,
+                    choices: info
+                        .revisions
+                        .iter()
+                        .map(FlareRevisionChoice::from_revision)
+                        .collect(),
+                    cursor: 0,
+                };
+                *self.status.write() =
+                    format!("Select a FLARE revision to download ({count} available)");
+            }
             _ => {}
         }
     }
@@ -277,33 +315,52 @@ impl App {
         let hf_token = self.options.hf_token.clone();
         let default_dir = self.options.default_directory.clone();
 
-        // Files land under base/author/model (without the filename's own
-        // subdirectory, e.g. "Q4_1/model.gguf" — download.rs appends it); a
-        // malformed model_id falls back to the recorded local_path's
-        // parent directory.
-        let queued: Vec<QueuedDownload> = self
-            .incomplete_downloads
-            .iter()
-            .map(|metadata| {
+        // Base-path derivation per entry. Ordinary entries keep the
+        // historical rule: files land under base/author/model (without the
+        // filename's own subdirectory, e.g. "Q4_1/model.gguf" —
+        // download.rs appends it); a malformed model_id falls back to the
+        // recorded local_path's parent directory.
+        //
+        // FLARE-shaped entries (plans/flare-models.md §3.3d TUI resume
+        // rule): the recorded `local_path` is
+        // AUTHORITATIVE for the base-path derivation, never the live
+        // default dir — an interrupted FLARE download resumed under a
+        // different default dir must continue at its RECORDED destination,
+        // not relocate bytes while the registry keeps the old one. A
+        // missing or mismatched recorded root is a hard error: NOTHING
+        // enqueues (the user restores the directory or deletes the entry).
+        let mut queued: Vec<QueuedDownload> = Vec::with_capacity(count);
+        for metadata in &self.incomplete_downloads {
+            let base_path = if is_flare_shaped_entry(metadata) {
+                match recorded_flare_root(metadata) {
+                    Ok(root) => root,
+                    Err(why) => {
+                        *self.error.write() =
+                            Some(format!("Cannot resume {}: {why}", metadata.filename));
+                        *self.status.write() = "Resume aborted — restore the recorded directory or delete the registry entry".to_string();
+                        return;
+                    }
+                }
+            } else {
                 let fallback = PathBuf::from(&metadata.local_path)
                     .parent()
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from(&default_dir));
-                let base_path = model_root_or(&default_dir, &metadata.model_id, fallback);
-                QueuedDownload {
-                    model_id: metadata.model_id.clone(),
-                    revision: metadata
-                        .revision
-                        .clone()
-                        .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string()),
-                    filename: metadata.filename.clone(),
-                    base_path,
-                    expected_sha256: metadata.expected_sha256.clone(),
-                    hf_token: hf_token.clone(),
-                    total_size: metadata.total_size,
-                }
-            })
-            .collect();
+                model_root_or(&default_dir, &metadata.model_id, fallback)
+            };
+            queued.push(QueuedDownload {
+                model_id: metadata.model_id.clone(),
+                revision: metadata
+                    .revision
+                    .clone()
+                    .unwrap_or_else(|| crate::api::DEFAULT_REVISION.to_string()),
+                filename: metadata.filename.clone(),
+                base_path,
+                expected_sha256: metadata.expected_sha256.clone(),
+                hf_token: hf_token.clone(),
+                total_size: metadata.total_size,
+            });
+        }
 
         // Shared enqueue transaction, resume flavor: no registry writes
         // (the entries already exist), HUD summary per file regardless of
@@ -483,6 +540,130 @@ impl App {
         };
         self.finish_enqueue(&outcome, success, "Failed to start downloads");
     }
+
+    /// Enter in the FLARE revision-picker popup (plans/flare-models.md
+    /// plans/flare-models.md §3.5): re-resolve the FULL revision from
+    /// `flare_info` by the
+    /// choice's commit pin and enqueue through
+    /// [`App::trigger_flare_download`]. The popup is already closed when
+    /// this runs (the key handler takes its state out first).
+    pub async fn confirm_flare_revision_download(
+        &mut self,
+        model_id: String,
+        choices: Vec<FlareRevisionChoice>,
+        cursor: usize,
+    ) {
+        // Binding guard: the Results selection must still be the model
+        // whose scan produced the popup (selection changes close the
+        // popup via `clear_model_details`, so a mismatch here is
+        // defensive only).
+        let selected = {
+            let models = self.models.read();
+            self.list_state
+                .selected()
+                .and_then(|idx| models.get(idx))
+                .map(|model| model.id.clone())
+        };
+        if selected.as_deref() != Some(model_id.as_str()) {
+            *self.error.write() =
+                Some("Selection changed — reopen the FLARE revision picker".to_string());
+            return;
+        }
+        let Some(choice) = choices.get(cursor) else {
+            return;
+        };
+        let Some(info) = self.flare_info.read().clone() else {
+            *self.error.write() = Some("FLARE scan lost — reselect the model".to_string());
+            return;
+        };
+        let Some(revision) = info
+            .revisions
+            .iter()
+            .find(|revision| revision.target_commit == choice.target_commit)
+        else {
+            *self.error.write() = Some(format!(
+                "Revision {} vanished from the scan — reselect the model",
+                choice.revision
+            ));
+            return;
+        };
+        self.trigger_flare_download(&model_id, revision).await;
+    }
+
+    /// Queue one FLARE revision's package, COMMIT-PINNED
+    /// (plans/flare-models.md §3.5):
+    ///
+    /// - every file's `revision` is the 40-hex `target_commit` — never the
+    ///   branch name, so branch movement between scan and download cannot
+    ///   mix commits; registry entries store the sha (which round-trips:
+    ///   `registry.rs` maps only `"main"` to `None`);
+    /// - `expected_sha256` forwards the LFS oid
+    ///   (plans/flare-models.md §3.3e) so payloads are
+    ///   digest-verified by default;
+    /// - the LOCAL filename/destination is `<revision-dir>/<relpath>`
+    ///   (plans/flare-models.md §3.3d), so files land at
+    ///   `base/author/model/<rev>/<relpath>` and
+    ///   cross-revision same-name packages never collide on disk;
+    /// - the download set is exactly the package [`FlareRepoInfo`] carries
+    ///   (plans/flare-models.md §3.5's "FileSpecs from FlareRepoInfo"):
+    ///   packed = the single
+    ///   file; directory = `model.safetensors` + `weights/**` +
+    ///   `deployments/**` companions.
+    ///
+    /// Enqueued via the existing `EnqueuePolicy::tui_repository`
+    /// transaction (queued-size registry entries, queue accounting, HUD
+    /// mirror, rollback — the repository flow's flavor).
+    pub async fn trigger_flare_download(&mut self, model_id: &str, revision: &FlareRevision) {
+        let base_path = self.options.default_directory.clone();
+        let model_root = model_root(&base_path, model_id);
+        let files = crate::ui::render::flare_package_files(&revision.package);
+
+        let queued: Vec<QueuedDownload> = files
+            .iter()
+            .map(|file| {
+                let filename = format!("{}/{}", revision.revision, file.rfilename);
+                QueuedDownload {
+                    model_id: model_id.to_string(),
+                    revision: revision.target_commit.clone(),
+                    // TODO(flare/cli-merge): set remote_path =
+                    // Some(file.rfilename.clone()) here once Lane C's field
+                    // lands on QueuedDownload (plans/flare-models.md §3.3d). Until then the
+                    // enqueue's URL build embeds the revision-dir prefix
+                    // (…/resolve/<sha>/<rev>/<relpath>) — known pre-merge
+                    // skew the merge owner fixes by carrying `remote_path`
+                    // through FileSpec/QueuedDownload/DownloadMetadata so
+                    // the URL uses the UNPREFIXED repo-relpath while the
+                    // disk path keeps the prefix.
+                    filename,
+                    base_path: model_root.clone(),
+                    expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
+                    hf_token: self.options.hf_token.clone(),
+                    total_size: file.size.unwrap_or(0),
+                }
+            })
+            .collect();
+
+        let outcome = self
+            .engine
+            .enqueue(
+                &self.download_tx,
+                &queued,
+                &EnqueuePolicy::tui_repository(&base_path),
+            )
+            .await;
+
+        let success = format!(
+            "Queued {} FLARE file(s) of {} @{} to {}",
+            files.len(),
+            revision.revision,
+            revision
+                .target_commit
+                .get(..8)
+                .unwrap_or(&revision.target_commit),
+            model_root.display()
+        );
+        self.finish_enqueue(&outcome, success, "Failed to start FLARE download");
+    }
 }
 
 /// Which repo files a non-GGUF confirm flow downloads: the entire
@@ -494,7 +675,6 @@ enum RepoScope<'a> {
     WholeModel,
     Tree { path: &'a str, is_dir: bool },
 }
-
 impl RepoScope<'_> {
     /// Whether this scope selects the given sibling file. Callers pre-filter
     /// directory markers; this adds the scope-specific predicate.
@@ -530,6 +710,68 @@ fn model_root_or(base: &str, model_id: &str, fallback: PathBuf) -> PathBuf {
     }
 }
 
+/// plans/flare-models.md §3.3d TUI resume shape test: does this
+/// registry entry carry a
+/// revision-dir-prefixed FLARE destination (the form
+/// [`App::trigger_flare_download`] records)?
+///
+/// TODO(flare/cli-merge): replace the body with
+/// `metadata.remote_path.is_some()` once Lane C's field lands on
+/// `DownloadMetadata` (plans/flare-models.md §3.3d). Pre-merge marker:
+/// a directory-bearing
+/// filename PLUS a recorded 40-hex commit revision — a pair no legacy TUI
+/// flow produces (both record revision `None` at main). The one collision
+/// (a CLI `--revision <sha>` run on a nested file) also derives the
+/// CORRECT resume base under the recorded-root rule, so the marker is
+/// safe until the real field lands.
+fn is_flare_shaped_entry(metadata: &DownloadMetadata) -> bool {
+    fn is_commit_sha(s: &str) -> bool {
+        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+    metadata.filename.contains('/') && metadata.revision.as_deref().is_some_and(is_commit_sha)
+}
+
+/// plans/flare-models.md §3.3d: derive the resume base from the
+/// RECORDED destination. The
+/// recorded root is `local_path` minus the recorded-filename suffix — the
+/// unique base whose `join(filename)` reproduces `local_path` — and it
+/// must still exist on disk. A `local_path` that does not end with the
+/// recorded filename, or a root directory that is gone, is a hard error
+/// (the user restores it or deletes the entry; nothing re-enqueues onto a
+/// guessed destination).
+fn recorded_flare_root(metadata: &DownloadMetadata) -> Result<PathBuf, String> {
+    let local = PathBuf::from(&metadata.local_path);
+    let filename_parts: Vec<_> = metadata
+        .filename
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let local_parts: Vec<_> = local.components().collect();
+    let suffix_len = filename_parts.len();
+    let suffix_matches = local_parts.len() > suffix_len
+        && local_parts[local_parts.len() - suffix_len..]
+            .iter()
+            .zip(&filename_parts)
+            .all(|(component, name)| component.as_os_str().to_str() == Some(*name));
+    if !suffix_matches {
+        return Err(format!(
+            "recorded path {} does not end with the recorded filename {} — delete the registry entry or fix its local_path",
+            local.display(),
+            metadata.filename
+        ));
+    }
+    let root: PathBuf = local_parts[..local_parts.len() - suffix_len]
+        .iter()
+        .collect();
+    if !root.is_dir() {
+        return Err(format!(
+            "recorded directory {} is missing — restore it or delete the registry entry",
+            root.display()
+        ));
+    }
+    Ok(root)
+}
+
 #[cfg(test)]
 mod tests {
     //! W4.4 characterization tests for the three `confirm_*` download
@@ -547,8 +789,9 @@ mod tests {
     //! path) and HF_ENDPOINT are redirected under the crate-wide `ENV_MUTEX`.
     use super::*;
     use crate::models::{
-        DownloadStatus, LfsInfo, ModelDisplayMode, ModelInfo, ModelMetadata, PopupMode,
-        QuantizationGroup, QuantizationInfo, RepoFile,
+        DownloadStatus, FlareConfigFacts, FlarePackage, FlareRepoInfo, FlareRevision, LfsInfo,
+        ModelDisplayMode, ModelInfo, ModelMetadata, ParsedPackageTokens, PopupMode,
+        QuantizationGroup, QuantizationInfo, RefKind, RepoFile,
     };
 
     /// Find a guaranteed-closed localhost port (bind then drop the listener).
@@ -1281,6 +1524,548 @@ mod tests {
         let mirror = app.engine.download_registry.lock().await;
         assert_eq!(mirror.downloads.len(), 1);
         assert_eq!(mirror.downloads[0].url, other.url);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ------------------------------------------------------------------
+    // plans/flare-models.md §3.5: the FLARE download flow, and §3.3d's
+    // TUI resume rule for FLARE-shaped registry entries.
+    // ------------------------------------------------------------------
+
+    const FLARE_COMMIT: &str = "1f0a2b3c4d5e6f708192a3b4c5d6e7f809182a3b";
+    const FLARE_COMMIT_2: &str = "0e1d2c3b4a5968778695a4b3c2d1e0f9988776655";
+
+    fn packed_flare_revision() -> FlareRevision {
+        FlareRevision {
+            revision: "gb202".to_string(),
+            aliases: vec!["v3".to_string()],
+            kind: RefKind::Branch,
+            target_commit: FLARE_COMMIT.to_string(),
+            package: FlarePackage::Packed {
+                file: test_repo_file("pkg.safetensors", Some(111), Some("lfs-sha")),
+            },
+            parsed: ParsedPackageTokens {
+                tp: Some(2),
+                arch: Some("gb202".to_string()),
+                ..ParsedPackageTokens::default()
+            },
+        }
+    }
+
+    fn directory_flare_revision() -> FlareRevision {
+        FlareRevision {
+            revision: "v2".to_string(),
+            aliases: Vec::new(),
+            kind: RefKind::Tag,
+            target_commit: FLARE_COMMIT_2.to_string(),
+            package: FlarePackage::Directory {
+                primary: test_repo_file("model.safetensors", Some(1_000), Some("dir-sha-1")),
+                companions: vec![
+                    test_repo_file("weights/0.safetensors", Some(2_000), Some("dir-sha-2")),
+                    test_repo_file("deployments/gb202-tp1/rank-0/plan.json", Some(10), None),
+                ],
+            },
+            parsed: ParsedPackageTokens::default(),
+        }
+    }
+
+    fn flare_repo(revisions: Vec<FlareRevision>) -> FlareRepoInfo {
+        FlareRepoInfo {
+            revisions,
+            config: FlareConfigFacts::default(),
+            publisher: None,
+            dropped_refs: Vec::new(),
+        }
+    }
+
+    /// Fresh App in Flare mode with the model selected, `flare_info`
+    /// seeded (packed gb202 + directory v2), FlareRevisions focused, and
+    /// the download default directory pointed at `<tmp>/dl`.
+    fn app_in_flare_mode(tmp: &std::path::Path) -> App {
+        let mut app = App::new();
+        *app.models.write() = vec![test_model()];
+        app.list_state.select(Some(0));
+        app.options.hf_token = None;
+        app.options.default_directory = tmp.join("dl").to_string_lossy().to_string();
+        *app.display_mode.write() = ModelDisplayMode::Flare;
+        app.focused_pane = FocusedPane::FlareRevisions;
+        app.flare_list_state.select(Some(0));
+        *app.flare_info.write() = Some(flare_repo(vec![
+            packed_flare_revision(),
+            directory_flare_revision(),
+        ]));
+        app.popup_mode = PopupMode::None;
+        app
+    }
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::from(code)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn trigger_flare_download_pins_commit_and_prefixes_destinations() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-trigger-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        let revision = packed_flare_revision();
+        app.trigger_flare_download("author/model", &revision).await;
+
+        let root = tmp.join("dl").join("author").join("model");
+        assert_eq!(
+            *app.status.read(),
+            format!(
+                "Queued 1 FLARE file(s) of gb202 @1f0a2b3c to {}",
+                root.display()
+            )
+        );
+        assert!(app.error.read().is_none());
+
+        // The commit is the pin: the queue message and the registry entry
+        // both carry the 40-hex sha, never the branch name.
+        assert_queue_accounting(&app, 1, 111, &["gb202/pkg.safetensors"]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].model_id, "author/model");
+        assert_eq!(drained[0].revision, FLARE_COMMIT);
+        assert_eq!(drained[0].filename, "gb202/pkg.safetensors");
+        assert_eq!(drained[0].base_path, root);
+        assert_eq!(drained[0].expected_sha256.as_deref(), Some("lfs-sha"));
+        assert_eq!(drained[0].total_size, 111);
+
+        // tui_repository flavor: queued-size mirror entries, revision =
+        // the commit sha (round-trips: only "main" maps to None), the
+        // revision-dir-prefixed local destination, and the LFS oid
+        // forwarded for digest verification.
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(registry.downloads.len(), 1);
+        assert_eq!(registry.downloads[0].total_size, 111);
+        assert_eq!(
+            registry.downloads[0].revision.as_deref(),
+            Some(FLARE_COMMIT)
+        );
+        assert_eq!(
+            registry.downloads[0].expected_sha256.as_deref(),
+            Some("lfs-sha")
+        );
+        assert_eq!(
+            PathBuf::from(&registry.downloads[0].local_path),
+            root.join("gb202").join("pkg.safetensors")
+        );
+        // TODO(flare/cli-merge): once Lane C's remote_path lands on
+        // QueuedDownload/DownloadMetadata (plans/flare-models.md §3.3d), this
+        // URL must become
+        // resolve_url("author/model", "pkg.safetensors", FLARE_COMMIT) —
+        // the UNPREFIXED repo-relpath. Pre-merge the prefix rides the URL.
+        assert_eq!(
+            registry.downloads[0].url,
+            crate::api::resolve_url("author/model", "gb202/pkg.safetensors", FLARE_COMMIT)
+        );
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn trigger_flare_download_directory_package_queues_primary_and_companions() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-flare-trigger-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        let revision = directory_flare_revision();
+        app.trigger_flare_download("author/model", &revision).await;
+
+        // Directory form: primary + weights/** + deployments/** — every
+        // filename prefixed with the revision dir, nested repo layout
+        // preserved under it. plan.json carries no LFS oid ⇒ no sha.
+        assert_queue_accounting(
+            &app,
+            3,
+            3_010,
+            &[
+                "v2/model.safetensors",
+                "v2/weights/0.safetensors",
+                "v2/deployments/gb202-tp1/rank-0/plan.json",
+            ],
+        )
+        .await;
+        let drained = drain_downloads(&app).await;
+        assert!(drained.iter().all(|m| m.revision == FLARE_COMMIT_2));
+        assert_eq!(drained[0].expected_sha256.as_deref(), Some("dir-sha-1"));
+        assert_eq!(drained[1].expected_sha256.as_deref(), Some("dir-sha-2"));
+        assert_eq!(drained[2].expected_sha256, None);
+
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(
+            PathBuf::from(&registry.downloads[2].local_path),
+            tmp.join("dl")
+                .join("author")
+                .join("model")
+                .join("v2")
+                .join("deployments")
+                .join("gb202-tp1")
+                .join("rank-0")
+                .join("plan.json")
+        );
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 'd' in Flare mode opens the revision-picker popup
+    /// (plans/flare-models.md §3.5): snapshot
+    /// choices bound to the selected model; Esc cancels without enqueue.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn d_in_flare_mode_opens_revision_popup_and_esc_cancels() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-popup-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+
+        let PopupMode::FlareRevision {
+            model_id,
+            choices,
+            cursor,
+        } = &app.popup_mode
+        else {
+            panic!(
+                "'d' must open the FlareRevision popup, got {:?}",
+                app.popup_mode
+            );
+        };
+        assert_eq!(model_id, "author/model");
+        assert_eq!(*cursor, 0);
+        assert_eq!(choices.len(), 2);
+        // The snapshot rows mirror the scan: sizes, file counts, arch
+        // tokens (the star input), kind, and the commit pins.
+        assert_eq!(choices[0].revision, "gb202");
+        assert_eq!(choices[0].aliases, vec!["v3".to_string()]);
+        assert_eq!(choices[0].size, 111);
+        assert_eq!(choices[0].files, 1);
+        assert_eq!(choices[0].arch.as_deref(), Some("gb202"));
+        assert_eq!(choices[0].target_commit, FLARE_COMMIT);
+        assert_eq!(choices[1].revision, "v2");
+        assert_eq!(choices[1].files, 3);
+        assert_eq!(choices[1].size, 3_010);
+        assert_eq!(
+            *app.status.read(),
+            "Select a FLARE revision to download (2 available)"
+        );
+
+        // Esc: cancel — popup closed, nothing enqueued anywhere.
+        app.on_key_event(key(crossterm::event::KeyCode::Esc)).await;
+        assert_eq!(app.popup_mode, PopupMode::None);
+        assert_eq!(*app.status.read(), "Download cancelled");
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Popup arrows move the cursor (bounded), Enter enqueues the CHOSEN
+    /// revision (re-resolved from flare_info by commit pin).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn flare_popup_arrows_move_and_enter_enqueues_the_chosen_revision() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-flare-popup-enter-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+
+        // Down moves to the directory-form card; Up clamps at 0.
+        app.on_key_event(key(crossterm::event::KeyCode::Down)).await;
+        app.on_key_event(key(crossterm::event::KeyCode::Down)).await;
+        if let PopupMode::FlareRevision { cursor, .. } = &app.popup_mode {
+            assert_eq!(*cursor, 1, "cursor bounded at the last row");
+        }
+        app.on_key_event(key(crossterm::event::KeyCode::Up)).await;
+        if let PopupMode::FlareRevision { cursor, .. } = &app.popup_mode {
+            assert_eq!(*cursor, 0);
+        }
+        app.on_key_event(key(crossterm::event::KeyCode::Down)).await;
+
+        app.on_key_event(key(crossterm::event::KeyCode::Enter))
+            .await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        // The SECOND revision (v2, directory form) — the cursor row at
+        // Enter time, pinned by its own commit: all three package files.
+        assert_queue_accounting(
+            &app,
+            3,
+            3_010,
+            &[
+                "v2/model.safetensors",
+                "v2/weights/0.safetensors",
+                "v2/deployments/gb202-tp1/rank-0/plan.json",
+            ],
+        )
+        .await;
+        let drained = drain_downloads(&app).await;
+        assert!(drained.iter().all(|m| m.revision == FLARE_COMMIT_2));
+        assert!(app.error.read().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// plans/flare-models.md §3.3d TUI resume rule: a FLARE-shaped entry
+    /// resumes at its
+    /// RECORDED destination — the base derives from the recorded
+    /// local_path, never the live default dir (which differs here).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resume_flare_entry_uses_recorded_root_not_live_default() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-resume-flare-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        // The recorded root exists on disk under a DIFFERENT base than the
+        // live default dir — the interrupted download's true home.
+        let recorded_root = tmp.join("recorded").join("author").join("model");
+        std::fs::create_dir_all(&recorded_root).unwrap();
+
+        let mut app = App::new();
+        app.options.hf_token = None;
+        app.options.default_directory = tmp.join("live").to_string_lossy().to_string();
+        app.incomplete_downloads = vec![crate::models::DownloadMetadata {
+            model_id: "author/model".to_string(),
+            filename: "gb202/pkg.safetensors".to_string(),
+            url: "https://example.invalid/a".to_string(),
+            local_path: recorded_root
+                .join("gb202")
+                .join("pkg.safetensors")
+                .to_string_lossy()
+                .to_string(),
+            total_size: 111,
+            downloaded_size: 5,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: Some("lfs-sha".to_string()),
+            revision: Some(FLARE_COMMIT.to_string()),
+        }];
+
+        app.resume_incomplete_downloads().await;
+
+        assert_eq!(*app.status.read(), "Resuming 1 incomplete download(s)");
+        assert!(app.error.read().is_none());
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 1);
+        // The RECORDED root — not <live>/author/model.
+        assert_eq!(drained[0].base_path, recorded_root);
+        assert_eq!(drained[0].filename, "gb202/pkg.safetensors");
+        assert_eq!(drained[0].revision, FLARE_COMMIT);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// plans/flare-models.md §3.3d: a FLARE-shaped entry whose recorded
+    /// root is GONE is a hard
+    /// error — nothing enqueues (no guessed destination).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resume_flare_entry_with_missing_recorded_root_aborts() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-resume-flare-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        // Recorded root NOT created — the directory was deleted.
+        let recorded_root = tmp.join("gone").join("author").join("model");
+
+        let mut app = App::new();
+        app.options.hf_token = None;
+        app.options.default_directory = tmp.join("live").to_string_lossy().to_string();
+        app.incomplete_downloads = vec![crate::models::DownloadMetadata {
+            model_id: "author/model".to_string(),
+            filename: "gb202/pkg.safetensors".to_string(),
+            url: "https://example.invalid/a".to_string(),
+            local_path: recorded_root
+                .join("gb202")
+                .join("pkg.safetensors")
+                .to_string_lossy()
+                .to_string(),
+            total_size: 111,
+            downloaded_size: 5,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: Some(FLARE_COMMIT.to_string()),
+        }];
+
+        app.resume_incomplete_downloads().await;
+
+        let error = app.error.read().clone();
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains("is missing")),
+            "missing recorded root must hard-error, got: {error:?}"
+        );
+        assert_eq!(
+            *app.status.read(),
+            "Resume aborted — restore the recorded directory or delete the registry entry"
+        );
+        assert!(drain_downloads(&app).await.is_empty());
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// plans/flare-models.md §3.3d: a FLARE-shaped entry whose recorded
+    /// local_path does not end
+    /// with the recorded filename is a mismatch — hard error, nothing
+    /// enqueues (the registry entry's paths disagree; the user fixes or
+    /// deletes the entry).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn resume_flare_entry_with_mismatched_recorded_path_aborts() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-resume-flare-mismatch-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        // The root exists — the SUFFIX is what mismatches here.
+        let recorded_root = tmp.join("recorded").join("author").join("model");
+        std::fs::create_dir_all(&recorded_root).unwrap();
+
+        let mut app = App::new();
+        app.options.hf_token = None;
+        app.options.default_directory = tmp.join("live").to_string_lossy().to_string();
+        app.incomplete_downloads = vec![crate::models::DownloadMetadata {
+            model_id: "author/model".to_string(),
+            filename: "gb202/pkg.safetensors".to_string(),
+            url: "https://example.invalid/a".to_string(),
+            local_path: recorded_root
+                .join("other.safetensors")
+                .to_string_lossy()
+                .to_string(),
+            total_size: 111,
+            downloaded_size: 5,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: Some(FLARE_COMMIT.to_string()),
+        }];
+
+        app.resume_incomplete_downloads().await;
+
+        let error = app.error.read().clone();
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("does not end with the recorded filename")),
+            "mismatched recorded path must hard-error, got: {error:?}"
+        );
+        assert!(drain_downloads(&app).await.is_empty());
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The plans/flare-models.md §3.5 shape-test unit pins (offline, no
+    /// App): the pre-merge
+    /// FLARE-shape marker and the recorded-root derivation, including the
+    /// boundary cases the flow tests above cannot reach cheaply.
+    #[test]
+    fn flare_shape_test_and_recorded_root_boundaries() {
+        let entry = |filename: &str, revision: Option<&str>| crate::models::DownloadMetadata {
+            model_id: "author/model".to_string(),
+            filename: filename.to_string(),
+            url: "https://example.invalid/a".to_string(),
+            local_path: String::new(),
+            total_size: 0,
+            downloaded_size: 0,
+            status: DownloadStatus::Incomplete,
+            expected_sha256: None,
+            revision: revision.map(str::to_string),
+        };
+
+        // FLARE shape: directory-bearing filename + 40-hex commit.
+        assert!(is_flare_shaped_entry(&entry(
+            "gb202/pkg.safetensors",
+            Some(FLARE_COMMIT)
+        )));
+        // Legacy flows (revision None at main, or a named revision on a
+        // flat/nested filename without a commit pin) stay legacy.
+        assert!(!is_flare_shaped_entry(&entry("f.gguf", None)));
+        assert!(!is_flare_shaped_entry(&entry("Q4_1/f.gguf", None)));
+        assert!(!is_flare_shaped_entry(&entry(
+            "gb202/pkg.safetensors",
+            None
+        )));
+        assert!(!is_flare_shaped_entry(&entry(
+            "gb202/pkg.safetensors",
+            Some("rev-x")
+        )));
+        assert!(!is_flare_shaped_entry(&entry(
+            "gb202/pkg.safetensors",
+            Some("v2")
+        )));
+        assert!(!is_flare_shaped_entry(&entry(
+            "pkg.safetensors",
+            Some(FLARE_COMMIT)
+        )));
+
+        // Recorded-root derivation over a live temp dir.
+        let tmp = std::env::temp_dir().join(format!("app-flare-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("base").join("author").join("model");
+        std::fs::create_dir_all(root.join("gb202")).unwrap();
+
+        let mut metadata = entry("gb202/pkg.safetensors", Some(FLARE_COMMIT));
+        metadata.local_path = root
+            .join("gb202")
+            .join("pkg.safetensors")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(recorded_flare_root(&metadata), Ok(root.clone()));
+
+        // A local_path with NO component above the filename suffix (a
+        // bare relative path) cannot name a root — mismatch.
+        metadata.local_path = format!("gb202{}pkg.safetensors", std::path::MAIN_SEPARATOR);
+        assert!(recorded_flare_root(&metadata).is_err());
+        // A traversal-shaped filename can never match a sanitized path.
+        metadata.filename = "../pkg.safetensors".to_string();
+        metadata.local_path = root.join("pkg.safetensors").to_string_lossy().to_string();
+        assert!(recorded_flare_root(&metadata).is_err());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

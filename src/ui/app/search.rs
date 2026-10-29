@@ -11,7 +11,7 @@ use crate::api::{
     build_file_tree, classify_quantizations, config_json_confirms_flare, fetch_flare_info,
     fetch_model_metadata, fetch_raw_file, flare_disposition, FlareDisposition,
 };
-use crate::models::{ModelDisplayMode, RepoFile};
+use crate::models::{ModelDisplayMode, PopupMode, RepoFile};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -522,10 +522,14 @@ impl App {
 
         // Clear the FLARE scan result (plans/flare-models.md §3.4: cleared
         // wherever the
-        // quant/tree state clears; `flare_platform` is SESSION-scoped and
-        // stays) and invalidate any in-flight FLARE scan for the old
-        // selection (ownership rule).
+        // quant/tree state clears, together with the popup state — the
+        // popup's snapshot is bound to the cleared model) and invalidate
+        // any in-flight FLARE scan for the old selection (ownership rule).
+        // `flare_platform` is SESSION-scoped and stays.
         *self.flare_info.write() = None;
+        if matches!(self.popup_mode, PopupMode::FlareRevision { .. }) {
+            self.popup_mode = PopupMode::None;
+        }
         self.invalidate_flare_scans();
 
         // Set loading state

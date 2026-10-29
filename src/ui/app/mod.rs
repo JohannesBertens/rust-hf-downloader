@@ -267,6 +267,23 @@ impl App {
                     .is_some_and(|t| !t.is_empty());
                 crate::ui::render::render_auth_error_popup(frame, model_url, has_token);
             }
+            PopupMode::FlareRevision {
+                ref model_id,
+                ref choices,
+                cursor,
+            } => {
+                // The star rides the SESSION platform (plans/flare-models.md §3.4) —
+                // pure input
+                // to the render pass, cloned out of the RwLock first.
+                let platform = *self.flare_platform.read();
+                crate::ui::render::render_flare_revision_popup(
+                    frame,
+                    model_id,
+                    choices,
+                    cursor,
+                    platform.as_ref(),
+                );
+            }
             PopupMode::None => {}
         }
     }
