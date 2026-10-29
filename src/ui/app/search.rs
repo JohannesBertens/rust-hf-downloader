@@ -854,4 +854,42 @@ mod tests {
             Some("gb10".to_string())
         );
     }
+
+    /// The publication gate's CONCURRENT invariant (impl-gate r2, the
+    /// copilot ask): `publish(epoch, info)` racing the clear path —
+    /// `App::clear_model_details`, the exact call every selection change
+    /// drives — must never strand the OLD model's revisions under the
+    /// cleared selection. Publish either installs fully BEFORE the clear
+    /// (then the clear wipes it) or finds its epoch stale (no-op); both
+    /// interleavings leave `flare_info` cleared. Without the gate — if
+    /// the epoch check and the state writes were not one atomic hold — a
+    /// stale publish could interleave between the clear and the bump and
+    /// install anyway. A spawned publisher races the clear N times; every
+    /// iteration must end cleared.
+    #[test]
+    fn flare_publish_vs_clear_concurrent_invariant_holds_every_iteration() {
+        let _env_lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _tmp = TempDir::install();
+        const N: usize = 64;
+        for iteration in 0..N {
+            let mut app = App::new();
+            let shared = FlareScanShared::from_app(&app);
+            let epoch = app.begin_flare_scan();
+
+            let publisher = std::thread::spawn(move || {
+                shared.publish(epoch, flare_info_for("gb202"));
+            });
+            // The real clear path: locks the SAME publication gate,
+            // clears `flare_info`, bumps the epoch under the hold.
+            app.clear_model_details();
+
+            publisher.join().expect("publisher thread must not panic");
+            assert!(
+                app.flare_info.read().is_none(),
+                "iteration {iteration}: publish must not strand stale revisions \
+                 across the clear (installed-before-clear ⇒ cleared; \
+                 stale-epoch ⇒ no-op)"
+            );
+        }
+    }
 }

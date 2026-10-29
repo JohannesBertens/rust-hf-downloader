@@ -445,6 +445,59 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
     crate::paths::sanitize::validate_and_sanitize_path(base, model_id, filename).ok()
 }
 
+/// The on-disk IDENTITY of `p` (impl-gate r2 P1): canonicalize the
+/// NEAREST EXISTING ancestor — `p` itself included, since an existing
+/// path is its own nearest ancestor — then re-append the remaining
+/// components with `.`/`..` lexically normalized, so a base spelled
+/// `--output ../work/models` still compares EQUAL to the recorded
+/// absolute row for the same directory. `requested_destination`
+/// absolutizes but does NOT normalize `..`/symlink components in the
+/// path it RETURNS (canonicalization happens only inside its
+/// containment checks), so raw string comparisons miss the same
+/// directory. `None` when NOTHING along `p` exists — no on-disk
+/// identity to compare.
+fn anchored_fs_identity(p: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let components: Vec<Component<'_>> = p.components().collect();
+    // Longest existing prefix = nearest existing ancestor (the OS
+    // resolves `..`/symlink components inside the prefix during
+    // canonicalize, so dots below an existing component dissolve here).
+    for keep in (0..=components.len()).rev() {
+        let prefix: PathBuf = components[..keep].iter().collect();
+        if let Ok(canonical) = prefix.canonicalize() {
+            // Re-append the skipped tail lexically: `.` drops, `..` pops
+            // the last re-appended component (the tail sits below the
+            // canonical anchor, and `PathBuf::pop` cannot go past `/`).
+            let mut identity = canonical;
+            for component in &components[keep..] {
+                match component {
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        identity.pop();
+                    }
+                    other => identity.push(other.as_os_str()),
+                }
+            }
+            return Some(identity);
+        }
+    }
+    None
+}
+
+/// [`anchored_fs_identity`] with the nothing-exists fallback (impl-gate
+/// r2 P1): the absolutized input, unchanged — a pure-string identity for
+/// paths that touch no disk, so prefix comparisons degrade to today's
+/// raw behavior instead of panicking or inventing components.
+fn fs_identity(p: &Path) -> PathBuf {
+    anchored_fs_identity(p).unwrap_or_else(|| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(p)
+        }
+    })
+}
+
 /// plans/flare-models.md §3.3d pre-flight, PURE over the on-disk registry (the caller reads it
 /// with `registry::read_registry` — reads take no lock) plus targeted
 /// on-disk existence/size facts. Run BEFORE enqueue; any conflict is a
@@ -456,9 +509,12 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
 /// not).
 ///
 /// Every destination comparison goes through `requested_destination` —
-/// the registration-identical builder (absolutize + canonicalize) — so a
-/// RELATIVE `--output` base can never bypass the guards (impl-gate P1:
-/// registry rows are absolute, a raw relative prefix would miss them).
+/// the registration-identical builder (absolutize + canonicalize) — and
+/// then through `fs_identity`, because the builder absolutizes but does
+/// NOT normalize `..`/symlink components in the path it RETURNS: a base
+/// spelled `--output ../work/models` must still match the recorded
+/// absolute row for the same directory (impl-gate r1 P1 absolutize fix +
+/// r2 P1 identity fix).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flare_preflight(
     registry: &DownloadRegistry,
@@ -503,32 +559,34 @@ pub(crate) fn flare_preflight(
 
     // (ii) moved-branch guard, scoped to THIS run's revision directory —
     // the registration-identical prefix (a probe file under the revision
-    // dir; its parent is the dir itself).
+    // dir; its parent is the dir itself), compared by on-disk IDENTITY on
+    // BOTH sides (`fs_identity` on the probe-derived dir and on each
+    // `local_path`): the raw strings would miss whenever the base is
+    // spelled through `..`/symlinks (impl-gate r2 P1).
     // On-disk existence is what makes the recovery honest: deleting the
     // directory clears the guard (stale registry entries for vanished
-    // files are ignored). A row recorded by the CURRENT pin under the
-    // same directory SUPERSEDES older rows (impl-gate P2: after A →
-    // delete-dir → B, B's own rows own the directory; A's remnant row
-    // must not block B's re-runs).
+    // files are ignored). Directory ownership is LAST-ROW-WINS: the LAST
+    // registry row recorded under the dir owns it (`registry.downloads`
+    // is an append-only Vec, so position = registration recency), and the
+    // current pin supersedes only when THAT row's revision matches — a
+    // HISTORICAL row for the current commit cannot legitimize
+    // re-downloading over a NEWER owner's bytes (impl-gate r2 P1: after
+    // C → delete-dir → B, re-running at C must error even though C's old
+    // row is still on file). The Vec append order is the only ownership
+    // evidence available without hashing 100 GB of files.
     let dir_prefix = requested_destination(base, model_id, &format!("{revision_dir}/_"))
-        .and_then(|probe| probe.parent().map(|dir| dir.to_path_buf()));
+        .and_then(|probe| probe.parent().map(fs_identity));
     if let Some(dir) = dir_prefix {
-        let dir_str = dir.to_string_lossy().replace('\\', "/");
-        let current_pin_owns_dir = registry.downloads.iter().any(|entry| {
+        let owner = registry.downloads.iter().rev().find(|entry| {
             entry.model_id == model_id
-                && entry.revision.as_deref() == Some(pin)
-                && entry
-                    .local_path
-                    .replace('\\', "/")
-                    .starts_with(&format!("{dir_str}/"))
+                && fs_identity(Path::new(&entry.local_path)).starts_with(&dir)
         });
-        if !current_pin_owns_dir {
+        if !owner.is_some_and(|entry| entry.revision.as_deref() == Some(pin)) {
             for entry in &registry.downloads {
                 if entry.model_id != model_id {
                     continue;
                 }
-                let local = entry.local_path.replace('\\', "/");
-                if !local.starts_with(&format!("{dir_str}/")) {
+                if !fs_identity(Path::new(&entry.local_path)).starts_with(&dir) {
                     continue;
                 }
                 if entry.revision.as_deref() == Some(pin) {
@@ -547,7 +605,14 @@ pub(crate) fn flare_preflight(
     }
 
     // (iii) single-destination-per-package: one URL must mean one
-    // recorded destination.
+    // recorded destination. `path_matches` first (raw string equality,
+    // or both files existing and canonically equal); when that misses,
+    // compare the on-disk IDENTITIES of both sides — `fs_identity`
+    // anchors each path at its nearest existing ancestor, so a
+    // `..`/symlink-spelled base whose FILE does not yet exist (full
+    // canonicalize fails) still proves same-destination instead of
+    // raising a false conflict. When either side touches NOTHING on
+    // disk (no identity to compare), the raw comparison above decides.
     for (file, requested) in files.iter().zip(&destinations) {
         let url = crate::api::resolve_url(
             model_id,
@@ -557,12 +622,18 @@ pub(crate) fn flare_preflight(
         let Some(requested) = requested else {
             continue;
         };
+        let requested_identity = anchored_fs_identity(requested);
         for entry in &registry.downloads {
             if entry.url != url {
                 continue;
             }
             if crate::registry::path_matches(&entry.local_path, requested) {
                 continue; // the same destination — idempotent re-run
+            }
+            if let Some(recorded_identity) = anchored_fs_identity(Path::new(&entry.local_path)) {
+                if Some(&recorded_identity) == requested_identity.as_ref() {
+                    continue; // same destination on disk, differently spelled
+                }
             }
             return Err(FlarePreflightError::DestinationConflict {
                 url,

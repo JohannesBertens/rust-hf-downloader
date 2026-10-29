@@ -365,11 +365,14 @@ pub fn render_flare_revision_popup(
 
     // Render a window that FOLLOWS the cursor (impl-gate fix: the old
     // `.take(8)` froze the list while the cursor kept advancing — Enter
-    // could download an invisible selection).
+    // could download an invisible selection). Rows are positioned by
+    // WINDOW-RELATIVE index (impl-gate r2 fix: the old absolute-index
+    // y offset shifted every row down by `visible_from`, so the tail
+    // row landed ON the overflow note line and was clobbered).
     let visible_from = cursor.saturating_sub(7);
     let visible_to = (visible_from + 8).min(choices.len());
-    for (idx, choice) in choices[visible_from..visible_to].iter().enumerate() {
-        let idx = idx + visible_from;
+    for (win, choice) in choices[visible_from..visible_to].iter().enumerate() {
+        let idx = win + visible_from;
         let selected = idx == cursor;
         let star = match platform {
             Some(platform)
@@ -425,13 +428,15 @@ pub fn render_flare_revision_popup(
         ]);
         let row_area = Rect {
             x: popup_area.x + 2,
-            y: popup_area.y + 3 + idx as u16,
+            y: popup_area.y + 3 + win as u16,
             width: popup_area.width.saturating_sub(4),
             height: 1,
         };
         frame.render_widget(Paragraph::new(row), row_area);
     }
 
+    // The overflow note sits BELOW the 8 rendered rows (rows occupy
+    // popup y+3..y+10, the note y+11) — never overlapping a row.
     if choices.len() > 8 {
         let more_area = Rect {
             x: popup_area.x + 2,
