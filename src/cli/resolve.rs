@@ -565,19 +565,23 @@ pub(crate) fn flare_preflight(
     // spelled through `..`/symlinks (impl-gate r2 P1).
     // On-disk existence is what makes the recovery honest: deleting the
     // directory clears the guard (stale registry entries for vanished
-    // files are ignored). A row recorded by the CURRENT pin under the
-    // same directory SUPERSEDES older rows (impl-gate P2: after A →
-    // delete-dir → B, B's own rows own the directory; A's remnant row
-    // must not block B's re-runs).
+    // files are ignored). Directory ownership is LAST-ROW-WINS: the LAST
+    // registry row recorded under the dir owns it (`registry.downloads`
+    // is an append-only Vec, so position = registration recency), and the
+    // current pin supersedes only when THAT row's revision matches — a
+    // HISTORICAL row for the current commit cannot legitimize
+    // re-downloading over a NEWER owner's bytes (impl-gate r2 P1: after
+    // C → delete-dir → B, re-running at C must error even though C's old
+    // row is still on file). The Vec append order is the only ownership
+    // evidence available without hashing 100 GB of files.
     let dir_prefix = requested_destination(base, model_id, &format!("{revision_dir}/_"))
         .and_then(|probe| probe.parent().map(fs_identity));
     if let Some(dir) = dir_prefix {
-        let current_pin_owns_dir = registry.downloads.iter().any(|entry| {
+        let owner = registry.downloads.iter().rev().find(|entry| {
             entry.model_id == model_id
-                && entry.revision.as_deref() == Some(pin)
                 && fs_identity(Path::new(&entry.local_path)).starts_with(&dir)
         });
-        if !current_pin_owns_dir {
+        if !owner.is_some_and(|entry| entry.revision.as_deref() == Some(pin)) {
             for entry in &registry.downloads {
                 if entry.model_id != model_id {
                     continue;

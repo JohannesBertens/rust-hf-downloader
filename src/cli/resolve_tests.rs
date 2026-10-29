@@ -1089,7 +1089,12 @@ fn preflight_dotted_base_same_destination_is_not_a_false_conflict() {
 
 /// Impl-gate P2 regression: after A → delete-directory → B, the directory
 /// belongs to B (B's rows exist under it); A's remnant row must not block
-/// B's re-runs (the current pin SUPERSEDES older rows in the same dir).
+/// B's re-runs. Ordering is load-bearing (impl-gate r2: ownership is
+/// LAST-ROW-WINS over the append-only Vec): A's row is FIRST, B's row is
+/// SECOND — the last row under the dir is B's, B == the current pin, so
+/// the run passes. (The mirror trace — C's row first, B's row second,
+/// rerun at C — is the abuse the last-row-wins rule must REJECT; see
+/// `preflight_historical_current_pin_row_cannot_supersede_newer_owner`.)
 #[test]
 fn preflight_superseded_row_does_not_block_current_pin_rerun() {
     let root = guard_root("supersede");
@@ -1100,8 +1105,8 @@ fn preflight_superseded_row_does_not_block_current_pin_rerun() {
     std::fs::write(model_root.join("gb202").join("pkg.safetensors"), b"x").unwrap();
     let registry = DownloadRegistry {
         downloads: vec![
-            // …while A's remnant row (different commit, vanished-then-
-            // recreated path) is still recorded at the same destination.
+            // …A's remnant row (different commit, FIRST — the older
+            // registration), still recorded at the same destination.
             recorded(
                 "a/b",
                 "gb202/pkg.safetensors",
@@ -1114,6 +1119,7 @@ fn preflight_superseded_row_does_not_block_current_pin_rerun() {
                 Some(&sha(1)),
                 DownloadStatus::Complete,
             ),
+            // B's row, SECOND — the LAST row under the dir ⇒ the owner.
             recorded(
                 "a/b",
                 "gb202/pkg.safetensors",
@@ -1142,7 +1148,78 @@ fn preflight_superseded_row_does_not_block_current_pin_rerun() {
     );
     assert!(
         outcome.is_ok(),
-        "current-pin rows supersede older rows: {outcome:?}"
+        "the LAST row under the dir (B) owns it; A's older row must not \
+         block a B re-run: {outcome:?}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r2 P1 regression (codex's abuse trace): C → delete-dir →
+/// B → rerun-C. C's HISTORICAL row is still on file (registered FIRST),
+/// but B's row is the LAST registration under the dir — under
+/// LAST-ROW-WINS ownership B owns the directory, so re-running at C
+/// must ERROR (moved branch) instead of silently re-downloading C's
+/// bytes over B's. The old ANY-current-pin-row predicate let C's stale
+/// row legitimize exactly that overwrite.
+#[test]
+fn preflight_historical_current_pin_row_cannot_supersede_newer_owner() {
+    let root = guard_root("lww");
+    let model_root = root.join("a/b");
+    // B's bytes are on disk (recreated after the delete).
+    std::fs::create_dir_all(model_root.join("gb202")).unwrap();
+    std::fs::write(model_root.join("gb202").join("pkg.safetensors"), b"x").unwrap();
+    let local = model_root.join("gb202").join("pkg.safetensors");
+    let registry = DownloadRegistry {
+        downloads: vec![
+            // C's historical row, FIRST — matches the CURRENT pin but is
+            // NOT the newest registration under the dir.
+            recorded(
+                "a/b",
+                "gb202/pkg.safetensors",
+                Some("pkg.safetensors"),
+                &sha(3),
+                &local.to_string_lossy(),
+                Some(&sha(3)),
+                DownloadStatus::Complete,
+            ),
+            // B's row, SECOND — the LAST row under the dir ⇒ the owner.
+            recorded(
+                "a/b",
+                "gb202/pkg.safetensors",
+                Some("pkg.safetensors"),
+                &sha(2),
+                &local.to_string_lossy(),
+                Some(&sha(2)),
+                DownloadStatus::Complete,
+            ),
+        ],
+    };
+    // Re-run at C: C's own row exists, but B owns the directory — error.
+    match flare_preflight(
+        &registry,
+        &root.to_string_lossy(),
+        "a/b",
+        "gb202",
+        &sha(3),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    ) {
+        Err(FlarePreflightError::MovedBranch {
+            recorded_commit,
+            pin,
+            ..
+        }) => {
+            // The error names B — the OWNER — not C's own stale row.
+            assert_eq!(recorded_commit.as_deref(), Some(sha(2).as_str()));
+            assert_eq!(pin, sha(3));
+        }
+        other => panic!(
+            "a historical row for the current pin must not supersede the \
+             newer owner's bytes: {other:?}"
+        ),
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
