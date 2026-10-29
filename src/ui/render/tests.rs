@@ -283,3 +283,98 @@ fn flare_badge_rule_matches_the_three_real_tag_vectors() {
         "flare-runtime-package"
     ])));
 }
+
+// ---------------------------------------------------------------------
+// plans/flare-models.md §3.5 — revision-picker window follows the cursor
+// ---------------------------------------------------------------------
+
+/// Nine revisions (`rev-0`..=`rev-8`), cursor at the LAST row: the list
+/// window follows the cursor — the first row scrolls OUT, the tail rows
+/// stay on screen (impl-gate P2: the old `.take(8)` froze the window at
+/// rows 0..=7 while the cursor kept advancing, so Enter could pick an
+/// invisible row).
+///
+/// DEVIATION PIN (impl-gate round 2): the specified assertion — “row
+/// index 8 IS visible/highlighted” — FAILS against the current renderer.
+/// `render_flare_revision_popup` positions each row at
+/// `popup.y + 3 + ABSOLUTE idx` (src/ui/render/popups.rs), so a scrolled
+/// window (`visible_from == 1`) shifts every row DOWN by one: the first
+/// list slot renders EMPTY and the last visible row — the CURSOR row,
+/// idx 8 — lands on the same line as the `... and 1 more` overflow note,
+/// which renders after the rows and clobbers the `>> rev-8` prefix
+/// (leaving `... and 1 more] @00000008  1000 B`). The assertions below
+/// pin what renders TODAY — the window DID scroll past `rev-0` (the core
+/// windowing behavior) but the cursor row is left unhighlighted and
+/// partially overwritten. When the renderer positions rows
+/// window-relative (`popup.y + 3 + (idx - visible_from)`), flip this
+/// test to the specified form: `>> rev-8` visible, `rev-1`..=`rev-8`
+/// on screen, `rev-0` absent, the overflow note on its own line.
+#[test]
+fn flare_popup_window_follows_cursor_at_the_tail() {
+    use crate::models::{FlareRevisionChoice, RefKind};
+
+    // Distinctive revision names AND distinct 8-hex commit prefixes —
+    // row identity survives partial overwrites (the clobber below eats
+    // the row's head, not its `@<commit>` tail).
+    let choices: Vec<FlareRevisionChoice> = (0..9)
+        .map(|i| FlareRevisionChoice {
+            revision: format!("rev-{i}"),
+            aliases: Vec::new(),
+            kind: RefKind::Branch,
+            target_commit: format!("{i:08x}{:032x}", 0),
+            package_name: format!("pkg-{i}.safetensors"),
+            size: 1_000,
+            files: 1,
+            arch: None,
+        })
+        .collect();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| render_flare_revision_popup(frame, "org/model", &choices, 8, None))
+        .expect("failed to draw flare revision popup");
+
+    let buf = terminal.backend().buffer();
+    let rows: Vec<String> = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect();
+    let screen = rows.join("\n");
+
+    // The window scrolled: the FIRST choice is NOT on screen...
+    assert!(
+        !screen.contains("rev-0"),
+        "row 0 must scroll out when the cursor is at index 8; screen:\n{screen}"
+    );
+    // ...while the window body rows 1..=7 render fully.
+    for i in 1..8 {
+        assert!(
+            screen.contains(&format!("rev-{i} [branch]")),
+            "row {i} must be visible; screen:\n{screen}"
+        );
+    }
+
+    // The cursor row (idx 8) IS in the draw list but is positioned on
+    // the overflow line: its `>> rev-8` head is clobbered by
+    // `... and 1 more`, leaving only the row's `@<commit> <size>` tail
+    // merged into that line (the deviation pin — see the doc comment).
+    let overflow = rows
+        .iter()
+        .find(|row| row.contains("and 1 more"))
+        .expect("overflow note must render when 9 rows exceed the 8-row window");
+    assert!(
+        overflow.contains("@00000008"),
+        "cursor row 8's remnant renders on the overflow line (clobber pin); \
+         line: {overflow:?}"
+    );
+    // The `>> ` highlight marker is destroyed by that clobber — today
+    // NO row shows the cursor. (With the window-relative fix this flips
+    // to: the `and 1 more` line carries no row tail, and a line starting
+    // `>> rev-8` exists.)
+    assert!(
+        !screen.contains(">> "),
+        "the cursor marker is clobbered by the overflow note; screen:\n{screen}"
+    );
+}
