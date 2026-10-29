@@ -146,6 +146,7 @@ fn snapshot_resume_popup() {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         },
         DownloadMetadata {
             model_id: "Qwen/Qwen2.5-7B".to_string(),
@@ -159,6 +160,7 @@ fn snapshot_resume_popup() {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         },
     ];
     let mut terminal = test_terminal();

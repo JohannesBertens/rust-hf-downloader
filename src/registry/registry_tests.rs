@@ -477,6 +477,7 @@ fn golden_upsert_metadata_updates_and_appends_pins_bytes() {
         status: DownloadStatus::Incomplete,
         expected_sha256: None,
         revision: None,
+        remote_path: None,
     };
     upsert_metadata(refresh);
 
@@ -511,6 +512,7 @@ fn golden_upsert_metadata_updates_and_appends_pins_bytes() {
         status: DownloadStatus::Incomplete,
         expected_sha256: Some("ff00".to_string()),
         revision: Some("nightly".to_string()),
+        remote_path: None,
     };
     upsert_metadata(fresh);
 
@@ -627,13 +629,15 @@ fn golden_register_pending_appends_only_missing_urls_and_pins_bytes() {
         &[
             // url already recorded (fixture entry 2) -> skipped, even though
             // the sizes/hashes differ; the site never updates existing urls.
-            ("incomplete.bin".to_string(), 500, None),
+            ("incomplete.bin".to_string(), 500, None, None),
             // fresh url -> appended at the end; DEFAULT_REVISION -> no
-            // revision field.
+            // revision field. (4-tuple since plans/flare-models.md §3.3d:
+            // filename, size, sha256, remote_path.)
             (
                 "brand-new.gguf".to_string(),
                 64000,
                 Some("ff00".to_string()),
+                None,
             ),
         ],
         &tmp.to_string_lossy(),
@@ -676,9 +680,9 @@ fn register_pending_aborts_on_first_invalid_file_without_saving() {
         MODEL,
         crate::api::DEFAULT_REVISION,
         &[
-            ("brand-new.gguf".to_string(), 1, None), // valid — must NOT be saved
-            ("../evil".to_string(), 1, None),        // invalid — aborts here
-            ("CON".to_string(), 1, None),            // also invalid — never reached
+            ("brand-new.gguf".to_string(), 1, None, None), // valid — must NOT be saved
+            ("../evil".to_string(), 1, None, None),        // invalid — aborts here
+            ("CON".to_string(), 1, None, None),            // also invalid — never reached
         ],
         &tmp.to_string_lossy(),
     )

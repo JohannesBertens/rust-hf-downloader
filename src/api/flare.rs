@@ -221,7 +221,7 @@ fn is_data_shard_stem(stem: &str) -> bool {
 ///   neither a bare 64-hex hash nor a `*-data-NN-of-NN` shard.
 /// - Anything else yields `None` — the caller SKIPS such a revision
 ///   (a revision without a package is not an error, plans/flare-models.md §3.1).
-pub(crate) fn select_package(files: &[RepoFile]) -> Option<FlarePackage> {
+pub fn select_package(files: &[RepoFile]) -> Option<FlarePackage> {
     if let Some(primary) = files.iter().find(|f| f.rfilename == "model.safetensors") {
         let companions = files
             .iter()

@@ -1,5 +1,5 @@
 ---
-source: src/cli/tests.rs
+source: src/cli/help_snapshot_tests.rs
 expression: "long_help(|c| c.find_subcommand_mut(\"download\"))"
 ---
 One-shot model download (non-interactive, script/AI-friendly)
@@ -56,6 +56,18 @@ Options:
 
       --revision <REV>
           Git revision to download from: branch, tag, or commit SHA [default: main]
+
+      --for <PRESET>
+          Download a FLARE runtime package (semantic package selection; conflicts with --quant/--file/--all)
+
+      --gpus <SPEC>
+          GPU indices for FLARE platform detection, e.g. "0", "0,1", "0-3" (comma ints + N-M ranges; count = tensor-parallel size)
+
+      --include <GLOB>
+          Include only package files matching GLOB (repeatable, fnmatch semantics: `*` crosses `/`; filters WITHIN the preset's package set)
+
+      --exclude <GLOB>
+          Exclude package files matching GLOB (repeatable; applies after selection)
 
   -h, --help
           Print help (see a summary with '-h')

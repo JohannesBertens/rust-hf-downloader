@@ -34,6 +34,11 @@ pub(super) struct ChunkedDownloadParams<'a> {
     pub(super) filename: &'a str,
     pub(super) expected_sha256: &'a Option<String>,
     pub(super) hf_token: &'a Option<String>,
+    /// Repo-relative URL path when it differs from `filename` (FLARE
+    /// revision-scoped destinations, plans/flare-models.md §3.3d) —
+    /// persisted on the registry entry so interrupt/resume round-trips
+    /// BOTH the prefixed local path and the unprefixed URL.
+    pub(super) remote_path: &'a Option<String>,
 }
 
 fn calculate_chunk_size(file_size: u64) -> usize {
@@ -62,6 +67,7 @@ pub(super) async fn download_chunked(
         filename,
         expected_sha256,
         hf_token,
+        remote_path,
     } = params;
 
     let local_path_str = final_path.to_string_lossy().to_string();
@@ -87,6 +93,7 @@ pub(super) async fn download_chunked(
         } else {
             Some(revision.to_string())
         },
+        remote_path: remote_path.clone(),
     });
 
     // Calculate dynamic chunk size based on file size

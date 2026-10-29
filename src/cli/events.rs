@@ -138,6 +138,15 @@ pub enum Event {
         model: String,
         files: Vec<FileDto>,
         total_bytes: u64,
+        /// Display revision name (branch/tag — the FLARE preset sets it,
+        /// plans/flare-models.md §3.3f). Absent for existing commands.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
+        /// The 40-hex commit pin the run downloads at (trees, URLs, and
+        /// the registry all use THIS — plans/flare-models.md §3.3b). Absent for existing
+        /// commands.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commit: Option<String>,
     },
     DownloadStart {
         filename: String,

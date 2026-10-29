@@ -72,6 +72,8 @@ use tokio::sync::{mpsc, Mutex};
 pub struct QueuedDownload {
     pub model_id: String,
     pub revision: String,
+    /// Local destination path relative to `base_path` — may carry a FLARE
+    /// revision-dir prefix (plans/flare-models.md §3.3d).
     pub filename: String,
     /// Model root directory (base/author/model); the filename's subpath is
     /// appended during download.
@@ -82,6 +84,11 @@ pub struct QueuedDownload {
     pub hf_token: Option<String>,
     /// Total file size in bytes, for queue accounting and progress.
     pub total_size: u64,
+    /// Repo-relative path the request URL uses when it differs from
+    /// `filename` (FLARE revision-scoped destinations,
+    /// plans/flare-models.md §3.3d). `None` ⇒ the URL uses `filename`,
+    /// byte-identical to the pre-FLARE behavior at every site.
+    pub remote_path: Option<String>,
 }
 
 /// Type alias for download receiver to reduce complexity
@@ -360,6 +367,7 @@ mod tests {
                 expected_sha256: None,
                 hf_token: None,
                 total_size: 1,
+                remote_path: None,
             })
             .unwrap();
         let msg = { state.download_rx.lock().await.recv().await };

@@ -338,6 +338,16 @@ impl Reporter {
             self.line_stdout(&format!("Destination: {}", path));
         }
     }
+
+    /// Human-mode serve-command handoff after the destination line
+    /// (plans/flare-models.md §3.3f): suppressed in --quiet, and never
+    /// emitted in --json — the NDJSON schema stays additive-only, the
+    /// handoff is a human convenience line.
+    pub fn handoff_line(&mut self, line: &str) {
+        if !self.json && !self.quiet {
+            self.line_stdout(line);
+        }
+    }
 }
 
 /// Single-file progress line content (no `\r`/erase wrapper — the tty
