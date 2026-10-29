@@ -1475,3 +1475,126 @@ fn preflight_missing_dotdot_then_symlink_base_still_hits_moved_branch() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Impl-gate r4 P1 regression (codex's symlink-PARENT trace): a base
+/// spelled `<root>/missing/../alias/..` — where `missing` does NOT
+/// exist and `alias` is an EXISTING symlink to `<root>/dirA/nest` (one
+/// level BELOW the collision dir, so the base's trailing `..` lands ON
+/// dirA itself, not back at root) — must NOT bypass the moved-branch
+/// guard. The r3 fixpoint still lost the symlink: its lexical pass
+/// popped `alias` BEFORE any re-anchor pass could resolve it (anchor
+/// at `<root>` → drop `missing/..` → drop `alias/..` → identity
+/// `<root>/a/b/gb202`), so guard (ii) compared the WRONG directory
+/// and the rerun could reach A's files. The r4 resolve-at-hop walk
+/// resolves `alias` → `<root>/dirA/nest` AT the hop, the following
+/// `..` pops the RESOLVED parent `<root>/dirA`, and the identity is
+/// the canonical dirA dir — the guard fires. Guard (i) cannot stat
+/// the dotted spelling (`missing` is absent) and the sizes are equal,
+/// so only guard (ii)'s identity comparison can catch the collision.
+#[cfg(unix)]
+#[test]
+fn preflight_missing_dotdot_symlink_parent_still_hits_moved_branch() {
+    let root = guard_root("symparent");
+    // dirA holds A's bytes under the revision dir; `alias` → dirA/nest
+    // is an EXISTING symlink; NOTHING named `missing` is created.
+    let dir_a = root.join("dirA");
+    let file = dir_a.join("a/b/gb202/pkg.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(dir_a.join("nest")).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    std::os::unix::fs::symlink(dir_a.join("nest"), root.join("alias")).unwrap();
+    // The recorded row uses the CANONICAL path (dirA/…) — what a real
+    // earlier run at commit sha(1) would have registered.
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &file.to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    // The rerun at commit sha(2) spells the base through
+    // `missing/../alias/..`: different commit ⇒ a fresh URL (guard
+    // (iii) cannot fire) and equal on-disk size — only guard (ii)'s
+    // identity comparison separates the runs.
+    let base = format!("{}/missing/../alias/..", root.display());
+    let outcome = flare_preflight(
+        &registry,
+        &base,
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::MovedBranch { .. })),
+        "a base spelled through `missing/../alias/..` (a symlink parent \
+         lexically popped before resolution) must not bypass the \
+         moved-branch guard: {outcome:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r4 chain companion: TWO symlinks traversed in sequence
+/// with the `..` AFTER them — `alias2` → `<root>/holder` and
+/// `holder/alias1` → `<root>/dirA/nest` — so the base
+/// `<root>/alias2/alias1/..` resolves BOTH at their hops and the `..`
+/// pops the RESOLVED parent `<root>/dirA`: the base still carries the
+/// resolved dirA identity and the moved-branch guard fires against
+/// the row recorded at the canonical dirA path (different commit,
+/// equal size — only guard (ii) can separate the runs).
+#[cfg(unix)]
+#[test]
+fn preflight_symlink_chain_then_dotdot_still_hits_moved_branch() {
+    let root = guard_root("symchain");
+    // dirA holds A's bytes under the revision dir; `alias1` lives
+    // inside `holder` and points at dirA/nest; `alias2` points at
+    // holder — `alias2/alias1/..` therefore lands ON dirA.
+    let dir_a = root.join("dirA");
+    let holder = root.join("holder");
+    let file = dir_a.join("a/b/gb202/pkg.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(dir_a.join("nest")).unwrap();
+    std::fs::create_dir_all(&holder).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    std::os::unix::fs::symlink(dir_a.join("nest"), holder.join("alias1")).unwrap();
+    std::os::unix::fs::symlink(&holder, root.join("alias2")).unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &file.to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    let base = format!("{}/alias2/alias1/..", root.display());
+    let outcome = flare_preflight(
+        &registry,
+        &base,
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::MovedBranch { .. })),
+        "a base spelled through a two-symlink chain followed by `..` \
+         must resolve both hops and carry the resolved dirA identity: \
+         {outcome:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
