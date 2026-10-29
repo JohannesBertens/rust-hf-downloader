@@ -226,7 +226,16 @@ pub fn select_package(files: &[RepoFile]) -> Option<FlarePackage> {
         let companions = files
             .iter()
             .filter(|f| {
-                f.rfilename.starts_with("weights/") || f.rfilename.starts_with("deployments/")
+                // weights/** + deployments/** are the payload companions;
+                // the two root metadata files ride the package too (plain
+                // git blobs, no LFS oid) so the served directory form is
+                // complete — the CLI's tree-union and the TUI's package
+                // files share ONE source here (plans/flare-models.md §3.3c
+                // directory-form set).
+                f.rfilename.starts_with("weights/")
+                    || f.rfilename.starts_with("deployments/")
+                    || f.rfilename == "config.json"
+                    || f.rfilename == "publisher.json"
             })
             .cloned()
             .collect();

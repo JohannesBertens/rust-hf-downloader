@@ -517,9 +517,14 @@ fn flare_selects_directory_package_with_weights_and_deployment_companions() {
             assert_eq!(primary.rfilename, "model.safetensors");
             assert_eq!(primary.size, Some(22922000));
             let names: Vec<&str> = companions.iter().map(|c| c.rfilename.as_str()).collect();
+            // The root metadata files ride the package since the shared-set
+            // change (plans/flare-models.md §3.3c): config.json +
+            // publisher.json precede the payload companions in tree order.
             assert_eq!(
                 names,
                 [
+                    "config.json",
+                    "publisher.json",
                     "weights/engram-0-weights.safetensors",
                     "weights/layer-000.safetensors",
                     "weights/misc.safetensors",

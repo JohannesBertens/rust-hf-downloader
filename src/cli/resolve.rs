@@ -269,9 +269,15 @@ pub(super) fn flare_package_set(
         } => {
             let mut out = vec![flare_file(primary)];
             out.extend(companions.iter().map(flare_file));
-            // Root metadata files (plain git blobs — no LFS oid): they ride
-            // the package so the served form is complete.
+            // Root metadata files (plain git blobs — no LFS oid) ride the
+            // package so the served form is complete. The wave-1 assembly
+            // already carries them in `companions` when the revision tree
+            // has them; this tree-union stays for trees the assembly did
+            // not enrich and is idempotent (presence-guarded).
             for name in ["config.json", "publisher.json"] {
+                if out.iter().any(|f: &FlareFile| f.relpath == name) {
+                    continue;
+                }
                 if let Some(found) = tree.iter().find(|f| f.rfilename == name) {
                     out.push(flare_file(found));
                 }
@@ -370,7 +376,7 @@ use crate::models::DownloadRegistry;
 use std::path::{Path, PathBuf};
 
 /// One file of the FLARE run, as the guards see it.
-pub(super) struct FlarePreflightFile {
+pub(crate) struct FlarePreflightFile {
     /// LOCAL (revision-dir-prefixed) filename — the disk truth.
     pub filename: String,
     /// Repo-relative remote path — the URL truth.
@@ -382,7 +388,7 @@ pub(super) struct FlarePreflightFile {
 /// A plans/flare-models.md §3.3d pre-flight conflict. The `Display` strings are the human/NDJSON
 /// error messages, recovery hints included.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum FlarePreflightError {
+pub(crate) enum FlarePreflightError {
     /// (i) On-disk size ≠ expected tree size.
     SizeMismatch {
         relpath: String,
@@ -464,7 +470,7 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
 /// carve-out: deleting the ENTRY clears it, deleting the DIRECTORY does
 /// not).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn flare_preflight(
+pub(crate) fn flare_preflight(
     registry: &DownloadRegistry,
     base: &str,
     model_id: &str,

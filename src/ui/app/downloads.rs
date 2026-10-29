@@ -624,6 +624,34 @@ impl App {
         let model_root = model_root(&base_path, model_id);
         let files = crate::ui::render::flare_package_files(&revision.package);
 
+        // plans/flare-models.md §3.3d/§3.5 pre-flight, shared with the CLI
+        // resolve layer: size parity, moved-branch, and
+        // single-destination-per-package guards over a lock-free registry
+        // read + on-disk facts — BEFORE any enqueue.
+        let preflight_files: Vec<crate::cli::FlarePreflightFile> = files
+            .iter()
+            .map(|file| crate::cli::FlarePreflightFile {
+                filename: format!("{}/{}", revision.revision, file.rfilename),
+                remote_path: Some(file.rfilename.clone()),
+                expected_size: file.size.unwrap_or(0),
+            })
+            .collect();
+        if let Err(conflict) = crate::cli::flare_preflight(
+            &crate::registry::read_registry(),
+            &base_path,
+            model_id,
+            &model_root,
+            &revision.revision,
+            &revision.target_commit,
+            &preflight_files,
+        ) {
+            *self.error.write() = Some(format!("FLARE download blocked: {conflict}"));
+            *self.status.write() =
+                "FLARE pre-flight rejected the run — resolve the conflict or pin another revision"
+                    .to_string();
+            return;
+        }
+
         let queued: Vec<QueuedDownload> = files
             .iter()
             .map(|file| {
