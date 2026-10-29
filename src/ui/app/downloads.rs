@@ -347,10 +347,6 @@ impl App {
                     .parent()
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from(&default_dir));
-                let fallback = PathBuf::from(&metadata.local_path)
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from(&default_dir));
                 model_root_or(&default_dir, &metadata.model_id, fallback)
             };
             queued.push(QueuedDownload {
@@ -635,15 +631,13 @@ impl App {
                 QueuedDownload {
                     model_id: model_id.to_string(),
                     revision: revision.target_commit.clone(),
-                    // TODO(flare/cli-merge): set remote_path =
-                    // Some(file.rfilename.clone()) here once Lane C's field
-                    // lands on QueuedDownload (plans/flare-models.md §3.3d). Until then the
-                    // enqueue's URL build embeds the revision-dir prefix
-                    // (…/resolve/<sha>/<rev>/<relpath>) — known pre-merge
-                    // skew the merge owner fixes by carrying `remote_path`
-                    // through FileSpec/QueuedDownload/DownloadMetadata so
-                    // the URL uses the UNPREFIXED repo-relpath while the
-                    // disk path keeps the prefix.
+                    // The plans/flare-models.md §3.3d split: `filename` carries the
+                    // revision-dir-prefixed LOCAL destination; `remote_path`
+                    // carries the UNPREFIXED repo relpath so every URL
+                    // build (enqueue policy, engine, registry) requests
+                    // `/resolve/<commit>/<relpath>` while the disk path
+                    // keeps the prefix (plans/flare-models.md §3.3d).
+                    remote_path: Some(file.rfilename.clone()),
                     filename,
                     base_path: model_root.clone(),
                     expected_sha256: file.lfs.as_ref().map(|lfs| lfs.oid.clone()),
@@ -720,25 +714,13 @@ fn model_root_or(base: &str, model_id: &str, fallback: PathBuf) -> PathBuf {
     }
 }
 
-/// plans/flare-models.md §3.3d TUI resume shape test: does this
-/// registry entry carry a
-/// revision-dir-prefixed FLARE destination (the form
-/// [`App::trigger_flare_download`] records)?
-///
-/// TODO(flare/cli-merge): replace the body with
-/// `metadata.remote_path.is_some()` once Lane C's field lands on
-/// `DownloadMetadata` (plans/flare-models.md §3.3d). Pre-merge marker:
-/// a directory-bearing
-/// filename PLUS a recorded 40-hex commit revision — a pair no legacy TUI
-/// flow produces (both record revision `None` at main). The one collision
-/// (a CLI `--revision <sha>` run on a nested file) also derives the
-/// CORRECT resume base under the recorded-root rule, so the marker is
-/// safe until the real field lands.
+/// plans/flare-models.md §3.3d TUI resume shape test: does this registry
+/// entry carry a revision-scoped FLARE destination (the form
+/// [`App::trigger_flare_download`] records)? The persisted
+/// `remote_path` field is the marker — every FLARE frontend (CLI and TUI)
+/// sets it at enqueue, and no legacy flow does.
 fn is_flare_shaped_entry(metadata: &DownloadMetadata) -> bool {
-    fn is_commit_sha(s: &str) -> bool {
-        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
-    }
-    metadata.filename.contains('/') && metadata.revision.as_deref().is_some_and(is_commit_sha)
+    metadata.remote_path.is_some()
 }
 
 /// plans/flare-models.md §3.3d: derive the resume base from the
@@ -1671,14 +1653,16 @@ mod tests {
             PathBuf::from(&registry.downloads[0].local_path),
             root.join("gb202").join("pkg.safetensors")
         );
-        // TODO(flare/cli-merge): once Lane C's remote_path lands on
-        // QueuedDownload/DownloadMetadata (plans/flare-models.md §3.3d), this
-        // URL must become
-        // resolve_url("author/model", "pkg.safetensors", FLARE_COMMIT) —
-        // the UNPREFIXED repo-relpath. Pre-merge the prefix rides the URL.
+        // The plans/flare-models.md §3.3d split rides the transport: the recorded URL is the
+        // UNPREFIXED repo-relpath at the commit pin — the disk path keeps
+        // the `gb202/` prefix, the request URL does not.
         assert_eq!(
             registry.downloads[0].url,
-            crate::api::resolve_url("author/model", "gb202/pkg.safetensors", FLARE_COMMIT)
+            crate::api::resolve_url("author/model", "pkg.safetensors", FLARE_COMMIT)
+        );
+        assert_eq!(
+            registry.downloads[0].remote_path.as_deref(),
+            Some("pkg.safetensors")
         );
         drop(registry);
 
@@ -1891,6 +1875,7 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: Some("lfs-sha".to_string()),
             revision: Some(FLARE_COMMIT.to_string()),
+            remote_path: Some("pkg.safetensors".to_string()),
         }];
 
         app.resume_incomplete_downloads().await;
@@ -1941,6 +1926,7 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: Some(FLARE_COMMIT.to_string()),
+            remote_path: Some("pkg.safetensors".to_string()),
         }];
 
         app.resume_incomplete_downloads().await;
@@ -1996,6 +1982,7 @@ mod tests {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: Some(FLARE_COMMIT.to_string()),
+            remote_path: Some("pkg.safetensors".to_string()),
         }];
 
         app.resume_incomplete_downloads().await;
@@ -2014,47 +2001,64 @@ mod tests {
     }
 
     /// The plans/flare-models.md §3.5 shape-test unit pins (offline, no
-    /// App): the pre-merge
-    /// FLARE-shape marker and the recorded-root derivation, including the
-    /// boundary cases the flow tests above cannot reach cheaply.
+    /// App): the persisted-`remote_path` FLARE marker and the
+    /// recorded-root derivation, including the boundary cases the flow
+    /// tests above cannot reach cheaply.
     #[test]
     fn flare_shape_test_and_recorded_root_boundaries() {
-        let entry = |filename: &str, revision: Option<&str>| crate::models::DownloadMetadata {
-            model_id: "author/model".to_string(),
-            filename: filename.to_string(),
-            url: "https://example.invalid/a".to_string(),
-            local_path: String::new(),
-            total_size: 0,
-            downloaded_size: 0,
-            status: DownloadStatus::Incomplete,
-            expected_sha256: None,
-            revision: revision.map(str::to_string),
+        let entry = |filename: &str, revision: Option<&str>, remote_path: Option<&str>| {
+            crate::models::DownloadMetadata {
+                model_id: "author/model".to_string(),
+                filename: filename.to_string(),
+                url: "https://example.invalid/a".to_string(),
+                local_path: String::new(),
+                total_size: 0,
+                downloaded_size: 0,
+                status: DownloadStatus::Incomplete,
+                expected_sha256: None,
+                revision: revision.map(str::to_string),
+                remote_path: remote_path.map(str::to_string),
+            }
         };
 
-        // FLARE shape: directory-bearing filename + 40-hex commit.
+        // FLARE shape is the persisted remote_path — set by every FLARE
+        // frontend (CLI + TUI) at enqueue, by nothing else. Even a FLAT
+        // filename with the field is flare-shaped (the field, not the
+        // filename shape, is the marker).
         assert!(is_flare_shaped_entry(&entry(
             "gb202/pkg.safetensors",
-            Some(FLARE_COMMIT)
+            Some(FLARE_COMMIT),
+            Some("pkg.safetensors")
         )));
-        // Legacy flows (revision None at main, or a named revision on a
-        // flat/nested filename without a commit pin) stay legacy.
-        assert!(!is_flare_shaped_entry(&entry("f.gguf", None)));
-        assert!(!is_flare_shaped_entry(&entry("Q4_1/f.gguf", None)));
+        assert!(is_flare_shaped_entry(&entry(
+            "pkg.safetensors",
+            Some(FLARE_COMMIT),
+            Some("pkg.safetensors")
+        )));
+        // Legacy entries (no remote_path — flat or nested, any revision,
+        // even the old heuristic's prefixed-filename + 40-hex-commit pair)
+        // stay legacy.
+        assert!(!is_flare_shaped_entry(&entry("f.gguf", None, None)));
+        assert!(!is_flare_shaped_entry(&entry("Q4_1/f.gguf", None, None)));
         assert!(!is_flare_shaped_entry(&entry(
             "gb202/pkg.safetensors",
+            None,
             None
         )));
         assert!(!is_flare_shaped_entry(&entry(
             "gb202/pkg.safetensors",
-            Some("rev-x")
+            Some("rev-x"),
+            None
         )));
         assert!(!is_flare_shaped_entry(&entry(
             "gb202/pkg.safetensors",
-            Some("v2")
+            Some(FLARE_COMMIT),
+            None
         )));
         assert!(!is_flare_shaped_entry(&entry(
             "pkg.safetensors",
-            Some(FLARE_COMMIT)
+            Some(FLARE_COMMIT),
+            None
         )));
 
         // Recorded-root derivation over a live temp dir.
@@ -2063,7 +2067,11 @@ mod tests {
         let root = tmp.join("base").join("author").join("model");
         std::fs::create_dir_all(root.join("gb202")).unwrap();
 
-        let mut metadata = entry("gb202/pkg.safetensors", Some(FLARE_COMMIT));
+        let mut metadata = entry(
+            "gb202/pkg.safetensors",
+            Some(FLARE_COMMIT),
+            Some("pkg.safetensors"),
+        );
         metadata.local_path = root
             .join("gb202")
             .join("pkg.safetensors")
