@@ -102,6 +102,134 @@ pub struct QuantizationInfo {
     pub sha256: Option<String>,
 }
 
+// ---- FLARE DTOs (plan `plans/flare-models.md` §3.1) ----
+
+/// One entry of a `GET /api/models/{id}/refs` response (branch or tag).
+///
+/// `target_commit` is load-bearing: trees, download URLs and registry pins
+/// all key on it — the name is display-only. A missing (empty) or invalid
+/// `targetCommit` is NOT degradable: [`crate::api::assemble_flare_info_from`]
+/// drops that revision with a scan note (plan §3.1).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RefEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "targetCommit", default)]
+    pub target_commit: String,
+}
+
+/// Parsed `GET /api/models/{id}/refs` payload. The API also returns a `ref`
+/// field per entry and a top-level `converts` array; both are ignored by
+/// serde (unknown-fields default).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RepoRefs {
+    #[serde(default)]
+    pub branches: Vec<RefEntry>,
+    #[serde(default)]
+    pub tags: Vec<RefEntry>,
+}
+
+/// Which kind of refs entry a [`FlareRevision`] was canonically named from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    Branch,
+    Tag,
+}
+
+/// The payload package of one FLARE revision, per flare's `choose_file`
+/// rule (plan §3.1): either a single packed `.safetensors` file or a
+/// directory package (root `model.safetensors` primary + `weights/**` +
+/// `deployments/**` companions).
+// Wave-1 foundation (plans/flare-models.md §7): the field readers land with
+// wave-2 lanes C/D — drop the allow when the first merged reader lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub enum FlarePackage {
+    Packed {
+        file: RepoFile,
+    },
+    Directory {
+        primary: RepoFile,
+        companions: Vec<RepoFile>,
+    },
+}
+
+/// Display-only tokens parsed from a FLARE package filename
+/// ([`crate::api::parse_flare_package_tokens`]). Unknown tokens are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParsedPackageTokens {
+    /// `tp<N>` — tensor-parallel size.
+    pub tp: Option<u32>,
+    /// `c<N>` — max concurrency (matches the config's `max_concurrency`).
+    pub max_concurrency: Option<u32>,
+    /// `mtp<N>` — multi-token-prediction draft tokens.
+    pub mtp_draft_tokens: Option<u32>,
+    /// `i4` — quantisation variant marker.
+    pub quant_i4: bool,
+    /// `gb<token>` — target architecture token (e.g. `gb10`, `gb202`).
+    pub arch: Option<String>,
+    /// Free variant tokens (letters immediately followed by digits, e.g.
+    /// `yarn4`); everything else in the name is ignored.
+    pub variants: Vec<String>,
+}
+
+/// One payload-bearing FLARE revision (a branch other than `main`, or a
+/// tag), deduped by `target_commit`.
+// Wave-1 foundation (plans/flare-models.md §7): the field readers land with
+// wave-2 lanes C/D — drop the allow when the first merged reader lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct FlareRevision {
+    /// PREFERRED name: branch name, else tag (used for the directory
+    /// segment + display only — never for pinning).
+    pub revision: String,
+    /// Other names sharing `target_commit` (e.g. `["v3"]` when tag `v3`
+    /// points at branch `gb202`'s commit).
+    pub aliases: Vec<String>,
+    pub kind: RefKind,
+    /// 40-hex commit pin — trees, URLs and the registry all use THIS.
+    pub target_commit: String,
+    pub package: FlarePackage,
+    pub parsed: ParsedPackageTokens,
+}
+
+/// FLARE config facts from the repo's `config.json` at main — every field
+/// is optional and a malformed/absent file NEVER errors (plan §3.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlareConfigFacts {
+    pub serving_context: Option<u64>,
+    pub execution_abi: Option<u64>,
+    pub prepared_model_contract: Option<u64>,
+    pub checkpoint: Option<String>,
+}
+
+/// Publisher identity from the repo's root `publisher.json` at main.
+/// Display-only claim: `fingerprint` is the sha256-hex over the raw
+/// `public_key` byte array; no signature verification happens here (D7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlarePublisher {
+    pub namespace: Option<String>,
+    pub name: Option<String>,
+    pub development: Option<bool>,
+    pub fingerprint: Option<String>,
+}
+
+/// The assembled FLARE scan result for one repository (plan §3.1).
+// Wave-1 foundation (plans/flare-models.md §7): the field readers land with
+// wave-2 lanes C/D — drop the allow when the first merged reader lands.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct FlareRepoInfo {
+    /// Payload-bearing revisions only, `main` excluded; a revision whose
+    /// tree yields no package is skipped, not an error.
+    pub revisions: Vec<FlareRevision>,
+    pub config: FlareConfigFacts,
+    pub publisher: Option<FlarePublisher>,
+    /// Names of refs entries DROPPED for a missing/invalid `targetCommit`
+    /// (the scan note — never a silent degradation, plan §3.1).
+    pub dropped_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct QuantizationGroup {
     pub quant_type: String,
