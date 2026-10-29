@@ -21,11 +21,13 @@
 // =====================================================================
 
 use super::{
-    FilterCtx, FocusCtx, GgufPanelContext, ListCtx, ModelDisplayMode, PopupMode, RenderOutput,
-    RenderParams, StandardPanelContext, StatusCtx,
+    FilterCtx, FlarePanelContext, FocusCtx, GgufPanelContext, ListCtx, ModelDisplayMode, PopupMode,
+    RenderOutput, RenderParams, StandardPanelContext, StatusCtx,
 };
+use crate::gpu::FlarePlatform;
 use crate::models::{
-    DownloadMetadata, FocusedPane, ModelInfo, ModelMetadata, QuantizationGroup, QuantizationInfo,
+    DownloadMetadata, FlarePackage, FlareRepoInfo, FlareRevision, FocusedPane, LfsInfo, ModelInfo,
+    ModelMetadata, ParsedPackageTokens, QuantizationGroup, QuantizationInfo, RefKind, RepoFile,
     SortDirection, SortField,
 };
 use ratatui::{backend::TestBackend, Frame, Terminal};
@@ -101,6 +103,114 @@ pub(super) fn quantization_fixtures() -> Vec<QuantizationGroup> {
     ]
 }
 
+/// One repo file with an LFS pointer (sha256 oid + size).
+fn lfs_file(rfilename: &str, size: u64, oid: &str) -> RepoFile {
+    RepoFile {
+        rfilename: rfilename.to_string(),
+        size: Some(size),
+        oid: None,
+        lfs: Some(LfsInfo {
+            oid: oid.to_string(),
+            size,
+            pointer_size: 0,
+        }),
+    }
+}
+
+/// A realistic FLARE scan result shaped after the three flagship repos
+/// (plan Research facts): a packed GB202 branch whose commit tag `v3`
+/// aliases, a packed GB10 branch, and a directory-form tag — plus config
+/// facts, a publisher identity with fingerprint, and one dropped ref.
+pub(super) fn flare_repo_fixture() -> FlareRepoInfo {
+    FlareRepoInfo {
+        revisions: vec![
+            FlareRevision {
+                revision: "gb202".to_string(),
+                aliases: vec!["v3".to_string()],
+                kind: RefKind::Branch,
+                target_commit: "1f0a2b3c4d5e6f708192a3b4c5d6e7f809182a3b".to_string(),
+                package: FlarePackage::Packed {
+                    file: lfs_file(
+                        "qwen3.8-flash-next-yarn4-tp2.safetensors",
+                        111_434_386_432,
+                        "5f6e7d8c9b0a1f2e3d4c5b6a79880122334455667788990011223344556677889",
+                    ),
+                },
+                parsed: ParsedPackageTokens {
+                    tp: Some(2),
+                    max_concurrency: None,
+                    mtp_draft_tokens: None,
+                    quant_i4: false,
+                    arch: Some("gb202".to_string()),
+                    variants: vec!["yarn4".to_string()],
+                },
+            },
+            FlareRevision {
+                revision: "gb10".to_string(),
+                aliases: Vec::new(),
+                kind: RefKind::Branch,
+                target_commit: "0e1d2c3b4a5968778695a4b3c2d1e0f9988776655".to_string(),
+                package: FlarePackage::Packed {
+                    file: lfs_file(
+                        "qwen3.8-flash-next-gb10-tp1-c8-i4-mtp5.safetensors",
+                        107_011_338_717,
+                        "1122334455667788990011223344556677889900112233445566778899001122",
+                    ),
+                },
+                parsed: ParsedPackageTokens {
+                    tp: Some(1),
+                    max_concurrency: Some(8),
+                    mtp_draft_tokens: Some(5),
+                    quant_i4: true,
+                    arch: Some("gb10".to_string()),
+                    variants: Vec::new(),
+                },
+            },
+            FlareRevision {
+                revision: "v2".to_string(),
+                aliases: Vec::new(),
+                kind: RefKind::Tag,
+                target_commit: "9a8b7c6d5e4f3021203040506070809a0b0c0d0e".to_string(),
+                package: FlarePackage::Directory {
+                    primary: lfs_file(
+                        "model.safetensors",
+                        1_000,
+                        "9988776655443322110099887766554433221100998877665544332211009988",
+                    ),
+                    companions: vec![
+                        lfs_file(
+                            "weights/0.safetensors",
+                            2_000,
+                            "8877665544332211009988776655443322110099887766554433221100998877",
+                        ),
+                        lfs_file(
+                            "deployments/gb202-tp1/rank-0/plan.json",
+                            10,
+                            "7766554433221100998877665544332211009988776655443322110099887766",
+                        ),
+                    ],
+                },
+                parsed: ParsedPackageTokens::default(),
+            },
+        ],
+        config: crate::models::FlareConfigFacts {
+            serving_context: Some(1),
+            execution_abi: Some(3),
+            prepared_model_contract: Some(2),
+            checkpoint: Some("ckpt-9".to_string()),
+        },
+        publisher: Some(crate::models::FlarePublisher {
+            namespace: Some("local-inference-lab".to_string()),
+            name: Some("Qwen3.8-Flash-Next".to_string()),
+            development: Some(false),
+            fingerprint: Some(
+                "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00".to_string(),
+            ),
+        }),
+        dropped_refs: vec!["ci/build".to_string()],
+    }
+}
+
 /// Per-draw mutable state for the render harness: every list input and
 /// cursor `render_ui` touches, in one bundle. The constructors below
 /// reproduce the historical fixtures:
@@ -117,6 +227,11 @@ pub(super) struct UiFixture {
     /// Standard-mode file tree (`None` in GGUF-mode tests).
     pub file_tree: Option<crate::models::FileTreeNode>,
     pub file_tree_state: ratatui::widgets::ListState,
+    /// FLARE-mode scan result (`None` in non-Flare tests).
+    pub flare_info: Option<FlareRepoInfo>,
+    pub flare_list_state: ratatui::widgets::ListState,
+    /// Session-detected FLARE platform (`None` = no star).
+    pub flare_platform: Option<FlarePlatform>,
 }
 
 impl UiFixture {
@@ -132,6 +247,9 @@ impl UiFixture {
             model_metadata: None,
             file_tree: None,
             file_tree_state: ratatui::widgets::ListState::default(),
+            flare_info: None,
+            flare_list_state: ratatui::widgets::ListState::default(),
+            flare_platform: None,
         }
     }
 
@@ -150,6 +268,9 @@ impl UiFixture {
             model_metadata: None,
             file_tree: None,
             file_tree_state: ratatui::widgets::ListState::default(),
+            flare_info: None,
+            flare_list_state: ratatui::widgets::ListState::default(),
+            flare_platform: None,
         }
     }
 
@@ -170,6 +291,33 @@ impl UiFixture {
             model_metadata: None,
             file_tree: None,
             file_tree_state: ratatui::widgets::ListState::default(),
+            flare_info: None,
+            flare_list_state: ratatui::widgets::ListState::default(),
+            flare_platform: None,
+        }
+    }
+
+    /// FLARE panels with card 0 selected, the session platform detected
+    /// as GB202 (stars the matching card), and the first model badged
+    /// `[FLARE]` (mirrors `snapshot_render_ui_flare_panels`).
+    pub(super) fn flare_view() -> Self {
+        let mut flare_list_state = ratatui::widgets::ListState::default();
+        flare_list_state.select(Some(0));
+        let mut models = three_model_fixtures();
+        models[0].tags = vec!["flare-runtime-package".to_string()];
+        Self {
+            input: Input::default(),
+            models,
+            list_state: ratatui::widgets::ListState::default(),
+            quantizations: Vec::new(),
+            quant_list_state: ratatui::widgets::ListState::default(),
+            quant_file_list_state: ratatui::widgets::ListState::default(),
+            model_metadata: None,
+            file_tree: None,
+            file_tree_state: ratatui::widgets::ListState::default(),
+            flare_info: Some(flare_repo_fixture()),
+            flare_list_state,
+            flare_platform: Some(FlarePlatform::Gb202),
         }
     }
 }
@@ -230,6 +378,12 @@ pub(super) fn draw_ui_with_overlay(
                         file_tree_state: &mut fixture.file_tree_state,
                         loading: false,
                     },
+                    flare: FlarePanelContext {
+                        flare_info: &fixture.flare_info,
+                        flare_list_state: &mut fixture.flare_list_state,
+                        flare_platform: &fixture.flare_platform,
+                        loading: false,
+                    },
                     filters: FilterCtx {
                         sort_field: SortField::Downloads,
                         sort_direction: SortDirection::Descending,
@@ -269,6 +423,7 @@ pub(super) const SNAPSHOT_MANIFEST: &[&str] = &[
     "rust_hf_downloader__ui__render__snapshot_render_ui_empty_state",
     "rust_hf_downloader__ui__render__snapshot_render_ui_model_list_selection",
     "rust_hf_downloader__ui__render__snapshot_render_ui_quantization_panels",
+    "rust_hf_downloader__ui__render__snapshot_render_ui_flare_panels",
     "rust_hf_downloader__ui__render__snapshot_search_popup",
     "rust_hf_downloader__ui__render__snapshot_search_popup_over_populated_ui",
     "rust_hf_downloader__ui__render__snapshot_download_path_popup",

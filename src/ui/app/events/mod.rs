@@ -109,6 +109,21 @@ impl App {
                     }
                 }
             }
+            FocusedPane::FlareRevisions => {
+                // FLARE revision cards - select first if available and
+                // none selected
+                if self.flare_list_state.selected().is_none() {
+                    let cards = self
+                        .flare_info
+                        .read()
+                        .as_ref()
+                        .map(|info| info.revisions.len())
+                        .unwrap_or(0);
+                    if cards > 0 {
+                        self.flare_list_state.select(Some(0));
+                    }
+                }
+            }
         }
 
         self.focused_pane = pane;
@@ -133,6 +148,17 @@ impl App {
                     FocusedPane::Models => FocusedPane::FileTree,
                     FocusedPane::FileTree => FocusedPane::Models,
                     // Fallback for QuantizationGroups/Files/ModelMetadata (shouldn't happen in Standard mode)
+                    _ => FocusedPane::Models,
+                }
+            }
+            ModelDisplayMode::Flare => {
+                // Flare mode: cycle Models ↔ FlareRevisions
+                // (plans/flare-models.md §3.5, GGUF
+                // Tab precedent; the facts panel is read-only)
+                match self.focused_pane {
+                    FocusedPane::Models => FocusedPane::FlareRevisions,
+                    FocusedPane::FlareRevisions => FocusedPane::Models,
+                    // Fallback for the other modes' panes
                     _ => FocusedPane::Models,
                 }
             }
@@ -203,6 +229,26 @@ impl App {
                 );
             }
         }
+    }
+
+    /// Navigate to next FLARE revision card
+    pub fn next_flare_revision(&mut self) {
+        let len = self
+            .flare_info
+            .read()
+            .as_ref()
+            .map_or(0, |info| info.revisions.len());
+        advance(&mut self.flare_list_state, len, true);
+    }
+
+    /// Navigate to previous FLARE revision card
+    pub fn previous_flare_revision(&mut self) {
+        let len = self
+            .flare_info
+            .read()
+            .as_ref()
+            .map_or(0, |info| info.revisions.len());
+        advance(&mut self.flare_list_state, len, false);
     }
 
     /// Modify focused filter field value

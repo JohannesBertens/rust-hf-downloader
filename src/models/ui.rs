@@ -59,6 +59,11 @@ pub enum FocusedPane {
     QuantizationFiles,
     ModelMetadata,
     FileTree,
+    /// FLARE mode's revision-cards panel (plans/flare-models.md §3.4): 'd' opens the
+    /// revision-picker popup (download), 'v' does not apply — FLARE
+    /// payloads verify through the LFS-oid digest like every download,
+    /// there is no separate per-file verify action here.
+    FlareRevisions,
 }
 
 impl FocusedPane {
@@ -68,7 +73,11 @@ impl FocusedPane {
     pub fn accepts_download(&self) -> bool {
         matches!(
             self,
-            Self::Models | Self::QuantizationGroups | Self::QuantizationFiles | Self::FileTree
+            Self::Models
+                | Self::QuantizationGroups
+                | Self::QuantizationFiles
+                | Self::FileTree
+                | Self::FlareRevisions
         )
     }
 
@@ -83,6 +92,7 @@ impl FocusedPane {
 pub enum ModelDisplayMode {
     Gguf,     // Show quantizations (current behavior)
     Standard, // Show metadata + file tree
+    Flare,    // Show FLARE revision cards + repo facts (plans/flare-models.md §3.4)
 }
 
 #[cfg(test)]
@@ -99,6 +109,7 @@ mod tests {
             (FocusedPane::QuantizationFiles, true, true),
             (FocusedPane::ModelMetadata, false, false),
             (FocusedPane::FileTree, true, false),
+            (FocusedPane::FlareRevisions, true, false),
         ] {
             assert_eq!(pane.accepts_download(), download, "{:?} download", pane);
             assert_eq!(pane.accepts_verify(), verify, "{:?} verify", pane);

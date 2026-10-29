@@ -58,6 +58,29 @@ fn snapshot_render_ui_quantization_panels() {
 }
 
 #[test]
+fn snapshot_render_ui_flare_panels() {
+    // plans/flare-models.md §3.4: revision cards (star on the GB202 card —
+    // the session platform
+    // matches its arch token; the GB10 card stays unstarred; the v2 tag
+    // is the directory-form card), repo facts on the right, and the
+    // plans/flare-models.md §3.4a [FLARE] badge on the badged Results row.
+    let mut fixture = UiFixture::flare_view();
+    let mut terminal = test_terminal();
+    draw_ui_with_overlay(
+        &mut terminal,
+        &mut fixture,
+        ModelDisplayMode::Flare,
+        FocusedPane::FlareRevisions,
+        None,
+        0,
+        "FLARE repository: 3 payload revision(s) — press 'd' to download",
+        "",
+        |_, _| {},
+    );
+    snap_ui("snapshot_render_ui_flare_panels", &terminal);
+}
+
+#[test]
 fn snapshot_search_popup() {
     let input = Input::new("llama".to_string());
     let mut terminal = test_terminal();

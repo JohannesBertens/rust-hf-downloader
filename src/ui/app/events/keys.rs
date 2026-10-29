@@ -174,6 +174,9 @@ impl App {
                     FocusedPane::FileTree => {
                         self.next_file_tree_item();
                     }
+                    FocusedPane::FlareRevisions => {
+                        self.next_flare_revision();
+                    }
                 }
             }
             (_, KeyCode::Up | KeyCode::Char('k')) => {
@@ -197,6 +200,9 @@ impl App {
                     FocusedPane::FileTree => {
                         self.previous_file_tree_item();
                     }
+                    FocusedPane::FlareRevisions => {
+                        self.previous_flare_revision();
+                    }
                 }
             }
             (_, KeyCode::Enter) => {
@@ -219,6 +225,9 @@ impl App {
                     }
                     FocusedPane::FileTree => {
                         self.toggle_file_tree_expansion();
+                    }
+                    FocusedPane::FlareRevisions => {
+                        self.show_flare_revision_details().await;
                     }
                 }
             }

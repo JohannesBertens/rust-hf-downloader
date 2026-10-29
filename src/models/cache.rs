@@ -4,7 +4,7 @@
 //! M5/U6 moved it to `models/engine.rs` next to `DownloadMetadata` (it is
 //! an engine-side completion mirror, not an API cache container).
 
-use super::api::{ModelInfo, ModelMetadata, QuantizationGroup};
+use super::api::{FlareRepoInfo, ModelInfo, ModelMetadata, QuantizationGroup};
 use super::ui::{FileTreeNode, SortDirection, SortField};
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,6 +17,10 @@ pub type QuantizationCache = HashMap<String, Vec<QuantizationGroup>>;
 pub type MetadataCache = HashMap<String, ModelMetadata>;
 pub type FileTreeCache = HashMap<String, FileTreeNode>;
 pub type SearchCache = HashMap<SearchKey, Vec<ModelInfo>>;
+/// Assembled FLARE scan results, model-keyed (plans/flare-models.md §3.4:
+/// refs + per-revision
+/// trees + raw config/publisher — one entry per repo, TTL like the rest).
+pub type FlareCache = HashMap<String, FlareRepoInfo>;
 
 /// Search cache key that includes all filter parameters
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -55,11 +59,15 @@ pub struct ApiCache {
     pub quantizations: QuantizationCache,
     pub file_trees: FileTreeCache,
     pub searches: SearchCache,
+    /// Assembled FLARE scan results (plans/flare-models.md §3.4),
+    /// model-keyed like the other
+    /// value maps.
+    pub flare: FlareCache,
     /// Fetch timestamps backing the TTL of [`ApiCache::get_or_fetch`]:
     /// one map per model-keyed value map, keyed identically. An entry
     /// present in its value map WITHOUT a timestamp is treated as STALE
     /// (re-fetched) — simple and safe, because the only writer of the
-    /// three value maps is `get_or_fetch` itself, which always stamps.
+    /// four value maps is `get_or_fetch` itself, which always stamps.
     /// `searches` is deliberately untimed: it is [`SearchKey`]-keyed and
     /// written directly by `ui/app/search.rs` (its inline Entry insert,
     /// outside this module), so a timestamp map here would have no owner;
@@ -67,6 +75,7 @@ pub struct ApiCache {
     pub(crate) metadata_at: HashMap<String, Instant>,
     pub(crate) quantizations_at: HashMap<String, Instant>,
     pub(crate) file_trees_at: HashMap<String, Instant>,
+    pub(crate) flare_at: HashMap<String, Instant>,
 }
 
 /// Selects which model-keyed map of [`ApiCache`] a
@@ -122,6 +131,21 @@ impl CacheMapFor<Vec<QuantizationGroup>> for ApiCache {
     }
     fn stamp_map_mut(&mut self) -> &mut HashMap<String, Instant> {
         &mut self.quantizations_at
+    }
+}
+
+impl CacheMapFor<FlareRepoInfo> for ApiCache {
+    fn cache_map(&self) -> &HashMap<String, FlareRepoInfo> {
+        &self.flare
+    }
+    fn cache_map_mut(&mut self) -> &mut HashMap<String, FlareRepoInfo> {
+        &mut self.flare
+    }
+    fn stamp_map(&self) -> &HashMap<String, Instant> {
+        &self.flare_at
+    }
+    fn stamp_map_mut(&mut self) -> &mut HashMap<String, Instant> {
+        &mut self.flare_at
     }
 }
 
@@ -412,5 +436,60 @@ mod get_or_fetch_tests {
             "expired timestamp refetches"
         );
         assert_eq!(value.name, "refetched");
+    }
+
+    // ---- FLARE value map (plans/flare-models.md §3.4: same get-or-fetch
+    // pattern) ----
+
+    /// Minimal FLARE scan value whose revision count distinguishes
+    /// instances.
+    fn flare(revisions: usize) -> FlareRepoInfo {
+        FlareRepoInfo {
+            revisions: (0..revisions)
+                .map(|i| crate::models::FlareRevision {
+                    revision: format!("gb{i}"),
+                    aliases: Vec::new(),
+                    kind: crate::models::RefKind::Branch,
+                    target_commit: format!("{i:040}"),
+                    package: crate::models::FlarePackage::Packed {
+                        file: crate::models::RepoFile {
+                            rfilename: format!("pkg{i}.safetensors"),
+                            size: Some(1),
+                            oid: None,
+                            lfs: None,
+                        },
+                    },
+                    parsed: crate::models::ParsedPackageTokens::default(),
+                })
+                .collect(),
+            config: crate::models::FlareConfigFacts::default(),
+            publisher: None,
+            dropped_refs: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn flare_map_round_trips_through_get_or_fetch() {
+        let cache = Arc::new(parking_lot::RwLock::new(ApiCache::default()));
+        let calls = AtomicUsize::new(0);
+
+        let first = ApiCache::get_or_fetch(&cache, "org/model", || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, Infallible>(flare(2))
+        })
+        .await
+        .unwrap();
+        let second = ApiCache::get_or_fetch(&cache, "org/model", || async {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, Infallible>(flare(3))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "second call is a hit");
+        assert_eq!(first.revisions.len(), 2);
+        assert_eq!(second.revisions.len(), 2, "hit returns the stored value");
+        assert_eq!(cache.read().flare.len(), 1);
+        assert!(cache.read().flare_at.contains_key("org/model"));
     }
 }

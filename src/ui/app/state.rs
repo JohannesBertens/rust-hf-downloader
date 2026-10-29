@@ -68,6 +68,22 @@ pub struct App {
     pub file_tree: Arc<RwLock<Option<FileTreeNode>>>,
     pub file_tree_state: ListState,
     pub display_mode: Arc<RwLock<crate::models::ModelDisplayMode>>,
+    // FLARE viewer state (plans/flare-models.md §3.4): the per-model scan
+    // result (cleared
+    // wherever the quant/tree state clears — see `clear_model_details`),
+    // the SESSION-scoped detected platform (detected once via
+    // spawn_blocking in `App::run`, NEVER cleared — hardware does not
+    // change per model; revision cards star themselves against it), and
+    // the revision-cards cursor.
+    pub flare_info: Arc<RwLock<Option<FlareRepoInfo>>>,
+    pub flare_platform: Arc<RwLock<Option<crate::gpu::FlarePlatform>>>,
+    pub flare_list_state: ListState,
+    /// plans/flare-models.md §3.4 ownership rule (stale-scan fix): bumped
+    /// on every selection
+    /// change and every new detail-scan spawn; a FLARE scan publishes its
+    /// result only while its captured epoch is still current. Plain
+    /// `AtomicU64` on purpose — no lock level, lock-free by construction.
+    pub flare_scan_epoch: Arc<std::sync::atomic::AtomicU64>,
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
@@ -171,6 +187,11 @@ impl App {
             file_tree: Arc::new(RwLock::new(None)),
             file_tree_state,
             display_mode: Arc::new(RwLock::new(crate::models::ModelDisplayMode::Gguf)),
+            // FLARE viewer state (plans/flare-models.md §3.4)
+            flare_info: Arc::new(RwLock::new(None)),
+            flare_platform: Arc::new(RwLock::new(None)),
+            flare_list_state: ListState::default(),
+            flare_scan_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             needs_load_quantizations: false,
             needs_search_models: false,
             last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),

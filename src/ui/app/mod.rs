@@ -62,6 +62,25 @@ impl App {
         crate::engine::spawn_verification_worker(self.engine.clone());
         let _manager = crate::engine::spawn_manager(self.engine.clone());
 
+        // Session-scoped FLARE platform detection
+        // (plans/flare-models.md §3.4): ONE
+        // spawn_blocking call whose result stays for the whole session
+        // (hardware does not change per model; `flare_platform` is never
+        // cleared). The first visible GPU is the star baseline — the
+        // revision cards compare it against their parsed arch token.
+        // Detection failure ⇒ `None` ⇒ no star (display-only, never an
+        // error here; the CLI's `--gpus` path owns the hard errors).
+        {
+            let platform_slot = self.flare_platform.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(platform)) =
+                    tokio::task::spawn_blocking(|| crate::gpu::detect_platform(&[0])).await
+                {
+                    *platform_slot.write() = Some(platform);
+                }
+            });
+        }
+
         while self.running {
             terminal.draw(|frame| self.draw(frame))?;
 
@@ -91,6 +110,8 @@ impl App {
         let quantizations = self.quantizations.read().clone();
         let model_metadata = self.model_metadata.read().clone();
         let file_tree = self.file_tree.read().clone();
+        let flare_info = self.flare_info.read().clone();
+        let flare_platform = *self.flare_platform.read();
 
         // For tokio Mutex, snapshot_in_place() refreshes the render cache when the
         // lock is free and leaves the cached value untouched when the lock is
@@ -182,6 +203,13 @@ impl App {
                     file_tree: &file_tree,
                     file_tree_state: &mut self.file_tree_state,
                     // Standard mode reuses the quant-loading spinner flag
+                    loading: *self.loading_quants.read(),
+                },
+                flare: crate::ui::render::FlarePanelContext {
+                    flare_info: &flare_info,
+                    flare_list_state: &mut self.flare_list_state,
+                    flare_platform: &flare_platform,
+                    // Flare mode reuses the quant-loading spinner flag too
                     loading: *self.loading_quants.read(),
                 },
                 filters: crate::ui::render::FilterCtx {
@@ -361,6 +389,13 @@ impl App {
                     self.previous_file_tree_item();
                 } else {
                     self.next_file_tree_item();
+                }
+            }
+            crate::models::FocusedPane::FlareRevisions => {
+                if scroll_up {
+                    self.previous_flare_revision();
+                } else {
+                    self.next_flare_revision();
                 }
             }
         }
