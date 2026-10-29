@@ -1598,3 +1598,151 @@ fn preflight_symlink_chain_then_dotdot_still_hits_moved_branch() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Impl-gate r5 P1 (codex's dangling-symlink fixture, verbatim): a
+/// base spelled `<root>/dirA/missing/../../alias/..` where `missing`
+/// does NOT exist and `alias → <root>/dirA/missing` is a DANGLING
+/// symlink. The r4 resolve-at-hop walk retained the LEXICAL candidate
+/// at `alias` (canonicalize fails, but the symlink exists), the
+/// following `..` popped it, and the predicted run dir was
+/// `<root>/a/b/gb202` — while the transport's `create_dir_all`
+/// (src/download/mod.rs) would first create `<root>/dirA/missing`,
+/// making `alias` resolvable, so the ACTUAL destination at transfer
+/// time is `<root>/dirA/a/b/gb202` — package A's directory. Different
+/// commit ⇒ different URL, equal size ⇒ guard (i) cannot stat the
+/// dotted spelling: NO guard could separate the runs (old code
+/// returned `Ok(())`). The r5 fail-closed walk refuses to guess: a
+/// component that EXISTS but cannot resolve NOW (dangling symlink,
+/// ELOOP) makes the identity unknowable ⇒ `UnresolvableOutput` hard
+/// error for the run's own revision dir.
+#[cfg(unix)]
+#[test]
+fn preflight_dangling_symlink_dotdot_base_errors_unresolvable() {
+    let root = guard_root("symdangle");
+    // dirA holds A's bytes under the revision dir, recorded at the
+    // CANONICAL path (what a real earlier run at sha(1) would have
+    // registered); NOTHING named `missing` is created; `alias` points
+    // at the absent `<root>/dirA/missing` — dangling.
+    let dir_a = root.join("dirA");
+    let file = dir_a.join("a/b/gb202/pkg.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    std::os::unix::fs::symlink(dir_a.join("missing"), root.join("alias")).unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &file.to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    // The rerun at commit sha(2) spells the base exactly as codex's
+    // fixture: equal size, different commit — only the fail-closed
+    // identity refusal separates the runs.
+    let base = format!("{}/dirA/missing/../../alias/..", root.display());
+    let outcome = flare_preflight(
+        &registry,
+        &base,
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::UnresolvableOutput { .. })),
+        "a base traversing a DANGLING symlink (exists, cannot resolve \
+         now) must be refused outright — its destination is \
+         unpredictable once create_dir_all materializes the target: \
+         {outcome:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r5 scoping proof: fail-closed applies ONLY to symlinks
+/// the run's spelling actually TRAVERSEs. The same dangling `alias`
+/// parked next to a CLEAN base must not error — every component of
+/// the run's dir either resolves or does not exist (a never-resolved
+/// component popped by `..` stays correct), so the identity is
+/// knowable and an unrelated dangling symlink is no one's business.
+#[cfg(unix)]
+#[test]
+fn preflight_dangling_symlink_elsewhere_is_not_traversed() {
+    let root = guard_root("symdanglex");
+    let dir_a = root.join("dirA");
+    let file = dir_a.join("a/b/gb202/pkg.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    // Dangling symlink parked at `<root>/alias` — NEVER traversed by
+    // the run's clean base spelling.
+    std::os::unix::fs::symlink(dir_a.join("missing"), root.join("alias")).unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &file.to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    let outcome = flare_preflight(
+        &registry,
+        &root.to_string_lossy(),
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert_eq!(
+        outcome,
+        Ok(()),
+        "a dangling symlink NOT traversed by the run's spelling must \
+         not trip the fail-closed refusal: {outcome:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r5 ELOOP proof: a self-referential symlink (`cyc → cyc`)
+/// TRAVERSED by the base (`<root>/cyc/..`) exists on disk but can
+/// NEVER canonicalize — identity unknowable ⇒ `UnresolvableOutput`,
+/// even against an EMPTY registry (the refusal is about the run's
+/// spelling, not the rows).
+#[cfg(unix)]
+#[test]
+fn preflight_eloop_symlink_traversal_errors_unresolvable() {
+    let root = guard_root("symeloop");
+    std::fs::create_dir_all(&root).unwrap();
+    std::os::unix::fs::symlink("cyc", root.join("cyc")).unwrap();
+    let registry = DownloadRegistry { downloads: vec![] };
+    let base = format!("{}/cyc/..", root.display());
+    let outcome = flare_preflight(
+        &registry,
+        &base,
+        "a/b",
+        "gb202",
+        &sha(1),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::UnresolvableOutput { .. })),
+        "a base traversing an ELOOP symlink (exists, can never resolve) \
+         must be refused outright: {outcome:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

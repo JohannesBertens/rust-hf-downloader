@@ -399,6 +399,14 @@ pub(crate) enum FlarePreflightError {
         pin: String,
         directory: String,
     },
+    /// (ii-c) Unresolvable output (impl-gate r5 P1): the run's own
+    /// revision-dir spelling traverses a symlink that CANNOT be
+    /// resolved NOW (dangling target, ELOOP cycle). The transport's
+    /// `create_dir_all` can materialize a dangling target mid-run and
+    /// retarget the traversal, so the run's real destination is
+    /// UNPREDICTABLE — the pre-flight refuses to guess instead of
+    /// silently skipping the ownership comparison.
+    UnresolvableOutput { directory: String },
     /// (iii) Single destination per package: the URL is already recorded
     /// at a different destination (ordinary/legacy entries included).
     DestinationConflict {
@@ -444,6 +452,12 @@ impl std::fmt::Display for FlarePreflightError {
                 directory,
                 owners.join(", "),
                 pin
+            ),
+            FlarePreflightError::UnresolvableOutput { directory } => write!(
+                f,
+                "output path {} resolves through an unresolvable symlink — use a clean, \
+                 fully-resolvable --output path",
+                directory
             ),
             FlarePreflightError::DestinationConflict {
                 url,
@@ -499,11 +513,26 @@ fn requested_destination(base: &str, model_id: &str, filename: &str) -> Option<P
 /// compared past the collision. Resolve-at-hop removes the need for
 /// any fixpoint: the walk is one pass, finite (a step per component),
 /// and symlink cycles terminate because a cyclic candidate FAILS
-/// canonicalize (ELOOP) and falls back to its lexical spelling.
+/// canonicalize (ELOOP) and the walk refuses to guess (r5
+/// fail-closed: `None`).
+/// r5 P1 — FAIL-CLOSED: a component that EXISTS on disk (per
+/// `symlink_metadata`, which follows nothing — a dangling symlink
+/// still exists) but FAILS `canonicalize` is a symlink that cannot be
+/// resolved NOW (dangling target, ELOOP cycle); its FUTURE resolution
+/// is unpredictable — the transport's `create_dir_all` can materialize
+/// the dangling target and retarget the traversal at transfer time
+/// (codex r5: `/R/dirA/missing/../../alias/..` predicted
+/// `/R/a/b/gb202`, landed on `/R/dirA/a/b/gb202`). The walk returns
+/// `None` — identity unknowable — instead of retaining the lexical
+/// candidate and letting a later `..` pop it (the r4 behavior GUESSED
+/// a directory the run would never actually use). A component that
+/// does NOT exist stays lexical: popping it later is correct — it was
+/// never resolved, so that is not a guess.
 /// `None` when NOTHING along `p` exists — no on-disk identity to
 /// compare (for an absolutized path the filesystem root always
 /// exists, so in practice `None` only when the cwd itself is
-/// unresolvable for a relative `p`).
+/// unresolvable for a relative `p`) — or when a traversed EXISTING
+/// component cannot be resolved now (the r5 fail-closed case above).
 fn anchored_fs_identity(p: &Path) -> Option<PathBuf> {
     use std::path::Component;
     // (1) Absolutize: a relative input resolves against the cwd, the
@@ -548,13 +577,28 @@ fn anchored_fs_identity(p: &Path) -> Option<PathBuf> {
             }
             other => {
                 let candidate = identity.join(other.as_os_str());
-                // Canonicalize when the candidate EXISTS (resolving
-                // any symlink AT the hop); `unwrap_or` keeps the
-                // lexical candidate when canonicalization fails — a
-                // not-yet-created component (a later `..` pops it,
-                // which is correct: it was never resolved) or ELOOP
-                // (the walk stays finite regardless).
-                identity = candidate.canonicalize().unwrap_or(candidate);
+                // Resolve-at-hop with FAIL-CLOSED refusal (impl-gate
+                // r5 P1): a candidate that EXISTS on disk (per
+                // `symlink_metadata`, which follows nothing — a
+                // dangling symlink still exists) yet FAILS
+                // `canonicalize` is a symlink that cannot be resolved
+                // NOW (dangling target, ELOOP cycle); its future
+                // resolution is UNPREDICTABLE because the transport's
+                // `create_dir_all` can materialize the dangling target
+                // and retarget this traversal at transfer time. The r4
+                // behavior retained the lexical candidate, so a
+                // following `..` popped it and the walk GUESSED a
+                // directory the run would never actually use (codex
+                // r5: predicted `/R/a/b/gb202`, landed on
+                // `/R/dirA/a/b/gb202`). Identity is unknowable —
+                // return `None` rather than guess. A component that
+                // does NOT exist stays lexical: it was never resolved,
+                // so a later `..` popping it is correct (not a guess).
+                match candidate.canonicalize() {
+                    Ok(canonical) => identity = canonical,
+                    Err(_) if candidate.symlink_metadata().is_ok() => return None,
+                    Err(_) => identity = candidate,
+                }
             }
         }
     }
@@ -601,7 +645,9 @@ fn fs_identity(p: &Path) -> PathBuf {
 /// stale bytes a pre-flight heuristic misses are still caught downstream
 /// as a hash mismatch. `--no-verify` is the user-accepted residual risk:
 /// there, ONLY this pre-flight stands between the run and another
-/// commit's bytes.
+/// commit's bytes. Spellings that traverse unresolvable symlinks are
+/// refused outright — the guard never predicts across a component
+/// whose resolution can change under directory creation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flare_preflight(
     registry: &DownloadRegistry,
@@ -647,9 +693,11 @@ pub(crate) fn flare_preflight(
     // (ii) moved-branch guard, scoped to THIS run's revision directory —
     // the registration-identical prefix (a probe file under the revision
     // dir; its parent is the dir itself), compared by on-disk IDENTITY on
-    // BOTH sides (`fs_identity` on the probe-derived dir and on each
-    // `local_path`): the raw strings would miss whenever the base is
-    // spelled through `..`/symlinks (impl-gate r2 P1).
+    // BOTH sides (`anchored_fs_identity` on the probe-derived dir —
+    // hard-erroring when the run's own spelling is unresolvable, r5 —
+    // and `fs_identity` on each `local_path`): the raw strings would
+    // miss whenever the base is spelled through `..`/symlinks (impl-gate
+    // r2 P1).
     // On-disk existence is what makes the recovery honest: deleting the
     // directory clears the guard (stale registry entries for vanished
     // files are ignored). Directory ownership is EXISTENCE-BASED and
@@ -668,9 +716,29 @@ pub(crate) fn flare_preflight(
     // on disk); MORE than one distinct pin with existing files =
     // ambiguous residue from partial deletes (error directing the user
     // to delete the directory or the registry entries).
-    let dir_prefix = requested_destination(base, model_id, &format!("{revision_dir}/_"))
-        .and_then(|probe| probe.parent().map(fs_identity));
-    if let Some(dir) = dir_prefix {
+    let run_dir = requested_destination(base, model_id, &format!("{revision_dir}/_"))
+        .and_then(|probe| probe.parent().map(Path::to_path_buf));
+    if let Some(run_dir) = run_dir {
+        // The RUN's own revision-dir identity must be KNOWABLE
+        // (impl-gate r5 P1): `anchored_fs_identity` returns `None`
+        // when the spelling traverses a symlink that cannot be
+        // resolved NOW (dangling target, ELOOP cycle) — the
+        // transport's `create_dir_all` can materialize the dangling
+        // target mid-run, making the run's real destination
+        // UNPREDICTABLE (codex r5: `/R/dirA/missing/../../alias/..`
+        // predicted `/R/a/b/gb202`, landed on `/R/dirA/a/b/gb202` —
+        // another commit's files, with equal sizes and different
+        // URLs no other guard separates). The old path silently
+        // skipped the ownership comparison (`fs_identity` degraded
+        // to the lexical spelling, which misses every recorded row);
+        // now the run is REFUSED outright. Entry-row identities (the
+        // OTHER side) may still degrade to lexical — only the RUN's
+        // own spelling must be clean.
+        let Some(dir) = anchored_fs_identity(&run_dir) else {
+            return Err(FlarePreflightError::UnresolvableOutput {
+                directory: run_dir.display().to_string(),
+            });
+        };
         let mut owners: Vec<Option<&str>> = Vec::new();
         for entry in &registry.downloads {
             if entry.model_id != model_id {
