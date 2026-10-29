@@ -1087,48 +1087,42 @@ fn preflight_dotted_base_same_destination_is_not_a_false_conflict() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Impl-gate P2 regression: after A → delete-directory → B, the directory
-/// belongs to B (B's rows exist under it); A's remnant row must not block
-/// B's re-runs. Ordering is load-bearing (impl-gate r2: ownership is
-/// LAST-ROW-WINS over the append-only Vec): A's row is FIRST, B's row is
-/// SECOND — the last row under the dir is B's, B == the current pin, so
-/// the run passes. (The mirror trace — C's row first, B's row second,
-/// rerun at C — is the abuse the last-row-wins rule must REJECT; see
-/// `preflight_historical_current_pin_row_cannot_supersede_newer_owner`.)
+/// Impl-gate r3 trace (1) — A → delete-dir → B → rerun-B PASSES: A's
+/// row is still on file but its FILE is gone (vanished rows never
+/// vote), and B's file exists, so the EXISTENCE-BASED owner set is
+/// exactly {B} = {pin} — the idempotent re-run arm. The registry Vec
+/// order carries no evidence (r3 P1: `upsert_pending` preserves URLs
+/// in place, so the lifecycle leaves A's row FIRST; whether the owner
+/// row is first or last is irrelevant — only on-disk existence votes).
+/// The two commits ship DIFFERENT artifact names in the same revision
+/// dir (a re-sharded package), so each row owns a distinct path.
 #[test]
 fn preflight_superseded_row_does_not_block_current_pin_rerun() {
     let root = guard_root("supersede");
-    let model_root = root.join("a/b");
-    // B's bytes exist on disk under the gb202 dir (recreated after the
-    // delete), and B's rows own the directory in the registry…
-    std::fs::create_dir_all(model_root.join("gb202")).unwrap();
-    std::fs::write(model_root.join("gb202").join("pkg.safetensors"), b"x").unwrap();
+    let revision_dir = root.join("a/b/gb202");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    // B's bytes exist on disk (recreated after the delete); A's file is
+    // GONE with the deleted directory — only its registry row remains.
+    std::fs::write(revision_dir.join("pkg-b.safetensors"), b"x").unwrap();
     let registry = DownloadRegistry {
         downloads: vec![
-            // …A's remnant row (different commit, FIRST — the older
-            // registration), still recorded at the same destination.
+            // A's remnant row, FIRST (registered before B).
             recorded(
                 "a/b",
-                "gb202/pkg.safetensors",
-                Some("pkg.safetensors"),
+                "gb202/pkg-a.safetensors",
+                Some("pkg-a.safetensors"),
                 &sha(1),
-                &model_root
-                    .join("gb202")
-                    .join("pkg.safetensors")
-                    .to_string_lossy(),
+                &revision_dir.join("pkg-a.safetensors").to_string_lossy(),
                 Some(&sha(1)),
                 DownloadStatus::Complete,
             ),
-            // B's row, SECOND — the LAST row under the dir ⇒ the owner.
+            // B's row, SECOND — its file exists.
             recorded(
                 "a/b",
-                "gb202/pkg.safetensors",
-                Some("pkg.safetensors"),
+                "gb202/pkg-b.safetensors",
+                Some("pkg-b.safetensors"),
                 &sha(2),
-                &model_root
-                    .join("gb202")
-                    .join("pkg.safetensors")
-                    .to_string_lossy(),
+                &revision_dir.join("pkg-b.safetensors").to_string_lossy(),
                 Some(&sha(2)),
                 DownloadStatus::Complete,
             ),
@@ -1141,60 +1135,56 @@ fn preflight_superseded_row_does_not_block_current_pin_rerun() {
         "gb202",
         &sha(2),
         &[preflight_file(
-            "gb202/pkg.safetensors",
-            "pkg.safetensors",
+            "gb202/pkg-b.safetensors",
+            "pkg-b.safetensors",
             1,
         )],
     );
-    assert!(
-        outcome.is_ok(),
-        "the LAST row under the dir (B) owns it; A's older row must not \
-         block a B re-run: {outcome:?}"
+    assert_eq!(
+        outcome,
+        Ok(()),
+        "owner set is {{B}} (A's file vanished) — the B re-run is idempotent"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Impl-gate r2 P1 regression (codex's abuse trace): C → delete-dir →
-/// B → rerun-C. C's HISTORICAL row is still on file (registered FIRST),
-/// but B's row is the LAST registration under the dir — under
-/// LAST-ROW-WINS ownership B owns the directory, so re-running at C
-/// must ERROR (moved branch) instead of silently re-downloading C's
-/// bytes over B's. The old ANY-current-pin-row predicate let C's stale
-/// row legitimize exactly that overwrite.
+/// Impl-gate r3 trace (2) — C → delete-dir → B → rerun-C ERRORS naming
+/// B: C's row is on file but its file is GONE (vanished rows never
+/// vote); B's file exists, so the owner set is {B} ≠ {C} — moved branch
+/// naming B, the commit whose bytes are actually on disk. A historical
+/// row for the CURRENT pin cannot supersede the bytes that exist.
 #[test]
 fn preflight_historical_current_pin_row_cannot_supersede_newer_owner() {
     let root = guard_root("lww");
-    let model_root = root.join("a/b");
-    // B's bytes are on disk (recreated after the delete).
-    std::fs::create_dir_all(model_root.join("gb202")).unwrap();
-    std::fs::write(model_root.join("gb202").join("pkg.safetensors"), b"x").unwrap();
-    let local = model_root.join("gb202").join("pkg.safetensors");
+    let revision_dir = root.join("a/b/gb202");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    // B's bytes are on disk (recreated after the delete); C's file is
+    // gone. Registry Vec order [C, B] is exactly what the lifecycle
+    // produces (C registered first; re-registering C preserves its row
+    // in place), and is deliberately NOT what ownership follows.
+    std::fs::write(revision_dir.join("pkg-b.safetensors"), b"x").unwrap();
     let registry = DownloadRegistry {
         downloads: vec![
-            // C's historical row, FIRST — matches the CURRENT pin but is
-            // NOT the newest registration under the dir.
             recorded(
                 "a/b",
-                "gb202/pkg.safetensors",
-                Some("pkg.safetensors"),
+                "gb202/pkg-c.safetensors",
+                Some("pkg-c.safetensors"),
                 &sha(3),
-                &local.to_string_lossy(),
+                &revision_dir.join("pkg-c.safetensors").to_string_lossy(),
                 Some(&sha(3)),
                 DownloadStatus::Complete,
             ),
-            // B's row, SECOND — the LAST row under the dir ⇒ the owner.
             recorded(
                 "a/b",
-                "gb202/pkg.safetensors",
-                Some("pkg.safetensors"),
+                "gb202/pkg-b.safetensors",
+                Some("pkg-b.safetensors"),
                 &sha(2),
-                &local.to_string_lossy(),
+                &revision_dir.join("pkg-b.safetensors").to_string_lossy(),
                 Some(&sha(2)),
                 DownloadStatus::Complete,
             ),
         ],
     };
-    // Re-run at C: C's own row exists, but B owns the directory — error.
     match flare_preflight(
         &registry,
         &root.to_string_lossy(),
@@ -1202,8 +1192,8 @@ fn preflight_historical_current_pin_row_cannot_supersede_newer_owner() {
         "gb202",
         &sha(3),
         &[preflight_file(
-            "gb202/pkg.safetensors",
-            "pkg.safetensors",
+            "gb202/pkg-c.safetensors",
+            "pkg-c.safetensors",
             1,
         )],
     ) {
@@ -1212,14 +1202,276 @@ fn preflight_historical_current_pin_row_cannot_supersede_newer_owner() {
             pin,
             ..
         }) => {
-            // The error names B — the OWNER — not C's own stale row.
+            // The error names B — the commit whose bytes EXIST — not C's
+            // own vanished row.
             assert_eq!(recorded_commit.as_deref(), Some(sha(2).as_str()));
             assert_eq!(pin, sha(3));
         }
         other => panic!(
             "a historical row for the current pin must not supersede the \
-             newer owner's bytes: {other:?}"
+             existing owner's bytes: {other:?}"
         ),
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r3 trace (3), codex's round-3 abuse trace —
+/// C → delete → B → delete → C, then rerun. `upsert_pending` preserves
+/// already-recorded URLs in place, so the registry Vec order stays
+/// [C, B] even though C's bytes were re-downloaded LAST: rerun-B must
+/// ERROR naming C (C's file exists, B's is gone — C owns the directory;
+/// the r2 LAST-ROW-WINS predicate crowned B, the last ROW, and let a B
+/// re-run silently reuse C's bytes), and rerun-C must PASS (owner set
+/// == {C} == pin — the idempotent re-run).
+#[test]
+fn preflight_repopulation_c_b_c_rerun_b_errors_naming_c_and_rerun_c_passes() {
+    let root = guard_root("cbc");
+    let revision_dir = root.join("a/b/gb202");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    // After the full lifecycle only C's file exists: the second delete
+    // removed B's, then C's re-download re-populated its own.
+    std::fs::write(revision_dir.join("pkg-c.safetensors"), b"x").unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![
+            // C's row, FIRST — re-registering C after the second delete
+            // PRESERVED it in place (upsert_pending keeps existing URLs).
+            recorded(
+                "a/b",
+                "gb202/pkg-c.safetensors",
+                Some("pkg-c.safetensors"),
+                &sha(3),
+                &revision_dir.join("pkg-c.safetensors").to_string_lossy(),
+                Some(&sha(3)),
+                DownloadStatus::Complete,
+            ),
+            // B's row, SECOND (appended when B ran); its file is GONE.
+            recorded(
+                "a/b",
+                "gb202/pkg-b.safetensors",
+                Some("pkg-b.safetensors"),
+                &sha(2),
+                &revision_dir.join("pkg-b.safetensors").to_string_lossy(),
+                Some(&sha(2)),
+                DownloadStatus::Complete,
+            ),
+        ],
+    };
+    // rerun-B: owner set {C} ≠ {B} — moved branch NAMING C.
+    match flare_preflight(
+        &registry,
+        &root.to_string_lossy(),
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg-b.safetensors",
+            "pkg-b.safetensors",
+            1,
+        )],
+    ) {
+        Err(FlarePreflightError::MovedBranch {
+            recorded_commit,
+            pin,
+            ..
+        }) => {
+            assert_eq!(recorded_commit.as_deref(), Some(sha(3).as_str()));
+            assert_eq!(pin, sha(2));
+        }
+        other => panic!("rerun-B over C's repopulated bytes must error naming C: {other:?}"),
+    }
+    // rerun-C: owner set {C} == pin — the idempotent re-run passes.
+    assert_eq!(
+        flare_preflight(
+            &registry,
+            &root.to_string_lossy(),
+            "a/b",
+            "gb202",
+            &sha(3),
+            &[preflight_file(
+                "gb202/pkg-c.safetensors",
+                "pkg-c.safetensors",
+                1,
+            )],
+        ),
+        Ok(()),
+        "rerun-C owns the directory (owner set == {{pin}}) — idempotent"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r3 trace (5) — same-commit rerun with the commit's OWN
+/// file on disk: owner set == {pin} ⇒ passes (the {pin} arm of the
+/// existence-based predicate; it equally supersedes any vanished stale
+/// rows of other commits recorded under the same dir).
+#[test]
+fn preflight_same_commit_existing_file_rerun_is_idempotent() {
+    let root = guard_root("samecommit");
+    let revision_dir = root.join("a/b/gb202");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    std::fs::write(revision_dir.join("pkg.safetensors"), b"x").unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(7),
+            &revision_dir.join("pkg.safetensors").to_string_lossy(),
+            Some(&sha(7)),
+            DownloadStatus::Complete,
+        )],
+    };
+    assert_eq!(
+        flare_preflight(
+            &registry,
+            &root.to_string_lossy(),
+            "a/b",
+            "gb202",
+            &sha(7),
+            &[preflight_file(
+                "gb202/pkg.safetensors",
+                "pkg.safetensors",
+                1
+            )],
+        ),
+        Ok(()),
+        "owner set == {{pin}} with the file on disk — idempotent re-run"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r3 trace (6) — AMBIGUOUS: the revision dir holds EXISTING
+/// files from TWO distinct commits at once (a partial delete leaves
+/// exactly this — one commit's file survived, the other's returned).
+/// The owner set has >1 distinct pin, so no single owner can be named:
+/// the error must say the directory holds files from multiple commits
+/// and direct the user to delete the directory OR the registry entries.
+#[test]
+fn preflight_ambiguous_existing_files_from_two_commits_errors() {
+    let root = guard_root("ambiguous");
+    let revision_dir = root.join("a/b/gb202");
+    std::fs::create_dir_all(&revision_dir).unwrap();
+    // BOTH commits' files exist on disk (partial delete + partial
+    // re-download).
+    std::fs::write(revision_dir.join("pkg-a.safetensors"), b"x").unwrap();
+    std::fs::write(revision_dir.join("pkg-b.safetensors"), b"x").unwrap();
+    let registry = DownloadRegistry {
+        downloads: vec![
+            recorded(
+                "a/b",
+                "gb202/pkg-a.safetensors",
+                Some("pkg-a.safetensors"),
+                &sha(1),
+                &revision_dir.join("pkg-a.safetensors").to_string_lossy(),
+                Some(&sha(1)),
+                DownloadStatus::Complete,
+            ),
+            recorded(
+                "a/b",
+                "gb202/pkg-b.safetensors",
+                Some("pkg-b.safetensors"),
+                &sha(2),
+                &revision_dir.join("pkg-b.safetensors").to_string_lossy(),
+                Some(&sha(2)),
+                DownloadStatus::Complete,
+            ),
+        ],
+    };
+    // A B re-run hits the ambiguity even though B's own file exists:
+    // A's does too, and no Vec order can say whose bytes rule.
+    match flare_preflight(
+        &registry,
+        &root.to_string_lossy(),
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg-b.safetensors",
+            "pkg-b.safetensors",
+            1,
+        )],
+    ) {
+        Err(
+            ref err @ FlarePreflightError::AmbiguousOwner {
+                ref owners,
+                ref pin,
+                ..
+            },
+        ) => {
+            assert_eq!(pin.as_str(), sha(2).as_str());
+            assert!(owners.contains(&sha(1)), "owners: {owners:?}");
+            assert!(owners.contains(&sha(2)), "owners: {owners:?}");
+            let message = err.to_string();
+            assert!(message.contains("branch moved"), "{message}");
+            assert!(message.contains("multiple commits"), "{message}");
+            assert!(
+                message.contains("delete the directory or the registry entries"),
+                "{message}"
+            );
+        }
+        other => panic!(
+            "two commits' existing files under one dir must error as \
+             ambiguous, not pick an owner: {other:?}"
+        ),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Impl-gate r3 P1 regression (codex's symlink trace): a base spelled
+/// `<root>/missing/../alias` — where `missing` does NOT exist and
+/// `alias` is an EXISTING symlink to `dirA` — must NOT bypass the
+/// moved-branch guard. The single-pass helper anchored at `<root>`,
+/// lexically dropped `missing/..`, and appended `alias` UNRESOLVED, so
+/// the dir identity (`<root>/alias/…`) never matched the row recorded
+/// at the CANONICAL path (`<root>/dirA/…`); guard (i) cannot stat the
+/// dotted spelling (`missing` is absent) and the different commit means
+/// a fresh URL, so ONLY guard (ii)'s identity comparison can catch the
+/// collision — the fixpoint re-anchors on the lexically normalized
+/// path, resolves `alias`, and fires. Mirrors the dotted-base test
+/// style above (impl-gate r2).
+#[cfg(unix)]
+#[test]
+fn preflight_missing_dotdot_then_symlink_base_still_hits_moved_branch() {
+    let root = guard_root("symfix");
+    // dirA holds A's bytes under the revision dir; `alias` → dirA is an
+    // EXISTING symlink; NOTHING named `missing` is created.
+    let dir_a = root.join("dirA");
+    let file = dir_a.join("a/b/gb202/pkg.safetensors");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, b"x").unwrap();
+    std::os::unix::fs::symlink(&dir_a, root.join("alias")).unwrap();
+    // The recorded row uses the CANONICAL path (dirA/…) — what a real
+    // earlier run at commit sha(1) would have registered.
+    let registry = DownloadRegistry {
+        downloads: vec![recorded(
+            "a/b",
+            "gb202/pkg.safetensors",
+            Some("pkg.safetensors"),
+            &sha(1),
+            &file.to_string_lossy(),
+            Some(&sha(1)),
+            DownloadStatus::Complete,
+        )],
+    };
+    // The rerun at commit sha(2) spells the base through
+    // `missing/../alias`: equal size, so only the identity comparison
+    // separates the runs.
+    let base = format!("{}/missing/../alias", root.display());
+    let outcome = flare_preflight(
+        &registry,
+        &base,
+        "a/b",
+        "gb202",
+        &sha(2),
+        &[preflight_file(
+            "gb202/pkg.safetensors",
+            "pkg.safetensors",
+            1,
+        )],
+    );
+    assert!(
+        matches!(outcome, Err(FlarePreflightError::MovedBranch { .. })),
+        "a base spelled through `missing/../alias` (existing symlink after \
+         lexical `..`) must not bypass the moved-branch guard: {outcome:?}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
