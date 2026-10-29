@@ -700,6 +700,27 @@ mod tests {
         );
     }
 
+    /// A `--gpus` spec containing whitespace (`0, 1`) is single-quoted in
+    /// the echo (impl-gate quoting fix — mirrors the two expectations
+    /// above): echoed raw it would split into two shell arguments.
+    #[test]
+    fn handoff_gpus_spec_with_whitespace_is_single_quoted() {
+        let line = flare_handoff_line(
+            &packed(),
+            false,
+            true,
+            std::path::Path::new("/data/models/org/model"),
+            "gb10",
+            "qwen3.8-flash-next-gb10-tp1.safetensors",
+            Some("0, 1"),
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors' --gpus '0, 1'"
+        );
+    }
+
     /// Directory: the package DIRECTORY is handed off (verified against
     /// flare's explicit-path source — see the plan's plans/flare-models.md §3.3f line).
     #[test]

@@ -1748,6 +1748,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// qwen impl-gate P2 — the TUI's blocked-path surface (the only
+    /// untested arm of the plans/flare-models.md §3.3d pre-flight in
+    /// `trigger_flare_download`):
+    /// a recorded row for the SAME model under the SAME revision dir at
+    /// a DIFFERENT commit, with the file present on disk at the recorded
+    /// path — the moved-branch guard rejects the trigger BEFORE any
+    /// enqueue (nothing queued, sent, or mirrored; the engine registry
+    /// mirror is untouched too).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn trigger_flare_download_preflight_block_enqueues_nothing() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-blocked-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        // One recorded interrupted download under <tmp>/dl/author/model/
+        // gb202/ pinned at FLARE_COMMIT_2, file PRESENT on disk at exactly
+        // the package size (111 B) — guard (i) size parity passes, so it
+        // is the moved-branch guard (ii) that must fire. The row is
+        // seeded through the typed registry op (no hand-rolled registry
+        // writes), and the registry path follows RUST_HF_DOWNLOADER_DATA_DIR
+        // via EnvGuard — the same discipline the resume tests use.
+        let base = base_path(&tmp);
+        let recorded_path = PathBuf::from(&base)
+            .join("author")
+            .join("model")
+            .join("gb202")
+            .join("pkg.safetensors");
+        std::fs::create_dir_all(recorded_path.parent().unwrap()).unwrap();
+        std::fs::write(&recorded_path, vec![0u8; 111]).unwrap();
+        crate::registry::register_pending(
+            "author/model",
+            FLARE_COMMIT_2,
+            &[(
+                "gb202/pkg.safetensors".to_string(),
+                111,
+                Some("lfs-sha".to_string()),
+                Some("pkg.safetensors".to_string()),
+            )],
+            &base,
+        )
+        .unwrap();
+
+        // Trigger pinned to the NEW commit (FLARE_COMMIT) — same model,
+        // same revision dir, different pin: the branch has moved.
+        let mut app = app_in_flare_mode(&tmp);
+        let revision = packed_flare_revision();
+        app.trigger_flare_download("author/model", &revision).await;
+
+        // The blocked-path strings: the error names the plans/flare-models.md §3.3d guard, the
+        // status names the pre-flight.
+        let error = app.error.read().clone();
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("FLARE download blocked")),
+            "blocked trigger must set the FLARE download blocked error, got: {error:?}"
+        );
+        assert!(
+            error.as_deref().is_some_and(|e| e.contains("branch moved")),
+            "the moved-branch guard is the one that fires (size parity holds), got: {error:?}"
+        );
+        assert!(
+            app.status.read().contains("pre-flight"),
+            "status must name the pre-flight, got: {}",
+            app.status.read()
+        );
+
+        // NOTHING enqueued: no channel messages, no queue accounting, no
+        // HUD mirror, and the engine registry mirror stays empty (the
+        // disk registry keeps its single recorded row).
+        assert!(drain_downloads(&app).await.is_empty());
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// 'd' in Flare mode opens the revision-picker popup
     /// (plans/flare-models.md §3.5): snapshot
     /// choices bound to the selected model; Esc cancels without enqueue.
