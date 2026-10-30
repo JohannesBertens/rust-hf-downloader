@@ -71,6 +71,15 @@ impl App {
         // Check which pane is focused to determine what to download
         match self.focused_pane {
             FocusedPane::Models => {
+                // plans/flare-models.md §3.5: 'd' in Flare mode opens the
+                // revision picker from the Models list too (while a FLARE
+                // model is selected) — same snapshot binding as the
+                // FlareRevisions pane below. GGUF keeps today's no-op here
+                // (downloads come from the Quantizations panes).
+                if *self.display_mode.read() == crate::models::ModelDisplayMode::Flare {
+                    self.open_flare_revision_picker();
+                    return;
+                }
                 // Download entire model repository (non-GGUF models in Standard mode)
                 if *self.display_mode.read() == crate::models::ModelDisplayMode::Standard {
                     let metadata = self.model_metadata.read().clone();
@@ -142,44 +151,50 @@ impl App {
             }
             FocusedPane::FlareRevisions => {
                 // plans/flare-models.md §3.5: 'd' in Flare mode opens the
-                // revision-picker popup — the snapshot is bound to the
-                // currently selected model (the scan's owner by the
-                // plans/flare-models.md §3.4
-                // ownership rule: every selection change clears
-                // `flare_info`, so it can only describe the selection).
-                let Some(info) = self.flare_info.read().clone() else {
-                    return;
-                };
-                if info.revisions.is_empty() {
-                    return;
-                }
-                let model_id = {
-                    let models = self.models.read();
-                    let Some(id) = self
-                        .list_state
-                        .selected()
-                        .and_then(|idx| models.get(idx))
-                        .map(|model| model.id.clone())
-                    else {
-                        return;
-                    };
-                    id
-                };
-                let count = info.revisions.len();
-                self.popup_mode = PopupMode::FlareRevision {
-                    model_id,
-                    choices: info
-                        .revisions
-                        .iter()
-                        .map(FlareRevisionChoice::from_revision)
-                        .collect(),
-                    cursor: 0,
-                };
-                *self.status.write() =
-                    format!("Select a FLARE revision to download ({count} available)");
+                // revision-picker popup.
+                self.open_flare_revision_picker();
             }
             _ => {}
         }
+    }
+
+    /// Open the FLARE revision-picker popup (plans/flare-models.md §3.5):
+    /// the snapshot is bound to the currently selected model (the scan's
+    /// owner by the plans/flare-models.md §3.4 ownership rule: every
+    /// selection change clears `flare_info`, so it can only describe the
+    /// selection). Called from the FlareRevisions pane and the Models
+    /// list in Flare mode — silent no-op without a scan snapshot,
+    /// revisions, or a selected model.
+    pub(super) fn open_flare_revision_picker(&mut self) {
+        let Some(info) = self.flare_info.read().clone() else {
+            return;
+        };
+        if info.revisions.is_empty() {
+            return;
+        }
+        let model_id = {
+            let models = self.models.read();
+            let Some(id) = self
+                .list_state
+                .selected()
+                .and_then(|idx| models.get(idx))
+                .map(|model| model.id.clone())
+            else {
+                return;
+            };
+            id
+        };
+        let count = info.revisions.len();
+        self.popup_mode = PopupMode::FlareRevision {
+            model_id,
+            choices: info
+                .revisions
+                .iter()
+                .map(FlareRevisionChoice::from_revision)
+                .collect(),
+            cursor: 0,
+        };
+        *self.status.write() = format!("Select a FLARE revision to download ({count} available)");
     }
 
     /// Complete download with validation - create metadata and queue download
@@ -1896,6 +1911,86 @@ mod tests {
             .await
             .downloads
             .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// fix6 — 'd' from the Models LIST in Flare mode opens the SAME
+    /// revision picker (plans/flare-models.md §3.5: "'d' in Flare mode
+    /// opens the popup" — the Models-list binding was missed, leaving 'd'
+    /// a silent no-op there). Same snapshot binding as the FlareRevisions
+    /// pane: the popup carries the selected model's id with cursor 0.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn d_from_models_list_in_flare_mode_opens_revision_popup() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-models-d-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        // The FLARE Revisions pane is NOT focused — 'd' comes from the
+        // Models list while a FLARE model is selected.
+        app.focused_pane = FocusedPane::Models;
+
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+
+        let PopupMode::FlareRevision {
+            model_id,
+            choices,
+            cursor,
+        } = &app.popup_mode
+        else {
+            panic!(
+                "'d' from Models in Flare mode must open the FlareRevision popup, got {:?}",
+                app.popup_mode
+            );
+        };
+        assert_eq!(model_id, "author/model");
+        assert_eq!(*cursor, 0);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].revision, "gb202");
+        assert_eq!(choices[1].revision, "v2");
+        assert_eq!(
+            *app.status.read(),
+            "Select a FLARE revision to download (2 available)"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// fix6 — without a scan snapshot (`flare_info` None) 'd' from the
+    /// Models list in Flare mode stays the SILENT no-op the snapshot
+    /// guards always had: no popup, no status hint, nothing enqueued.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn d_from_models_list_in_flare_mode_without_snapshot_is_silent_noop() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp =
+            std::env::temp_dir().join(format!("app-flare-models-d-none-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        app.focused_pane = FocusedPane::Models;
+        *app.flare_info.write() = None;
+
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        assert!(
+            !app.status.read().contains("Select a FLARE revision"),
+            "no status hint — the no-op is silent, got: {}",
+            app.status.read()
+        );
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
