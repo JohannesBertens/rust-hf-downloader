@@ -820,6 +820,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.19.0] | 2026-10-30 | FLARE-aware scan (`/refs` + per-revision trees at pinned commits), `Flare` viewer mode + revision-picker popup with editable download path, `download --for flare --gpus` with nvidia-smi device-ID branch auto-selection + serve-path handoff (`flare run <path>`), revision-scoped destinations via remote_path split, commit pinning, existence-based pre-flight guards |
 | [2.18.0] | 2026-10-24 | Audit hardening: download-channel trust rule (https/file + loopback-http only) in installers + `update`, Link-header tree pagination (no more silent truncation of >1000-entry dirs), corrupt registry archived not wiped, manifest asset-name/hex-oid validation, installer rollback + PATH guard |
 | [2.17.0] | 2026-10-14 | Small-terminal HUD: strip borrows up to 2 rows from the bottom panels instead of vanishing (full strip at 31 rows), status-bar fallback notice below 30, 1-char speed/ETA clip fix; first fully-automated release incl. crates.io publish |
 | [2.16.0] | 2026-10-13 | Rate limiter: rate `0` = unlimited, not a panic (config-file path); crates.io publish automated as a release job (PR #53) |
