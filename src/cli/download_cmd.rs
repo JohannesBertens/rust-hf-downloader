@@ -665,10 +665,16 @@ mod tests {
 
     /// Packed: quoted final path of the primary (via the pure
     /// `final_path_for`), `--gpus` echoed verbatim when present, omitted
-    /// when absent.
+    /// when absent. Expectations are built from the same quoting helpers
+    /// the line uses (POSIX quoting is a documented Windows no-op —
+    /// pinning the QUOTED literal broke the Windows release build once).
     #[test]
     fn handoff_packed_quotes_path_and_echoes_gpus_verbatim() {
         let root = std::path::Path::new("/data/models/org/model");
+        let expected_path = quote_posix_path(
+            &crate::download::final_path_for(root, "gb10/qwen3.8-flash-next-gb10-tp1.safetensors")
+                .unwrap(),
+        );
         let line = flare_handoff_line(
             &packed(),
             false,
@@ -681,7 +687,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors' --gpus '0,1-2'"
+            format!(
+                "flare run {expected_path} --gpus {}",
+                quote_posix_spec("0,1-2")
+            )
         );
 
         let no_gpus = flare_handoff_line(
@@ -694,10 +703,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(
-            no_gpus,
-            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors'"
-        );
+        assert_eq!(no_gpus, format!("flare run {expected_path}"));
     }
 
     /// A `--gpus` spec containing whitespace (`0, 1`) is single-quoted in
@@ -717,7 +723,17 @@ mod tests {
         .unwrap();
         assert_eq!(
             line,
-            "flare run '/data/models/org/model/gb10/qwen3.8-flash-next-gb10-tp1.safetensors' --gpus '0, 1'"
+            format!(
+                "flare run {} --gpus {}",
+                quote_posix_path(
+                    &crate::download::final_path_for(
+                        std::path::Path::new("/data/models/org/model"),
+                        "gb10/qwen3.8-flash-next-gb10-tp1.safetensors"
+                    )
+                    .unwrap()
+                ),
+                quote_posix_spec("0, 1")
+            )
         );
     }
 
@@ -735,7 +751,14 @@ mod tests {
             Some("0"),
         )
         .unwrap();
-        assert_eq!(line, "flare run '/data/models/org/model/gb202' --gpus '0'");
+        assert_eq!(
+            line,
+            format!(
+                "flare run {} --gpus {}",
+                quote_posix_path(&std::path::Path::new("/data/models/org/model").join("gb202")),
+                quote_posix_spec("0")
+            )
+        );
     }
 
     /// Partial selection (--include/--exclude present) replaces the command
