@@ -161,6 +161,7 @@ f. **Handoff line, gated**: printed by the human reporter ONLY when (i) the run 
 - `events/`: 'd' in Flare mode opens the popup; ↑/↓ move; Enter enqueues; Esc cancels; Tab cycles Models ↔ FlareRevisions (GGUF precedent).
 - `downloads.rs`: `trigger_flare_download(revision)` — FileSpecs from `FlareRepoInfo` with **commit-pinned** `resolve_url`s, `expected_sha256` from `lfs.oid` (§3.3e), **revision-prefixed filenames + destinations per §3.3d** (same lifecycle parity and pre-flight, including the moved-branch guard); enqueue via the existing `EnqueuePolicy::tui_repository` (constructor verified at `src/engine/enqueue.rs:383`, already used by the repository flow). Registry entries store the commit sha; note `src/registry.rs:303` writes `revision: None` when a revision equals `"main"` — FLARE payload revisions are never `main`, so the field round-trips.
 - Popup rendering in `render/popups.rs`; snapshots + manifest update. TUI prints no `flare run` hint — intentional (D1's handoff rides D5, the CLI).
+- Amendment (post-gate UX parity, 2026-10-30): the picker's Enter opens the standard DownloadPath popup (editable destination, prefilled default_directory); enqueue uses the chosen path — matching every other TUI download flow.
 
 ### 3.6 Docs & wiring
 

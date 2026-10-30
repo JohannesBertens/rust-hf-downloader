@@ -205,6 +205,17 @@ impl App {
             return;
         }
 
+        // FLARE revision (the revision picker's Enter stashed it;
+        // plans/flare-models.md §3.5 as amended 2026-10-30): enqueue the
+        // package at the EDITED destination — the same step every other
+        // flow takes from this popup.
+        if let Some((model_id, revision)) = self.pending_flare_revision.take() {
+            let base_path = self.download_path_input.value().to_string();
+            self.trigger_flare_download_at(&model_id, &revision, &base_path)
+                .await;
+            return;
+        }
+
         // Check if we're downloading a full repository (non-GGUF model)
         if self.focused_pane == FocusedPane::Models
             && *self.display_mode.read() == crate::models::ModelDisplayMode::Standard
@@ -563,11 +574,14 @@ impl App {
     }
 
     /// Enter in the FLARE revision-picker popup (plans/flare-models.md
-    /// plans/flare-models.md §3.5): re-resolve the FULL revision from
-    /// `flare_info` by the
-    /// choice's commit pin and enqueue through
-    /// [`App::trigger_flare_download`]. The popup is already closed when
-    /// this runs (the key handler takes its state out first).
+    /// §3.5, as amended 2026-10-30): re-resolve the FULL revision from
+    /// `flare_info` by the choice's commit pin, then open the STANDARD
+    /// DownloadPath popup with the selection stashed in
+    /// `pending_flare_revision` — UX parity with every other 'd' flow
+    /// (the user chooses the destination; `confirm_download` enqueues at
+    /// the edited path). Nothing enqueues here. The popup is already
+    /// closed when this runs (the key handler takes its state out first —
+    /// this method sets `popup_mode` fresh).
     pub async fn confirm_flare_revision_download(
         &mut self,
         model_id: String,
@@ -608,11 +622,25 @@ impl App {
             ));
             return;
         };
-        self.trigger_flare_download(&model_id, revision).await;
+        // Stash the re-resolved selection (the `pending_tree_download`
+        // pattern), prefill the editable destination with the default
+        // dir, and hand the flow to the DownloadPath popup — the same
+        // shape the Standard Models arm of `trigger_download` uses.
+        let file_count = crate::ui::render::flare_package_files(&revision.package).len();
+        self.pending_flare_revision = Some((model_id, revision.clone()));
+        self.download_path_input =
+            Input::default().with_value(self.options.default_directory.clone());
+        self.popup_mode = PopupMode::DownloadPath;
+        *self.status.write() = format!(
+            "Download FLARE package {} ({} files) to:",
+            revision.revision, file_count
+        );
     }
 
-    /// Queue one FLARE revision's package, COMMIT-PINNED
-    /// (plans/flare-models.md §3.5):
+    /// Queue one FLARE revision's package at `base_path`, COMMIT-PINNED
+    /// (plans/flare-models.md §3.5; the destination step is the standard
+    /// DownloadPath popup — `confirm_download` passes the EDITED path,
+    /// tests pass an explicit base):
     ///
     /// - every file's `revision` is the 40-hex `target_commit` — never the
     ///   branch name, so branch movement between scan and download cannot
@@ -634,8 +662,13 @@ impl App {
     /// Enqueued via the existing `EnqueuePolicy::tui_repository`
     /// transaction (queued-size registry entries, queue accounting, HUD
     /// mirror, rollback — the repository flow's flavor).
-    pub async fn trigger_flare_download(&mut self, model_id: &str, revision: &FlareRevision) {
-        let base_path = self.options.default_directory.clone();
+    pub async fn trigger_flare_download_at(
+        &mut self,
+        model_id: &str,
+        revision: &FlareRevision,
+        base_path: &str,
+    ) {
+        let base_path = base_path.to_string();
         let model_root = model_root(&base_path, model_id);
         let files = crate::ui::render::flare_package_files(&revision.package);
 
@@ -758,7 +791,7 @@ fn model_root_or(base: &str, model_id: &str, fallback: PathBuf) -> PathBuf {
 
 /// plans/flare-models.md §3.3d TUI resume shape test: does this registry
 /// entry carry a revision-scoped FLARE destination (the form
-/// [`App::trigger_flare_download`] records)? The persisted
+/// [`App::trigger_flare_download_at`] records)? The persisted
 /// `remote_path` field is the marker — every FLARE frontend (CLI and TUI)
 /// sets it at enqueue, and no legacy flow does.
 fn is_flare_shaped_entry(metadata: &DownloadMetadata) -> bool {
@@ -1652,7 +1685,8 @@ mod tests {
 
         let mut app = app_in_flare_mode(&tmp);
         let revision = packed_flare_revision();
-        app.trigger_flare_download("author/model", &revision).await;
+        app.trigger_flare_download_at("author/model", &revision, &base_path(&tmp))
+            .await;
 
         let root = tmp.join("dl").join("author").join("model");
         assert_eq!(
@@ -1724,7 +1758,8 @@ mod tests {
 
         let mut app = app_in_flare_mode(&tmp);
         let revision = directory_flare_revision();
-        app.trigger_flare_download("author/model", &revision).await;
+        app.trigger_flare_download_at("author/model", &revision, &base_path(&tmp))
+            .await;
 
         // Directory form: primary + weights/** + deployments/** — every
         // filename prefixed with the revision dir, nested repo layout
@@ -1813,7 +1848,8 @@ mod tests {
         // same revision dir, different pin: the branch has moved.
         let mut app = app_in_flare_mode(&tmp);
         let revision = packed_flare_revision();
-        app.trigger_flare_download("author/model", &revision).await;
+        app.trigger_flare_download_at("author/model", &revision, &base_path(&tmp))
+            .await;
 
         // The blocked-path strings: the error names the plans/flare-models.md §3.3d guard, the
         // status names the pre-flight.
@@ -1995,8 +2031,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Popup arrows move the cursor (bounded), Enter enqueues the CHOSEN
-    /// revision (re-resolved from flare_info by commit pin).
+    /// Popup arrows move the cursor (bounded); Enter on the picker opens
+    /// the standard DownloadPath popup with the CHOSEN revision stashed
+    /// (re-resolved from flare_info by commit pin), and the DownloadPath
+    /// Enter enqueues it — plans/flare-models.md §3.5 as amended
+    /// 2026-10-30: the picker's Enter no longer enqueues directly; the
+    /// destination step is the same DownloadPath popup every other 'd'
+    /// flow uses.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn flare_popup_arrows_move_and_enter_enqueues_the_chosen_revision() {
@@ -2024,10 +2065,34 @@ mod tests {
         }
         app.on_key_event(key(crossterm::event::KeyCode::Down)).await;
 
+        // Picker Enter: the DESTINATION step — DownloadPath popup open,
+        // the chosen revision stashed (v2 pinned by its own commit),
+        // nothing enqueued yet, the input prefilled with the default dir.
+        app.on_key_event(key(crossterm::event::KeyCode::Enter))
+            .await;
+
+        assert_eq!(app.popup_mode, PopupMode::DownloadPath);
+        let (stashed_model, stashed_revision) = app.pending_flare_revision.as_ref().unwrap();
+        assert_eq!(stashed_model, "author/model");
+        assert_eq!(stashed_revision.revision, "v2");
+        assert_eq!(stashed_revision.target_commit, FLARE_COMMIT_2);
+        assert_eq!(
+            *app.status.read(),
+            "Download FLARE package v2 (3 files) to:"
+        );
+        assert_eq!(
+            app.download_path_input.value(),
+            app.options.default_directory
+        );
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+
+        // DownloadPath Enter: enqueue at the prefilled default path.
         app.on_key_event(key(crossterm::event::KeyCode::Enter))
             .await;
 
         assert_eq!(app.popup_mode, PopupMode::None);
+        assert!(app.pending_flare_revision.is_none(), "stash consumed");
         // The SECOND revision (v2, directory form) — the cursor row at
         // Enter time, pinned by its own commit: all three package files.
         assert_queue_accounting(
@@ -2044,6 +2109,157 @@ mod tests {
         let drained = drain_downloads(&app).await;
         assert!(drained.iter().all(|m| m.revision == FLARE_COMMIT_2));
         assert!(app.error.read().is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// fix7 (plans/flare-models.md §3.5 as amended 2026-10-30): the
+    /// picker's Enter at the DEFAULT cursor (packed revision) opens the
+    /// standard DownloadPath popup with the selection stashed — popup
+    /// mode, stash contents, prefilled input, status line, and NOTHING
+    /// enqueued yet.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn flare_picker_enter_opens_download_path_popup_with_stashed_revision() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-path-open-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+        app.on_key_event(key(crossterm::event::KeyCode::Enter))
+            .await;
+
+        // The destination step: the standard editable-path popup, not an
+        // immediate enqueue.
+        assert_eq!(app.popup_mode, PopupMode::DownloadPath);
+        let (stashed_model, stashed_revision) = app.pending_flare_revision.as_ref().unwrap();
+        assert_eq!(stashed_model, "author/model");
+        assert_eq!(stashed_revision.revision, "gb202");
+        assert_eq!(stashed_revision.target_commit, FLARE_COMMIT);
+        // The full re-resolved revision rides the stash (not the popup's
+        // display snapshot): the package files are present.
+        assert_eq!(
+            crate::ui::render::flare_package_files(&stashed_revision.package).len(),
+            1
+        );
+        // Input prefilled with the default directory, editable-destination
+        // status line naming the revision and its file count.
+        assert_eq!(
+            app.download_path_input.value(),
+            app.options.default_directory
+        );
+        assert_eq!(
+            *app.status.read(),
+            "Download FLARE package gb202 (1 files) to:"
+        );
+        assert!(app.error.read().is_none());
+
+        // Nothing enqueued at this step.
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// fix7: the DownloadPath popup is genuinely EDITABLE, and the FLARE
+    /// enqueue uses the EDITED destination — registry entries' local_path
+    /// sit under model_root(EDITED, model), not the default dir.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn flare_download_path_enter_enqueues_at_the_edited_path() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-path-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+        app.on_key_event(key(crossterm::event::KeyCode::Enter))
+            .await;
+
+        // EDIT the destination through the real key path: typed characters
+        // land in the input (appended at the cursor), turning
+        // `<tmp>/dl` into `<tmp>/dl2`.
+        app.on_key_event(key(crossterm::event::KeyCode::Char('2')))
+            .await;
+        let edited = format!("{}2", base_path(&tmp));
+        assert_eq!(app.download_path_input.value(), edited);
+
+        // DownloadPath Enter: enqueue at the EDITED base.
+        app.on_key_event(key(crossterm::event::KeyCode::Enter))
+            .await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        assert!(app.pending_flare_revision.is_none(), "stash consumed");
+        let root = PathBuf::from(&edited).join("author").join("model");
+        assert_queue_accounting(&app, 1, 111, &["gb202/pkg.safetensors"]).await;
+        let drained = drain_downloads(&app).await;
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].base_path, root);
+        assert_eq!(drained[0].revision, FLARE_COMMIT);
+
+        // The registry entry's local destination sits under the EDITED
+        // root (model_root(EDITED, model)), revision-dir prefixed.
+        let registry = app.engine.download_registry.lock().await;
+        assert_eq!(registry.downloads.len(), 1);
+        assert_eq!(
+            PathBuf::from(&registry.downloads[0].local_path),
+            root.join("gb202").join("pkg.safetensors")
+        );
+        drop(registry);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// fix7: Esc in the DownloadPath popup drops the stashed FLARE
+    /// revision (the `pending_tree_download` mirror) — popup closed,
+    /// cancel status, nothing enqueued anywhere.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn flare_download_path_esc_clears_pending_and_enqueues_nothing() {
+        let _env_lock = crate::paths::ENV_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("app-flare-path-esc-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _guard = EnvGuard::install(&tmp, &format!("http://127.0.0.1:{}", closed_port()));
+
+        let mut app = app_in_flare_mode(&tmp);
+        app.on_key_event(key(crossterm::event::KeyCode::Char('d')))
+            .await;
+        app.on_key_event(key(crossterm::event::KeyCode::Enter))
+            .await;
+        assert!(app.pending_flare_revision.is_some(), "stash seeded");
+
+        app.on_key_event(key(crossterm::event::KeyCode::Esc)).await;
+
+        assert_eq!(app.popup_mode, PopupMode::None);
+        assert!(app.pending_flare_revision.is_none(), "stash cleared");
+        assert_eq!(*app.status.read(), "Download cancelled");
+        assert_queue_accounting(&app, 0, 0, &[]).await;
+        assert!(drain_downloads(&app).await.is_empty());
+        assert!(app
+            .engine
+            .download_registry
+            .lock()
+            .await
+            .downloads
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

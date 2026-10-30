@@ -412,6 +412,10 @@ impl App {
             }
             KeyCode::Esc => {
                 self.pending_tree_download = None;
+                // plans/flare-models.md §3.5 as amended 2026-10-30: the
+                // FLARE revision stashed by the picker's Enter rides this
+                // popup too — Esc drops it with the tree selection.
+                self.pending_flare_revision = None;
                 self.popup_mode = PopupMode::None;
                 *self.status.write() = "Download cancelled".to_string();
             }
@@ -436,11 +440,13 @@ impl App {
     }
 
     /// Handle keyboard input in the FLARE revision-picker popup
-    /// (plans/flare-models.md §3.5): ↑/↓ (j/k) move the cursor (bounded,
-    /// no wrap — a picker, not a list), Enter enqueues the selected
-    /// revision commit-pinned, Esc cancels. The popup state is taken out
-    /// FIRST because Enter's confirm path awaits and must not hold a
-    /// borrow of `self.popup_mode` across it.
+    /// (plans/flare-models.md §3.5, as amended 2026-10-30): ↑/↓ (j/k)
+    /// move the cursor (bounded, no wrap — a picker, not a list), Enter
+    /// opens the STANDARD DownloadPath popup with the selection stashed
+    /// (the user chooses the destination — parity with every other 'd'
+    /// flow), Esc cancels. The popup state is taken out FIRST because
+    /// Enter's confirm path awaits and must not hold a borrow of
+    /// `self.popup_mode` across it.
     pub(super) async fn handle_flare_revision_popup_input(&mut self, key: KeyEvent) {
         let popup = std::mem::replace(&mut self.popup_mode, PopupMode::None);
         let PopupMode::FlareRevision {
@@ -473,8 +479,9 @@ impl App {
                 restore(self, model_id, choices, cursor);
             }
             KeyCode::Enter => {
-                // Popup stays closed on every Enter outcome; the confirm
-                // path owns the status/error strings.
+                // The picker closes on every Enter outcome; the confirm
+                // path re-opens the standard DownloadPath popup and owns
+                // the status/error strings.
                 self.confirm_flare_revision_download(model_id, choices, cursor)
                     .await;
             }

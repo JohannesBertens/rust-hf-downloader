@@ -36,6 +36,14 @@ pub struct App {
     /// pressed on the Standard-mode file tree: (repo path, is_directory).
     /// A directory queues every file under it. Cleared on confirm/cancel.
     pub pending_tree_download: Option<(String, bool)>,
+    /// FLARE revision stashed by `confirm_flare_revision_download` when
+    /// the revision picker's Enter fires: (model_id, full revision). The
+    /// standard DownloadPath popup owns the next step — `confirm_download`
+    /// takes it back and enqueues at the EDITED destination
+    /// (plans/flare-models.md §3.5 as amended 2026-10-30: UX parity with
+    /// every other 'd' flow; the `pending_tree_download` stashing
+    /// pattern). Cleared on confirm/cancel.
+    pub pending_flare_revision: Option<(String, crate::models::FlareRevision)>,
     /// Single owned bundle of engine-owned shared state (channels, queue/
     /// registry/progress Arcs, verification counters). Every TUI access to
     /// engine state goes through explicit `self.engine.<field>` reads — no
@@ -180,6 +188,7 @@ impl App {
             popup_mode: PopupMode::None,
             download_path_input,
             pending_tree_download: None,
+            pending_flare_revision: None,
             engine,
             download_tx,
             incomplete_downloads: Vec::new(),
