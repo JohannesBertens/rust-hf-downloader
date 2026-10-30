@@ -573,8 +573,8 @@ impl App {
         self.finish_enqueue(&outcome, success, "Failed to start downloads");
     }
 
-    /// Enter in the FLARE revision-picker popup (plans/flare-models.md
-    /// §3.5, as amended 2026-10-30): re-resolve the FULL revision from
+    /// Enter in the FLARE revision-picker popup (plans/flare-models.md §3.5
+    /// as amended 2026-10-30): re-resolve the FULL revision from
     /// `flare_info` by the choice's commit pin, then open the STANDARD
     /// DownloadPath popup with the selection stashed in
     /// `pending_flare_revision` — UX parity with every other 'd' flow
