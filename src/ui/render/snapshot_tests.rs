@@ -1,6 +1,9 @@
 use super::test_utils::{draw_ui_with_overlay, test_terminal, UiFixture, TERMINAL_WIDTH};
 use super::*;
-use crate::models::{AppOptions, DownloadMetadata, DownloadStatus, SortDirection, SortField};
+use crate::gpu::FlarePlatform;
+use crate::models::{
+    AppOptions, DownloadMetadata, DownloadStatus, FlareRevisionChoice, SortDirection, SortField,
+};
 use crate::ui::app::options::OptionsDialogState;
 
 #[test]
@@ -55,6 +58,29 @@ fn snapshot_render_ui_quantization_panels() {
         |_, _| {},
     );
     snap_ui("snapshot_render_ui_quantization_panels", &terminal);
+}
+
+#[test]
+fn snapshot_render_ui_flare_panels() {
+    // plans/flare-models.md §3.4: revision cards (star on the GB202 card —
+    // the session platform
+    // matches its arch token; the GB10 card stays unstarred; the v2 tag
+    // is the directory-form card), repo facts on the right, and the
+    // plans/flare-models.md §3.4a [FLARE] badge on the badged Results row.
+    let mut fixture = UiFixture::flare_view();
+    let mut terminal = test_terminal();
+    draw_ui_with_overlay(
+        &mut terminal,
+        &mut fixture,
+        ModelDisplayMode::Flare,
+        FocusedPane::FlareRevisions,
+        None,
+        0,
+        "FLARE repository: 3 payload revision(s) — press 'd' to download",
+        "",
+        |_, _| {},
+    );
+    snap_ui("snapshot_render_ui_flare_panels", &terminal);
 }
 
 #[test]
@@ -146,6 +172,7 @@ fn snapshot_resume_popup() {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         },
         DownloadMetadata {
             model_id: "Qwen/Qwen2.5-7B".to_string(),
@@ -159,6 +186,7 @@ fn snapshot_resume_popup() {
             status: DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         },
     ];
     let mut terminal = test_terminal();
@@ -273,4 +301,41 @@ fn snapshot_filter_toolbar_downloads_focused() {
         })
         .expect("failed to draw filter toolbar");
     snap_ui("snapshot_filter_toolbar_downloads_focused", &terminal);
+}
+
+#[test]
+fn snapshot_flare_revision_popup() {
+    // plans/flare-models.md §3.5: the picker over the Flare-mode UI (the
+    // app loop draws popups last, same closure) — cursor on row 0, star on
+    // the GB202 row (session platform match), the GB10 row unstarred, the
+    // v2 directory row with its 3-file package size.
+    let info = super::test_utils::flare_repo_fixture();
+    let choices: Vec<FlareRevisionChoice> = info
+        .revisions
+        .iter()
+        .map(FlareRevisionChoice::from_revision)
+        .collect();
+    let platform = Some(FlarePlatform::Gb202);
+    let mut fixture = UiFixture::flare_view();
+    let mut terminal = test_terminal();
+    draw_ui_with_overlay(
+        &mut terminal,
+        &mut fixture,
+        ModelDisplayMode::Flare,
+        FocusedPane::FlareRevisions,
+        None,
+        0,
+        "Select a FLARE revision to download (3 available)",
+        "",
+        |frame, _fixture| {
+            render_flare_revision_popup(
+                frame,
+                "local-inference-lab/Qwen3.8-Flash-Next-FLARE",
+                &choices,
+                0,
+                platform.as_ref(),
+            );
+        },
+    );
+    snap_ui("snapshot_flare_revision_popup", &terminal);
 }

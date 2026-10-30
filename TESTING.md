@@ -65,6 +65,8 @@ so each subject is discoverable and independently runnable).
 | Module | What it pins | Run |
 |---|---|---|
 | `src/config.rs` | config load/save paths; ENGINE_OPTIONS declarative table (M6/C4) — per-field apply + snapshot round-trip pin | `cargo test config` |
+| `src/api/flare.rs` (+ flare_tests.rs) | FLARE repo scanning: /refs + per-revision tree shapes, detection chain (tag → publisher.json+config markers), pure FlareRepoInfo assembly (alias dedupe, choose-file package rule, commit drop rule), package-name grammar, publisher fingerprint — inline recorded fixtures for the three real repos | `cargo test flare` |
+| `src/gpu.rs` | FLARE platform detection: pinned PCI device-ID table (GB203/205 absent), --gpus grammar edges, CUDA_VISIBLE_DEVICES resolution, pure decision core over CSV fixtures (no subprocess in tests) | `cargo test gpu` |
 | `src/paths.rs` | app path-resolution precedence + sanitize security (hub-cache tests moved to cache_layout, M6/C7) | `cargo test paths` |
 | `src/registry.rs` + `src/registry/registry_tests.rs` | byte-exact TOML goldens of every typed registry op, single-writer serialization + all-writers-win concurrency contracts, atomic-save temp-file hygiene | `cargo test registry` |
 | `src/engine/enqueue.rs` | 9 EnqueuePolicy characterization tests (the single enqueue transaction: the eight W2.1 rows + the E4 no-write registry pin `enqueue_no_write_constructors_leave_disk_registry_byte_identical`) | `cargo test enqueue` |

@@ -31,6 +31,13 @@ mod run;
 mod search_cmd;
 mod update_cmd;
 
+// plans/flare-models.md §3.3d pre-flight, shared with the TUI's FLARE
+// trigger (plans/flare-models.md §3.5): a pure registry+disk check that both frontends run
+// before enqueue. Frontend-to-frontend visibility is deliberate and
+// scoped to these three items; the long-term home (a shared module or
+// registry-adjacent query) is recorded in docs/DEFERRED.md.
+pub(crate) use resolve::{flare_preflight, FlarePreflightFile};
+
 // Per-subject test modules (M6/T1: the former 1986-line cli/tests.rs
 // grab-bag split by subject; shared fixtures live in testutil). Snapshot
 // goldens stay in src/cli/snapshots/ under each module's prefix.

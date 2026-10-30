@@ -5,6 +5,7 @@ mod config;
 mod download;
 mod engine;
 mod fmt;
+mod gpu;
 mod http_client;
 mod models;
 mod paths;

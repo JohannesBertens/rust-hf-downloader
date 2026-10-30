@@ -174,6 +174,9 @@ impl App {
                     FocusedPane::FileTree => {
                         self.next_file_tree_item();
                     }
+                    FocusedPane::FlareRevisions => {
+                        self.next_flare_revision();
+                    }
                 }
             }
             (_, KeyCode::Up | KeyCode::Char('k')) => {
@@ -197,6 +200,9 @@ impl App {
                     FocusedPane::FileTree => {
                         self.previous_file_tree_item();
                     }
+                    FocusedPane::FlareRevisions => {
+                        self.previous_flare_revision();
+                    }
                 }
             }
             (_, KeyCode::Enter) => {
@@ -219,6 +225,9 @@ impl App {
                     }
                     FocusedPane::FileTree => {
                         self.toggle_file_tree_expansion();
+                    }
+                    FocusedPane::FlareRevisions => {
+                        self.show_flare_revision_details().await;
                     }
                 }
             }
@@ -403,6 +412,10 @@ impl App {
             }
             KeyCode::Esc => {
                 self.pending_tree_download = None;
+                // plans/flare-models.md §3.5 as amended 2026-10-30: the
+                // FLARE revision stashed by the picker's Enter rides this
+                // popup too — Esc drops it with the tree selection.
+                self.pending_flare_revision = None;
                 self.popup_mode = PopupMode::None;
                 *self.status.write() = "Download cancelled".to_string();
             }
@@ -423,6 +436,61 @@ impl App {
                 self.popup_mode = PopupMode::Options;
             }
             _ => {}
+        }
+    }
+
+    /// Handle keyboard input in the FLARE revision-picker popup
+    /// (plans/flare-models.md §3.5, as amended 2026-10-30): ↑/↓ (j/k)
+    /// move the cursor (bounded, no wrap — a picker, not a list), Enter
+    /// opens the STANDARD DownloadPath popup with the selection stashed
+    /// (the user chooses the destination — parity with every other 'd'
+    /// flow), Esc cancels. The popup state is taken out FIRST because
+    /// Enter's confirm path awaits and must not hold a borrow of
+    /// `self.popup_mode` across it.
+    pub(super) async fn handle_flare_revision_popup_input(&mut self, key: KeyEvent) {
+        let popup = std::mem::replace(&mut self.popup_mode, PopupMode::None);
+        let PopupMode::FlareRevision {
+            model_id,
+            choices,
+            mut cursor,
+        } = popup
+        else {
+            // Defensive: the router only calls this for FlareRevision.
+            self.popup_mode = popup;
+            return;
+        };
+        let restore =
+            |app: &mut Self, model_id: String, choices: Vec<FlareRevisionChoice>, cursor: usize| {
+                app.popup_mode = PopupMode::FlareRevision {
+                    model_id,
+                    choices,
+                    cursor,
+                };
+            };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                cursor = cursor.saturating_sub(1);
+                restore(self, model_id, choices, cursor);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !choices.is_empty() {
+                    cursor = (cursor + 1).min(choices.len() - 1);
+                }
+                restore(self, model_id, choices, cursor);
+            }
+            KeyCode::Enter => {
+                // The picker closes on every Enter outcome; the confirm
+                // path re-opens the standard DownloadPath popup and owns
+                // the status/error strings.
+                self.confirm_flare_revision_download(model_id, choices, cursor)
+                    .await;
+            }
+            KeyCode::Esc => {
+                *self.status.write() = "Download cancelled".to_string();
+            }
+            _ => {
+                restore(self, model_id, choices, cursor);
+            }
         }
     }
 

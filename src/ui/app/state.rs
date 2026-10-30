@@ -36,6 +36,14 @@ pub struct App {
     /// pressed on the Standard-mode file tree: (repo path, is_directory).
     /// A directory queues every file under it. Cleared on confirm/cancel.
     pub pending_tree_download: Option<(String, bool)>,
+    /// FLARE revision stashed by `confirm_flare_revision_download` when
+    /// the revision picker's Enter fires: (model_id, full revision). The
+    /// standard DownloadPath popup owns the next step — `confirm_download`
+    /// takes it back and enqueues at the EDITED destination
+    /// (plans/flare-models.md §3.5 as amended 2026-10-30: UX parity with
+    /// every other 'd' flow; the `pending_tree_download` stashing
+    /// pattern). Cleared on confirm/cancel.
+    pub pending_flare_revision: Option<(String, crate::models::FlareRevision)>,
     /// Single owned bundle of engine-owned shared state (channels, queue/
     /// registry/progress Arcs, verification counters). Every TUI access to
     /// engine state goes through explicit `self.engine.<field>` reads — no
@@ -68,6 +76,25 @@ pub struct App {
     pub file_tree: Arc<RwLock<Option<FileTreeNode>>>,
     pub file_tree_state: ListState,
     pub display_mode: Arc<RwLock<crate::models::ModelDisplayMode>>,
+    // FLARE viewer state (plans/flare-models.md §3.4): the per-model scan
+    // result (cleared
+    // wherever the quant/tree state clears — see `clear_model_details`),
+    // the SESSION-scoped detected platform (detected once via
+    // spawn_blocking in `App::run`, NEVER cleared — hardware does not
+    // change per model; revision cards star themselves against it), and
+    // the revision-cards cursor.
+    pub flare_info: Arc<RwLock<Option<FlareRepoInfo>>>,
+    pub flare_platform: Arc<RwLock<Option<crate::gpu::FlarePlatform>>>,
+    pub flare_list_state: ListState,
+    /// plans/flare-models.md §3.4 ownership rule (stale-scan fix): bumped
+    /// on every selection
+    /// change and every new detail-scan spawn; a FLARE scan publishes its
+    /// result only while its captured epoch is still current. Plain
+    /// `AtomicU64` on purpose — no lock level, lock-free by construction.
+    pub flare_scan_epoch: Arc<std::sync::atomic::AtomicU64>,
+    /// Publication gate for FLARE scan state (impl-gate race fix): see
+    /// `FlareScanShared::publish` in search.rs.
+    pub flare_scan_gate: Arc<parking_lot::Mutex<()>>,
     // Flags to trigger deferred loading on next loop iteration
     pub needs_load_quantizations: bool,
     pub needs_search_models: bool,
@@ -161,6 +188,7 @@ impl App {
             popup_mode: PopupMode::None,
             download_path_input,
             pending_tree_download: None,
+            pending_flare_revision: None,
             engine,
             download_tx,
             incomplete_downloads: Vec::new(),
@@ -171,6 +199,12 @@ impl App {
             file_tree: Arc::new(RwLock::new(None)),
             file_tree_state,
             display_mode: Arc::new(RwLock::new(crate::models::ModelDisplayMode::Gguf)),
+            // FLARE viewer state (plans/flare-models.md §3.4)
+            flare_info: Arc::new(RwLock::new(None)),
+            flare_platform: Arc::new(RwLock::new(None)),
+            flare_list_state: ListState::default(),
+            flare_scan_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            flare_scan_gate: Arc::new(parking_lot::Mutex::new(())),
             needs_load_quantizations: false,
             needs_search_models: false,
             last_prefetch_time: Arc::new(Mutex::new(std::time::Instant::now())),

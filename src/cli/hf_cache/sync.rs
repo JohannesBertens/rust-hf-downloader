@@ -456,6 +456,8 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             filename: item.repo_path.clone(),
             size_bytes: item.size,
             sha256: item.sha256.clone(),
+            // None ⇒ byte-identical layout/URL behavior (plans/flare-models.md §3.3d)
+            remote_path: None,
         })
         .collect();
     // base_path = staging dir, filename = repo path (plans/hf-cache-sync.md §5.1); the
@@ -472,6 +474,8 @@ pub(super) async fn run_hf_cache_sync(args: HfCacheSyncArgs) -> i32 {
             expected_sha256: item.sha256.clone(),
             hf_token: token.clone(),
             total_size: item.size,
+            // None ⇒ byte-identical layout/URL behavior (plans/flare-models.md §3.3d)
+            remote_path: None,
         })
         .collect();
     // Shared enqueue transaction, hf-cache flavor: queue accounted
@@ -672,6 +676,7 @@ mod purge_tests {
             status: crate::models::DownloadStatus::Incomplete,
             expected_sha256: None,
             revision: None,
+            remote_path: None,
         }
     }
 

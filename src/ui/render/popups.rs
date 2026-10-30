@@ -1,7 +1,11 @@
 //! Modal popups other than the options dialog: resume list, search input,
-//! download-path chooser, auth-error steps (plan W3.4b split out of
-//! `render.rs`; bodies byte-identical).
+//! download-path chooser, auth-error steps, FLARE revision picker
+//! (plan `plans/flare-models.md` §3.5) — split out of `render.rs` per
+//! W3.4b; bodies byte-identical unless noted.
 
+use crate::fmt::size_full;
+use crate::gpu::FlarePlatform;
+use crate::models::{FlareRevisionChoice, RefKind};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -321,4 +325,141 @@ pub fn render_auth_error_popup(frame: &mut Frame, model_url: &str, has_token: bo
         .wrap(Wrap { trim: false });
 
     frame.render_widget(message, message_area);
+}
+
+/// FLARE revision-picker popup (plans/flare-models.md §3.5): one row per
+/// payload revision — star when the session-detected platform matches the
+/// row's arch token, revision + aliases, kind badge, short commit, size in
+/// `fmt.rs` FULL form — with the cursor row highlighted and the
+/// ↑/↓ · Enter · Esc contract at the bottom.
+pub fn render_flare_revision_popup(
+    frame: &mut Frame,
+    model_id: &str,
+    choices: &[FlareRevisionChoice],
+    cursor: usize,
+    platform: Option<&FlarePlatform>,
+) {
+    // Up to 8 rows on screen; one more line when the list is cut.
+    let visible = choices.len().min(8) as u16;
+    let overflow = u16::from(choices.len() > 8);
+    let popup_area = centered_rect(72, 5 + visible + overflow, frame.area());
+
+    popup_shell(
+        frame,
+        popup_area,
+        "Download FLARE Revision",
+        Style::default().fg(Color::Yellow).bg(Color::Black),
+    );
+
+    // The popup's model binding, so the user sees whose revisions these are.
+    let model_area = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(4),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(format!("Model: {model_id}")).style(Style::default().fg(Color::Cyan)),
+        model_area,
+    );
+
+    // Render a window that FOLLOWS the cursor (impl-gate fix: the old
+    // `.take(8)` froze the list while the cursor kept advancing — Enter
+    // could download an invisible selection). Rows are positioned by
+    // WINDOW-RELATIVE index (impl-gate r2 fix: the old absolute-index
+    // y offset shifted every row down by `visible_from`, so the tail
+    // row landed ON the overflow note line and was clobbered).
+    let visible_from = cursor.saturating_sub(7);
+    let visible_to = (visible_from + 8).min(choices.len());
+    for (win, choice) in choices[visible_from..visible_to].iter().enumerate() {
+        let idx = win + visible_from;
+        let selected = idx == cursor;
+        let star = match platform {
+            Some(platform)
+                if crate::api::revision_matches_platform(
+                    &choice.revision,
+                    choice.kind,
+                    choice.arch.as_deref(),
+                    platform,
+                ) =>
+            {
+                "★ "
+            }
+            _ => "",
+        };
+        let aliases = if choice.aliases.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", choice.aliases.join(", "))
+        };
+        let kind = match choice.kind {
+            RefKind::Branch => "branch",
+            RefKind::Tag => "tag",
+        };
+        let row = Line::from(vec![
+            Span::raw(if selected { ">> " } else { "   " }),
+            Span::raw(star.to_string()),
+            Span::styled(
+                choice.revision.clone(),
+                if selected {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::styled(aliases, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("[{kind}]"), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(
+                    " @{}",
+                    &choice.target_commit[..choice.target_commit.len().min(8)]
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("  {}", size_full(choice.size)),
+                Style::default().fg(Color::Green),
+            ),
+        ]);
+        let row_area = Rect {
+            x: popup_area.x + 2,
+            y: popup_area.y + 3 + win as u16,
+            width: popup_area.width.saturating_sub(4),
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(row), row_area);
+    }
+
+    // The overflow note sits BELOW the 8 rendered rows (rows occupy
+    // popup y+3..y+10, the note y+11) — never overlapping a row.
+    if choices.len() > 8 {
+        let more_area = Rect {
+            x: popup_area.x + 2,
+            y: popup_area.y + 3 + visible,
+            width: popup_area.width.saturating_sub(4),
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(format!("  ... and {} more", choices.len() - 8))
+                .style(Style::default().fg(Color::DarkGray)),
+            more_area,
+        );
+    }
+
+    let instructions_area = Rect {
+        x: popup_area.x + 2,
+        y: popup_area.y + popup_area.height.saturating_sub(2),
+        width: popup_area.width.saturating_sub(4),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new("↑/↓: select  |  Enter: download (commit-pinned)  |  Esc: cancel")
+            .style(Style::default().fg(Color::DarkGray)),
+        instructions_area,
+    );
 }

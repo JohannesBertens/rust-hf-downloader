@@ -43,6 +43,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 expected_sha256,
                 hf_token,
                 total_size,
+                remote_path,
             } = download;
 
             // Decrement the totals and drop the mirrored queue item (first
@@ -61,6 +62,7 @@ pub fn spawn_manager(state: EngineState) -> ManagerHandle {
                 expected_sha256,
                 verification: state.verification.clone(),
                 hf_token,
+                remote_path,
             })
             .await;
 
@@ -124,6 +126,7 @@ mod tests {
                 expected_sha256: None,
                 hf_token: None,
                 total_size: 10,
+                remote_path: None,
             })
             .unwrap();
         }
@@ -163,6 +166,7 @@ mod tests {
             expected_sha256: Some("abc123".to_string()),
             hf_token: None,
             total_size: 42,
+            remote_path: None,
         })
         .unwrap();
         drop(tx);
@@ -175,5 +179,6 @@ mod tests {
         assert_eq!(received.expected_sha256.as_deref(), Some("abc123"));
         assert_eq!(received.hf_token, None);
         assert_eq!(received.total_size, 42);
+        assert_eq!(received.remote_path, None);
     }
 }

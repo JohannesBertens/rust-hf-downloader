@@ -14,6 +14,9 @@
 //! - `quant` — the pure GGUF heuristics: quantization-group classification,
 //!   mmproj handling, `looks_like_quant_type`, the multipart filename
 //!   grammars
+//! - `flare` — FLARE repo scanning (plan `plans/flare-models.md` §3.1):
+//!   pure detection/assembly/token core + the thin `/refs`, raw-file and
+//!   per-revision-tree fetchers
 //! - `tree` — `FileTreeNode` construction from a flat `RepoFile` listing
 //!
 //! URL building stays here: [`api_base`], [`DEFAULT_REVISION`] and
@@ -26,12 +29,27 @@
 //! names. Tests moved to the submodule that owns what they test.
 
 mod client;
+mod flare;
 mod quant;
 mod tree;
 
 pub use client::*;
+// Remaining wave-1 foundation re-exports (plans/flare-models.md §7): the
+// TUI viewer/download readers land with Lane D — drop this allow when they
+// do. The FLARE CLI (Lane C) already consumes select_package/
+// fetch_flare_info/fetch_repo_refs without it.
+#[allow(unused_imports)]
+pub use flare::{
+    assemble_flare_info_from, config_json_confirms_flare, fetch_flare_info, fetch_raw_file,
+    fetch_repo_refs, flare_disposition, parse_flare_config_facts, parse_flare_package_tokens,
+    parse_flare_publisher, revision_matches_platform, select_package, select_platform_revisions,
+    FlareDisposition, FlareScanError,
+};
 pub use quant::*;
 pub use tree::*;
+
+#[cfg(test)]
+mod flare_tests;
 
 /// Base URL for all HuggingFace Hub requests.
 ///

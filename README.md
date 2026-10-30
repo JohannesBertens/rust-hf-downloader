@@ -254,8 +254,8 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 |-----|--------|
 | `/` | Open search popup |
 | `o` | Toggle options screen (configure settings) |
-| `Tab` | Switch focus between Models and Quantizations lists |
-| `d` | Download selected quantization (Quantizations list), whole repo (Models list, non-GGUF repos), or the selected file/folder (Repository Files tree) |
+| `Tab` | Switch focus between Models and Quantizations lists (or Models ↔ FLARE Revisions in FLARE mode) |
+| `d` | Download selected quantization (Quantizations list), whole repo (Models list, non-GGUF repos), the selected file/folder (Repository Files tree), or open the FLARE revision picker (FLARE mode) |
 | `v` | Verify SHA256 hash of downloaded file (when Quantizations list is focused) |
 | `Enter` | Execute search (in search popup) / Show details (in browse mode) / Edit directory (in options) |
 | `Esc` | Close search popup / Cancel popup / Close options |
@@ -278,6 +278,7 @@ See: [rust-hf-downloader on crates.io](https://crates.io/crates/rust-hf-download
 
 Mouse-supported panels:
 - **Models list**: Click to focus, scroll to navigate models (loads details automatically)
+- **FLARE Revisions** (FLARE mode): Click to focus, scroll to move the revision cursor
 - **Quantization Groups**: Click to focus, scroll to navigate groups
 - **Quantization Files**: Click to focus, scroll to navigate files
 - **File Tree**: Click to focus, scroll to navigate tree
@@ -459,6 +460,38 @@ groups, and unrecognized GGUFs appear under `OTHER` instead of vanishing.
 `main` (issue #28) — the file listing and all resolve URLs follow the
 revision, and registry entries record it so the TUI resumes from the right
 source. Unknown revisions exit `64` (`not_found`).
+
+### FLARE runtime packages
+
+FLARE-engine repos keep their payloads on hardware-named branches
+(`gb202` = RTX PRO 6000 Blackwell, `gb10` = DGX Spark) while `main` holds
+metadata only. `--for flare` makes the downloader FLARE-aware:
+
+```sh
+rust-hf-downloader download JohannesBertens/Qwen3.8-Flash-Next-FLARE-1M-TP2 --for flare --gpus 0,1
+```
+
+- `--gpus` selects the branch by querying `nvidia-smi` PCI device IDs
+  against flare's platform table (unknown GPUs, missing `nvidia-smi`, or
+  mixed architectures refuse and ask for `--revision`). `--revision`
+  (branch, tag, or 40-hex SHA) always wins and pins the run to that
+  commit — every tree fetch, request URL, and registry entry uses the
+  commit, so a moved branch can never mix commits.
+- Files land under `<output>/<author>/<model>/<revision>/` (packed single
+  file or `model.safetensors` + `weights/**` + `deployments/**` — plus
+  `config.json`/`publisher.json` when present — for directory-form
+  packages), with `--include/--exclude` filtering within the package set
+  (a filtered run ends with a "partial package selection" note instead
+  of a serve command). LFS sha256s verify by default (`--no-verify`
+  disables).
+- Pre-flight guards reject size mismatches, a moved branch over an
+  existing directory, and any attempt to fetch a package already recorded
+  at a different destination — before a byte moves.
+- On success the human reporter prints the serve command — e.g.
+  `flare run '/home/you/models/JohannesBertens/Qwen3.8-Flash-Next-FLARE-1M-TP2/gb202/qwen3.8-flash-next-yarn4-tp2.safetensors' --gpus 0,1`
+  — flare's explicit-path mode serves the file directly, no flare cache
+  involved. `--json` and `--quiet` suppress the serve line (machine-clean
+  output).
 
 Rate limiting can be controlled per-run without editing the config file:
 `--rate-limit-mbps MBPS` enables the limiter at the given rate (e.g.
@@ -787,6 +820,7 @@ Key security features in v0.6.0:
 
 | Version | Date | Summary |
 |---------|------|---------|
+| [2.19.0] | 2026-10-30 | FLARE-aware scan (`/refs` + per-revision trees at pinned commits), `Flare` viewer mode + revision-picker popup with editable download path, `download --for flare --gpus` with nvidia-smi device-ID branch auto-selection + serve-path handoff (`flare run <path>`), revision-scoped destinations via remote_path split, commit pinning, existence-based pre-flight guards |
 | [2.18.0] | 2026-10-24 | Audit hardening: download-channel trust rule (https/file + loopback-http only) in installers + `update`, Link-header tree pagination (no more silent truncation of >1000-entry dirs), corrupt registry archived not wiped, manifest asset-name/hex-oid validation, installer rollback + PATH guard |
 | [2.17.0] | 2026-10-14 | Small-terminal HUD: strip borrows up to 2 rows from the bottom panels instead of vanishing (full strip at 31 rows), status-bar fallback notice below 30, 1-char speed/ETA clip fix; first fully-automated release incl. crates.io publish |
 | [2.16.0] | 2026-10-13 | Rate limiter: rate `0` = unlimited, not a panic (config-file path); crates.io publish automated as a release job (PR #53) |

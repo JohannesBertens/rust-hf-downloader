@@ -549,6 +549,7 @@ fn style_resume_popup_clear_and_background() {
         status: DownloadStatus::Incomplete,
         expected_sha256: None,
         revision: None,
+        remote_path: None,
     }];
     let mut fixture = UiFixture::with_selection();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();

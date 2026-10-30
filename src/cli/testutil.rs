@@ -15,12 +15,14 @@ use crate::models::ModelMetadata;
 
 use super::resolve::FileSpec;
 
-/// Minimal `FileSpec` fixture: filename + size, no sha256.
+/// Minimal `FileSpec` fixture: filename + size, no sha256, no remote path
+/// (the ordinary-download layout, plans/flare-models.md §3.3d).
 pub(super) fn file_spec(filename: &str, size: u64) -> FileSpec {
     FileSpec {
         filename: filename.to_string(),
         size_bytes: size,
         sha256: None,
+        remote_path: None,
     }
 }
 
